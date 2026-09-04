@@ -566,6 +566,9 @@ const ACTIVITY_ACTION_TONES = {
 
 function renderCompactList(container, values, emptyCopy, type) {
   clearChildren(container);
+  // 로딩 자리표시자는 내용을 가운데로 모은다. 실제 행을 그릴 때는 그 클래스를
+  // 떼어내야 행이 위에서부터 좌우로 펼쳐진다.
+  container.className = "compact-list";
   const items = Array.isArray(values) ? values.slice(0, 4) : [];
   if (items.length === 0) {
     const item = element("div", { className: "empty-state" });
@@ -2507,11 +2510,31 @@ async function resolveAppSession() {
   }
 }
 
+const AVATAR_VARIANTS = 6;
+
+function accountInitials(name) {
+  const text = String(name).trim();
+  const latin = text.match(/^[A-Za-z]/u);
+  return latin ? text.slice(0, 2).toUpperCase() : text.slice(0, 1);
+}
+
+// 같은 계정은 늘 같은 색을 받는다. 계정마다 색만 달라지고 무늬는 공유한다.
+function avatarVariant(name) {
+  const text = String(name);
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) % 100000;
+  }
+  return String(hash % AVATAR_VARIANTS);
+}
+
 function renderSession(session, offline) {
   const user = session.user || {};
   const name = displayName(user);
   $("#account-name").textContent = name;
-  $("#account-avatar").textContent = name.slice(0, 1);
+  const avatar = $("#account-avatar");
+  avatar.textContent = accountInitials(name);
+  avatar.dataset.avatar = avatarVariant(name);
   $("#account-role").textContent = offline
     ? "오프라인 작업"
     : userIsOwner()
