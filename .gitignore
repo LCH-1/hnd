@@ -1,7 +1,9 @@
 node_modules/
 coverage/
 dist/
-.superdesign/tmp/
+.impeccable/
+.superdesign/
+images/
 .DS_Store
 *.log
 
