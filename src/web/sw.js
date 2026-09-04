@@ -1,4 +1,4 @@
-const CACHE_NAME = "hnd-app-shell-v31";
+const CACHE_NAME = "hnd-app-shell-v32";
 const APP_DOCUMENT = "/app";
 const APP_ASSETS = Object.freeze([
   APP_DOCUMENT,

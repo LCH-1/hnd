@@ -577,6 +577,13 @@ async function loadOverview() {
   }
 }
 
+const WORK_STATUS_TONES = {
+  todo: "",
+  in_progress: "progress",
+  blocked: "attention",
+  done: "active",
+};
+
 const KNOWLEDGE_TYPE_LABELS = {
   note: "메모",
   decision: "결정",
@@ -1122,9 +1129,11 @@ async function loadWork(values = {}) {
       blocked: "차단됨",
       done: "완료",
     }[work.workflowStatus] || (workStatus(work) === "done" ? "완료" : "진행 중");
+    const workTone = WORK_STATUS_TONES[work.workflowStatus]
+      ?? (workStatus(work) === "done" ? "active" : "progress");
     card.append(
       element("span", {
-        className: `status-badge ${work.workflowStatus === "blocked" ? "attention" : workStatus(work) === "done" ? "revoked" : "active"}`,
+        className: `status-badge ${workTone}`.trim(),
         text: t(workflowLabel),
       }),
     );

@@ -5461,3 +5461,62 @@ td {
 .settings-list:empty {
   display: none;
 }
+
+/* --- 데이터가 찬 상태에서 드러난 것들 --- */
+
+/* 설정 마법사의 현재 단계가 잉크색 글씨를 코발트 위에 얹어 대비 3.26:1 이었다.
+   앱 navigation 의 현재 항목과 같은 문법으로 맞춘다. */
+.stepper li.is-current {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.stepper li.is-current > span {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.stepper li.is-current strong,
+.stepper li.is-current small {
+  color: var(--accent-ink);
+}
+
+/* 지식 카드만 액션이 본문 아래로 떨어지고 룰 카드는 오른쪽에 붙어 있었다.
+   둘 다 오른쪽 열로 통일한다. */
+.knowledge-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 14px;
+}
+
+.knowledge-card > *:not(.resource-actions) {
+  grid-column: 1;
+}
+
+.knowledge-card > .resource-actions {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+
+/* 본문이 1300px 한 줄로 늘어나면 읽기 어렵다. 읽기 폭을 제한한다. */
+.resource-card p,
+.knowledge-card p,
+.work-card p,
+.compact-item .knowledge-item-copy span {
+  max-width: 84ch;
+}
+
+/* 위의 .home-grid 2열 규칙이 미디어쿼리 밖에 있어 좁은 화면의 1열 규칙까지
+   덮어썼다. 접히는 지점을 다시 세운다. */
+@media (max-width: 840px) {
+  .home-grid,
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 좁은 화면에서 패널 제목 옆 링크가 두 줄로 쪼개졌다. */
+.panel-head a {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
