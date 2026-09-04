@@ -21,11 +21,21 @@ const ENVIRONMENT_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,62}[a-zA-Z0-9])?$/;
 const REPO_POLICY_PATTERN = /^repositories\/([0-9a-f-]{36})\/policy\.md$/i;
 const ENV_POLICY_PATTERN =
   /^repositories\/([0-9a-f-]{36})\/environments\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,63})\.md$/i;
+const GLOBAL_RULE_RECORD_PATTERN = /^rules\/([0-9a-f-]{36})\.json$/i;
+const REPO_RULE_RECORD_PATTERN =
+  /^repositories\/([0-9a-f-]{36})\/rules\/([0-9a-f-]{36})\.json$/i;
 const ACTIVE_WORK_PATTERN =
   /^repositories\/([0-9a-f-]{36})\/handoffs\/([0-9a-f-]{36})\.json$/i;
 const CLOSED_WORK_PATTERN =
   /^repositories\/([0-9a-f-]{36})\/archive\/([0-9a-f-]{36})\.json$/i;
 const KNOWLEDGE_PATTERN = /^knowledge\/([0-9a-f-]{36})\.json$/i;
+const KNOWLEDGE_TYPES = new Set([
+  "note", "decision", "solution", "failure", "caution", "command",
+  "architecture", "runbook",
+]);
+const KNOWLEDGE_STATES = new Set([
+  "verified", "review_needed", "contradicted", "retired", "superseded",
+]);
 const textEncoder = new TextEncoder();
 const strictTextDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -149,7 +159,8 @@ function assertAllowedPath(value) {
     value !== GLOBAL_POLICY_PATH &&
     value !== REPOSITORY_INDEX_PATH &&
     !value.startsWith("repositories/") &&
-    !value.startsWith("knowledge/")
+    !value.startsWith("knowledge/") &&
+    !value.startsWith("rules/")
   ) {
     throw new Error(`동기화 범위 밖의 파일이 있습니다: ${value}`);
   }
@@ -1508,7 +1519,9 @@ function mergeableJsonPath(path) {
   return (
     path === REPOSITORY_INDEX_PATH ||
     /^repositories\/[^/]+\/repository\.json$/.test(path) ||
-    KNOWLEDGE_PATTERN.test(path)
+    KNOWLEDGE_PATTERN.test(path) ||
+    GLOBAL_RULE_RECORD_PATTERN.test(path) ||
+    REPO_RULE_RECORD_PATTERN.test(path)
   );
 }
 
@@ -1667,7 +1680,94 @@ function ruleFromFile(snapshot, file) {
       content: textOf(file, "환경 룰"),
     };
   }
+  const globalRecord = GLOBAL_RULE_RECORD_PATTERN.exec(file.path);
+  const repoRecord = REPO_RULE_RECORD_PATTERN.exec(file.path);
+  if (globalRecord || repoRecord) {
+    const record = jsonOf(file, "이름 있는 룰");
+    const expectedId = globalRecord?.[1] || repoRecord?.[2];
+    const expectedRepo = repoRecord?.[1] || null;
+    if (
+      record.schemaVersion !== STATE_SCHEMA_VERSION ||
+      record.id !== expectedId ||
+      record.repoId !== expectedRepo ||
+      !["global", "repo", "env"].includes(record.scope) ||
+      !["draft", "active"].includes(record.status) ||
+      !["always", "manual"].includes(record.activation) ||
+      typeof record.title !== "string" ||
+      typeof record.content !== "string" ||
+      !Array.isArray(record.paths) ||
+      !Array.isArray(record.files)
+    ) throw new Error(`룰 파일의 내용과 경로가 맞지 않습니다: ${file.path}`);
+    const repository = expectedRepo ? resolveRepository(snapshot, expectedRepo) : null;
+    return {
+      ...record,
+      recordId: record.id,
+      id: file.path,
+      scope: record.scope === "global" ? "all" : record.scope,
+      repository: expectedRepo,
+      repo: expectedRepo,
+      repositoryName: repository?.name || null,
+      _record: true,
+      _path: file.path,
+    };
+  }
   return null;
+}
+
+function ruleRecord(snapshot, values, current = null) {
+  const now = new Date().toISOString();
+  const requested = values.scope || current?.scope || "repo";
+  const scope = requested === "all" ? "global" : requested;
+  if (!["global", "repo", "env"].includes(scope)) throw new Error("룰 범위를 선택해 주세요.");
+  const repository = scope === "global"
+    ? null
+    : resolveRepository(snapshot, values.repository || values.repo || current?.repoId);
+  const environment = scope === "env"
+    ? String(values.environment || current?.environment || "").trim()
+    : null;
+  if (scope === "env" && !ENVIRONMENT_PATTERN.test(environment))
+    throw new Error("환경 이름을 확인해 주세요.");
+  const status = values.status || current?.status || "active";
+  const activation = values.activation || current?.activation || "always";
+  if (!["draft", "active"].includes(status)) throw new Error("룰 상태를 확인해 주세요.");
+  if (!["always", "manual"].includes(activation)) throw new Error("룰 적용 방식을 확인해 주세요.");
+  return {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    id: current?.recordId || current?.id || crypto.randomUUID(),
+    title: requiredText(values.title, "룰 이름", { max: 200 }),
+    content: policyContent(values.content),
+    scope,
+    repoId: repository?.id || null,
+    environment,
+    status,
+    activation,
+    paths: lines(values.paths),
+    files: lines(values.files),
+    history: [
+      ...(current?.history || []),
+      {
+        at: now,
+        action: current ? "updated" : "created",
+        actor: "web",
+        before: current ? {
+          title: current.title,
+          content: current.content,
+          status: current.status,
+          activation: current.activation,
+          paths: current.paths,
+          files: current.files,
+        } : null,
+      },
+    ].slice(-50),
+    createdAt: current?.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+function ruleRecordPath(record) {
+  return record.scope === "global"
+    ? `rules/${record.id}.json`
+    : `repositories/${record.repoId}/rules/${record.id}.json`;
 }
 
 function workFromFile(file) {
@@ -1699,6 +1799,20 @@ function workFromFile(file) {
     next: (handoff.nextSteps || []).join("\n"),
     decision: (handoff.decisions || []).join("\n"),
     rejected: (handoff.failedApproaches || []).join("\n"),
+    priority: handoff.priority || "normal",
+    workflowStatus:
+      handoff.status === "closed" ? "done" : handoff.workflowStatus || "in_progress",
+    dependencies: handoff.dependencies || [],
+    parentId: handoff.parentId || null,
+    claimedBy: handoff.claimedBy || null,
+    claimExpiresAt: handoff.claimExpiresAt || null,
+    blockedReason: handoff.blockedReason || "",
+    unblockCriteria: handoff.unblockCriteria || "",
+    history: handoff.history || [],
+    stale:
+      handoff.status === "active" &&
+      Number.isFinite(Date.parse(handoff.staleAt)) &&
+      Date.parse(handoff.staleAt) <= Date.now(),
     status: handoff.status === "closed" ? "done" : "active",
     _rawStatus: handoff.status,
     _path: file.path,
@@ -1710,6 +1824,20 @@ function workRecord(values, current = null) {
   const staleHours = Number.isFinite(current?.staleHours)
     ? current.staleHours
     : DEFAULT_STALE_HOURS;
+  const priority = String(values.priority || current?.priority || "normal");
+  const workflowStatus = String(
+    values.workflowStatus || current?.workflowStatus || "in_progress",
+  );
+  if (!["urgent", "high", "normal", "low"].includes(priority))
+    throw new Error("작업 우선순위를 확인해 주세요.");
+  if (!["todo", "in_progress", "blocked", "done"].includes(workflowStatus))
+    throw new Error("작업 상태를 확인해 주세요.");
+  const dependencies = lines(values.dependencies ?? current?.dependencies ?? []);
+  if (!dependencies.every((id) => UUID_PATTERN.test(id)))
+    throw new Error("선행 작업 ID는 UUID 형식이어야 합니다.");
+  const parentId = String(values.parentId ?? current?.parentId ?? "").trim() || null;
+  if (parentId && !UUID_PATTERN.test(parentId))
+    throw new Error("상위 작업 ID는 UUID 형식이어야 합니다.");
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     id: current?.id || crypto.randomUUID(),
@@ -1723,6 +1851,18 @@ function workRecord(values, current = null) {
     currentState: requiredText(values.current || "", "현재 상태", {
       allowEmpty: true,
     }),
+    priority,
+    workflowStatus,
+    dependencies: [...new Set(dependencies)],
+    parentId,
+    claimedBy: String(values.claimedBy ?? current?.claimedBy ?? "").trim() || null,
+    claimExpiresAt: String(values.claimedBy ?? current?.claimedBy ?? "").trim()
+      ? current?.claimedBy === String(values.claimedBy ?? current?.claimedBy).trim()
+        ? current?.claimExpiresAt || addHours(now, 2)
+        : addHours(now, 2)
+      : null,
+    blockedReason: requiredText(values.blockedReason || "", "차단 원인", { allowEmpty: true, max: 4000 }),
+    unblockCriteria: requiredText(values.unblockCriteria || "", "해제 조건", { allowEmpty: true, max: 4000 }),
     decisions: lines(values.decision),
     failedApproaches: lines(values.rejected),
     changedFiles: current?.changedFiles || [],
@@ -1738,6 +1878,10 @@ function workRecord(values, current = null) {
     createdAt: current?.createdAt || now,
     updatedAt: now,
     closedAt: current?.closedAt || null,
+    history: [
+      ...(current?.history || []),
+      { at: now, action: current ? "updated" : "created", actor: "web", agent: null, sessionId: null, before: null },
+    ].slice(-50),
   };
 }
 
@@ -1748,6 +1892,9 @@ function knowledgeFromFile(snapshot, file) {
   const scope = entry.scope === undefined ? "global" : entry.scope;
   const repoId = entry.repoId ?? null;
   const environment = entry.environment ?? null;
+  const type = entry.type ?? "note";
+  const knowledgeState = entry.state ?? "verified";
+  const approval = entry.approval ?? "approved";
   if (
     entry.schemaVersion !== STATE_SCHEMA_VERSION ||
     entry.id !== match[1] ||
@@ -1755,6 +1902,9 @@ function knowledgeFromFile(snapshot, file) {
     typeof entry.body !== "string" ||
     !Array.isArray(entry.tags) ||
     !entry.tags.every((tag) => typeof tag === "string") ||
+    !KNOWLEDGE_TYPES.has(type) ||
+    !KNOWLEDGE_STATES.has(knowledgeState) ||
+    !["approved", "pending", "rejected"].includes(approval) ||
     !["global", "repo", "env"].includes(scope) ||
     (scope === "global" && (repoId !== null || environment !== null)) ||
     (scope === "repo" && (!UUID_PATTERN.test(repoId || "") || environment !== null)) ||
@@ -1773,6 +1923,14 @@ function knowledgeFromFile(snapshot, file) {
     repositoryName: repository?.name || null,
     environment,
     content: entry.body,
+    type,
+    state: knowledgeState,
+    pinned: entry.pinned === true,
+    sources: Array.isArray(entry.sources) ? entry.sources : [],
+    relationships: Array.isArray(entry.relationships) ? entry.relationships : [],
+    feedback: entry.feedback || { helpful: 0, wrong: 0, irrelevant: 0 },
+    approval,
+    history: Array.isArray(entry.history) ? entry.history : [],
     _path: file.path,
   };
 }
@@ -1825,6 +1983,44 @@ function knowledgeLocation(snapshot, values, current = null) {
 
 function knowledgeRecord(snapshot, values, current = null) {
   const now = new Date().toISOString();
+  const type = String(values.type || current?.type || "note");
+  const knowledgeState = String(values.state || current?.state || "verified");
+  if (!KNOWLEDGE_TYPES.has(type)) throw new Error("지식 유형을 확인해 주세요.");
+  if (!KNOWLEDGE_STATES.has(knowledgeState)) throw new Error("지식 상태를 확인해 주세요.");
+  const sourceRef = String(
+    values.sourceRef ?? current?.sources?.[0]?.ref ?? "",
+  ).trim();
+  const sourceCommit = String(
+    values.sourceCommit ?? current?.sources?.[0]?.commit ?? "",
+  ).trim();
+  const sources = sourceRef
+    ? [{
+        kind: /^https?:\/\//iu.test(sourceRef)
+          ? "url"
+          : current?.sources?.[0]?.kind === "url"
+            ? "file"
+            : current?.sources?.[0]?.kind || "file",
+        ref: sourceRef,
+        label: current?.sources?.[0]?.label || null,
+        hash: current?.sources?.[0]?.hash || null,
+        commit: sourceCommit || null,
+      }]
+    : (current?.sources || []);
+  const before = current ? {
+    title: current.title,
+    body: current.body,
+    tags: current.tags,
+    scope: current.scope,
+    repoId: current.repoId,
+    environment: current.environment,
+    type: current.type,
+    state: current.state,
+    pinned: current.pinned,
+    sources: current.sources,
+    relationships: current.relationships,
+    feedback: current.feedback,
+    approval: current.approval,
+  } : null;
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     id: current?.id || crypto.randomUUID(),
@@ -1834,6 +2030,27 @@ function knowledgeRecord(snapshot, values, current = null) {
       max: MAX_FILE_BYTES / 2,
     }),
     tags: normalizedTags(values.tags || []),
+    type,
+    state: knowledgeState,
+    pinned:
+      values.pinned === undefined
+        ? current?.pinned === true
+        : Boolean(values.pinned),
+    sources,
+    relationships: current?.relationships || [],
+    feedback: current?.feedback || { helpful: 0, wrong: 0, irrelevant: 0 },
+    approval: values.approval || current?.approval || "approved",
+    history: [
+      ...(current?.history || []),
+      {
+        at: now,
+        action: current ? "updated" : "created",
+        actor: "web",
+        deviceId: null,
+        agent: null,
+        before,
+      },
+    ].slice(-20),
     ...knowledgeLocation(snapshot, values, current),
     createdAt: current?.createdAt || now,
     updatedAt: now,
@@ -2083,6 +2300,19 @@ export class SnapshotDataStore {
       knowledge,
       environments,
       activeWork: work.filter((item) => item.status === "active"),
+      briefing: {
+        nextWork: work
+          .filter((item) => item.status === "active" && item.ready)
+          .sort((left, right) => {
+            const order = { urgent: 0, high: 1, normal: 2, low: 3 };
+            return (order[left.priority] ?? 2) - (order[right.priority] ?? 2);
+          })[0] || null,
+        pinnedKnowledge: knowledge.filter((item) => item.pinned && item.approval === "approved").slice(0, 5),
+        attentionCount:
+          work.filter((item) => item.workflowStatus === "blocked" || item.stale).length +
+          knowledge.filter((item) => item.approval === "pending" || item.state === "review_needed").length +
+          rules.filter((item) => item.status === "draft").length,
+      },
     };
   }
 
@@ -2624,7 +2854,7 @@ export class SnapshotDataStore {
         !query
           ? true
           : normalizedSearch(
-              `${rule.content} ${rule.repositoryName || ""} ${rule.environment || ""}`,
+              `${rule.title || ""} ${rule.content} ${rule.repositoryName || ""} ${rule.environment || ""}`,
             ).includes(query),
       )
       .sort((left, right) => {
@@ -2638,6 +2868,16 @@ export class SnapshotDataStore {
 
   async createRule(values) {
     await this.load();
+    if (String(values.title || "").trim()) {
+      return this._commit(async (snapshot) => {
+        const record = ruleRecord(snapshot, values);
+        const target = ruleRecordPath(record);
+        return {
+          snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
+          value: { ...record, recordId: record.id, id: target, _record: true, _path: target },
+        };
+      });
+    }
     const path = rulePath(this.snapshot, values);
     const content = policyContent(values.content);
     if (path === "pc") {
@@ -2671,6 +2911,20 @@ export class SnapshotDataStore {
 
   async updateRule(id, values) {
     await this.load();
+    if (GLOBAL_RULE_RECORD_PATTERN.test(id) || REPO_RULE_RECORD_PATTERN.test(id)) {
+      return this._commit(async (snapshot) => {
+        const file = fileAt(snapshot, id);
+        if (!file) throw new Error("수정할 룰이 없습니다.");
+        const current = ruleFromFile(snapshot, file);
+        const record = ruleRecord(snapshot, values, current);
+        const target = ruleRecordPath(record);
+        if (target !== id) throw new Error("수정 중에는 룰 범위를 바꿀 수 없습니다.");
+        return {
+          snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
+          value: { ...record, recordId: record.id, id: target, _record: true, _path: target },
+        };
+      });
+    }
     const targetPath = rulePath(this.snapshot, values);
     if (targetPath !== id) {
       throw new Error(
@@ -2721,9 +2975,13 @@ export class SnapshotDataStore {
   async work({ status = "active", q, repository } = {}) {
     await this.load();
     const query = normalizedSearch(q);
-    return this.snapshot.files
+    const records = this.snapshot.files
       .map(workFromFile)
-      .filter(Boolean)
+      .filter(Boolean);
+    const completed = new Set(
+      records.filter((item) => item.status === "done").map((item) => item.id),
+    );
+    return records
       .filter((item) => status === "all" || item.status === status)
       .filter((item) =>
         !repository ? true : item.repoId === repository,
@@ -2735,6 +2993,13 @@ export class SnapshotDataStore {
               `${item.name} ${item.goal} ${item.current} ${item.next} ${item.decision} ${item.rejected}`,
             ).includes(query),
       )
+      .map((item) => ({
+        ...item,
+        ready:
+          item.status !== "done" &&
+          item.workflowStatus !== "blocked" &&
+          item.dependencies.every((id) => completed.has(id)),
+      }))
       .sort(
         (left, right) =>
           right.updatedAt.localeCompare(left.updatedAt) ||
@@ -2783,8 +3048,13 @@ export class SnapshotDataStore {
       const record = {
         ...current,
         status: "closed",
+        workflowStatus: "done",
         updatedAt: now,
         closedAt: now,
+        history: [
+          ...(current.history || []),
+          { at: now, action: "closed", actor: "web", agent: null, sessionId: null, before: null },
+        ].slice(-50),
       };
       delete record.name;
       delete record.goal;
@@ -2793,6 +3063,7 @@ export class SnapshotDataStore {
       delete record.decision;
       delete record.rejected;
       delete record.repository;
+      delete record.ready;
       delete record._rawStatus;
       delete record._path;
       const path = `repositories/${record.repoId}/archive/${record.id}.json`;
@@ -2802,7 +3073,9 @@ export class SnapshotDataStore {
     });
   }
 
-  async knowledge({ q, scope, repository, repoId, environment } = {}) {
+  async knowledge({
+    q, scope, repository, repoId, environment, approval, type, state,
+  } = {}) {
     await this.load();
     const terms = normalizedSearch(q).split(/\s+/u).filter(Boolean);
     const requestedScope = scope === "all-scopes" || !scope
@@ -2816,6 +3089,9 @@ export class SnapshotDataStore {
       .filter((entry) => requestedScope === null || entry.scope === requestedScope)
       .filter((entry) => !requestedRepository || entry.repoId === requestedRepository)
       .filter((entry) => !requestedEnvironment || entry.environment === requestedEnvironment)
+      .filter((entry) => !approval || approval === "all" || entry.approval === approval)
+      .filter((entry) => !type || entry.type === type)
+      .filter((entry) => !state || entry.state === state)
       .map((entry) => {
         if (terms.length === 0) return { ...entry, score: 0 };
         const title = normalizedSearch(entry.title);
@@ -2883,12 +3159,149 @@ export class SnapshotDataStore {
     });
   }
 
+  async reviewKnowledge(id, action) {
+    if (!["approve", "reject"].includes(action))
+      throw new Error("검토 동작을 확인해 주세요.");
+    return this._commit(async (snapshot) => {
+      const current = findKnowledge(snapshot, id);
+      const now = new Date().toISOString();
+      const record = {
+        ...current,
+        approval: action === "approve" ? "approved" : "rejected",
+        state: action === "approve" ? "verified" : "retired",
+        updatedAt: now,
+        history: [
+          ...(current.history || []),
+          {
+            at: now,
+            action: action === "approve" ? "approved" : "rejected",
+            actor: "web",
+            deviceId: null,
+            agent: null,
+            before: null,
+          },
+        ].slice(-20),
+      };
+      for (const key of [
+        "content", "repository", "repositoryName", "_path",
+      ]) delete record[key];
+      const target = `knowledge/${record.id}.json`;
+      return {
+        snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
+        value: { ...record, content: record.body, _path: target },
+      };
+    });
+  }
+
+  async feedbackKnowledge(id, kind) {
+    if (!["helpful", "wrong", "irrelevant"].includes(kind))
+      throw new Error("평가 값을 확인해 주세요.");
+    return this._commit(async (snapshot) => {
+      const current = findKnowledge(snapshot, id);
+      const now = new Date().toISOString();
+      const feedback = {
+        helpful: 0,
+        wrong: 0,
+        irrelevant: 0,
+        ...(current.feedback || {}),
+      };
+      feedback[kind] += 1;
+      const record = {
+        ...current,
+        feedback,
+        updatedAt: now,
+        history: [
+          ...(current.history || []),
+          {
+            at: now,
+            action: `feedback:${kind}`,
+            actor: "web",
+            deviceId: null,
+            agent: null,
+            before: null,
+          },
+        ].slice(-20),
+      };
+      for (const key of [
+        "content", "repository", "repositoryName", "_path",
+      ]) delete record[key];
+      const target = `knowledge/${record.id}.json`;
+      return {
+        snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
+        value: { ...record, content: record.body, _path: target },
+      };
+    });
+  }
+
   async recentWork(limit = 4) {
     return (await this.work({ status: "active" })).slice(0, limit);
   }
 
   async recentKnowledge(limit = 4) {
-    return (await this.knowledge()).slice(0, limit);
+    return (await this.knowledge({ approval: "approved" })).slice(0, limit);
+  }
+
+  async activity(limit = 20) {
+    const [work, knowledge, rules] = await Promise.all([
+      this.work({ status: "all" }),
+      this.knowledge(),
+      this.rules(),
+    ]);
+    const values = [];
+    for (const item of work) {
+      const history = item.history?.length ? item.history : [{ at: item.updatedAt, action: "updated" }];
+      for (const entry of history) values.push({
+        kind: "work",
+        title: item.name,
+        action: entry.action,
+        at: entry.at,
+        repository: item.repoId,
+      });
+    }
+    for (const item of knowledge) {
+      const history = item.history?.length ? item.history : [{ at: item.updatedAt, action: "updated" }];
+      for (const entry of history) values.push({
+        kind: "knowledge",
+        title: item.title,
+        action: entry.action,
+        at: entry.at,
+        repository: item.repoId,
+      });
+    }
+    for (const item of rules) {
+      if (item.scope === "pc") continue;
+      const history = item.history?.length ? item.history : [{ at: item.updatedAt, action: "updated" }];
+      for (const entry of history) values.push({
+        kind: "rule",
+        title: item.title || `${item.scope} rule`,
+        action: entry.action,
+        at: entry.at,
+        repository: item.repoId,
+      });
+    }
+    return values
+      .filter((item) => Number.isFinite(Date.parse(item.at)))
+      .sort((left, right) => right.at.localeCompare(left.at))
+      .slice(0, Math.max(1, Math.min(Number(limit) || 20, 200)));
+  }
+
+  async diagnostics() {
+    const [work, knowledge, rules] = await Promise.all([
+      this.work({ status: "all" }),
+      this.knowledge(),
+      this.rules(),
+    ]);
+    return {
+      blockedWork: work.filter((item) => item.workflowStatus === "blocked").length,
+      staleWork: work.filter((item) => item.stale).length,
+      pendingKnowledge: knowledge.filter((item) => item.approval === "pending").length,
+      reviewKnowledge: knowledge.filter((item) => item.state === "review_needed").length,
+      knowledgeAttention: knowledge.filter((item) => (
+        item.approval === "pending" || item.state === "review_needed"
+      )).length,
+      draftRules: rules.filter((item) => item.status === "draft").length,
+      largeRules: rules.filter((item) => new TextEncoder().encode(item.content || "").byteLength > 24 * 1024).length,
+    };
   }
 
   snapshotBytes() {

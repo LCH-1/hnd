@@ -496,12 +496,21 @@
                   ><small>현재 암호문 크기</small>
                 </article>
               </div>
+              <section class="attention-ledger" aria-labelledby="attention-title">
+                <div>
+                  <h3 id="attention-title">확인할 항목</h3>
+                  <p>차단된 작업, 검토할 지식, 초안 룰을 한곳에서 확인합니다.</p>
+                </div>
+                <div id="home-diagnostics" class="attention-values" aria-live="polite">
+                  <span>확인 중</span>
+                </div>
+              </section>
               <div class="home-grid">
                 <article class="panel">
                   <div class="panel-head">
                     <div>
-                      <h3>현재 활동</h3>
-                      <p>최근 변경 순</p>
+                      <h3>활동 기록</h3>
+                      <p>룰·작업·지식 변경 순</p>
                     </div>
                     <a href="#work">전체 보기</a>
                   </div>
@@ -650,6 +659,13 @@
                   <div><span>진행 중 작업</span><strong id="project-work-count">0</strong></div>
                   <div><span>프로젝트 지식</span><strong id="project-knowledge-count">0</strong></div>
                 </div>
+                <section class="project-briefing" aria-labelledby="project-briefing-title">
+                  <div>
+                    <h3 id="project-briefing-title">지금 알아야 할 것</h3>
+                    <p id="project-briefing-copy">프로젝트의 다음 작업과 검토 항목을 정리합니다.</p>
+                  </div>
+                  <div id="project-briefing-items" class="briefing-items" aria-live="polite"></div>
+                </section>
 
                 <div class="project-detail-grid">
                   <section class="project-section" aria-labelledby="project-rules-title">
@@ -881,6 +897,14 @@
               </div>
               <form id="knowledge-filter" class="filter-bar">
                 <label class="filter-select"
+                  ><span class="sr-only">검토 상태</span
+                  ><select name="approval">
+                    <option value="all">전체 지식</option>
+                    <option value="pending">검토함</option>
+                    <option value="approved">저장됨</option>
+                  </select></label
+                >
+                <label class="filter-select"
                   ><span class="sr-only">지식 범위</span
                   ><select name="scope">
                     <option value="all-scopes">모든 범위</option>
@@ -932,11 +956,8 @@
                 </button>
               </form>
               <div class="inline-note inline-note-tight">
-                <strong>자동으로 대화를 수집하지 않습니다</strong
-                ><span
-                  >오래 남길 가치가 있는 내용만 사용자가 명시적으로
-                  저장합니다.</span
-                >
+                <strong>검토한 지식만 에이전트에 전달합니다</strong
+                ><span>세션 제안은 선택 기능이며 승인하기 전까지 자동 주입되지 않습니다.</span>
               </div>
               <div
                 id="knowledge-error"
@@ -1306,6 +1327,9 @@
           <h2>룰 추가</h2>
           <p>범위가 좁은 룰일수록 뒤에 적용됩니다.</p>
         </div>
+        <label>룰 이름<input name="title" type="text" maxlength="200" placeholder="예: SQL 마이그레이션 검토" />
+          <small class="field-help">이름을 붙이면 같은 범위에 여러 룰을 관리할 수 있습니다.</small>
+        </label>
         <label
           >범위<select
             name="scope"
@@ -1345,6 +1369,24 @@
           <option value="staging"></option>
           <option value="prod"></option>
         </datalist>
+        <div class="field-grid">
+          <label>상태<select name="status">
+            <option value="active">사용 중</option>
+            <option value="draft">초안</option>
+          </select></label>
+          <label>적용<select name="activation">
+            <option value="always">자동</option>
+            <option value="manual">필요할 때 수동</option>
+          </select></label>
+        </div>
+        <details class="form-details">
+          <summary>경로와 파일 형식 조건</summary>
+          <div class="field-grid">
+            <label>경로 패턴<textarea name="paths" rows="2" placeholder="frontend/**&#10;backend/**"></textarea></label>
+            <label>파일 패턴<textarea name="files" rows="2" placeholder="**/*.tsx&#10;**/*.sql"></textarea></label>
+          </div>
+          <small class="field-help">한 줄에 하나씩 입력합니다. 비워 두면 선택한 범위 전체에 적용됩니다.</small>
+        </details>
         <label
           >룰 내용<textarea
             name="content"
@@ -1423,11 +1465,36 @@
           >저장소<select name="repository" required>
             <option value="">저장소 선택</option>
           </select></label
-        ><label>목표<textarea name="goal" rows="2" required></textarea></label>
+        ><div class="field-grid">
+          <label>우선순위<select name="priority">
+            <option value="urgent">긴급</option>
+            <option value="high">높음</option>
+            <option value="normal" selected>보통</option>
+            <option value="low">낮음</option>
+          </select></label>
+          <label>상태<select name="workflowStatus">
+            <option value="todo">할 일</option>
+            <option value="in_progress" selected>진행 중</option>
+            <option value="blocked">차단됨</option>
+          </select></label>
+        </div>
+        <label>목표<textarea name="goal" rows="2" required></textarea></label>
         <div class="field-grid">
           <label>현재 상태<textarea name="current" rows="4"></textarea></label
           ><label>다음 할 일<textarea name="next" rows="4"></textarea></label>
         </div>
+        <details class="form-details">
+          <summary>의존성, 담당, 차단 정보</summary>
+          <label>선행 작업 ID<textarea name="dependencies" rows="2" placeholder="한 줄에 하나씩 입력"></textarea></label>
+          <div class="field-grid">
+            <label>상위 작업 ID<input name="parentId" type="text" /></label>
+            <label>담당 세션 또는 에이전트<input name="claimedBy" type="text" maxlength="200" /></label>
+          </div>
+          <div class="field-grid">
+            <label>차단 원인<textarea name="blockedReason" rows="2"></textarea></label>
+            <label>해제 조건<textarea name="unblockCriteria" rows="2"></textarea></label>
+          </div>
+        </details>
         <div class="field-grid">
           <label
             >결정과 이유<textarea name="decision" rows="4"></textarea></label
@@ -1490,6 +1557,25 @@
               >선택한 프로젝트 안에서 같은 환경에만 연결됩니다.</small
             ></label>
         </div>
+        <div class="field-grid">
+          <label>유형<select name="type">
+            <option value="note">메모</option>
+            <option value="decision">결정</option>
+            <option value="solution">해결법</option>
+            <option value="failure">실패</option>
+            <option value="caution">주의사항</option>
+            <option value="command">명령</option>
+            <option value="architecture">설계</option>
+            <option value="runbook">런북</option>
+          </select></label>
+          <label>상태<select name="state">
+            <option value="verified">확인됨</option>
+            <option value="review_needed">검토 필요</option>
+            <option value="contradicted">모순됨</option>
+            <option value="superseded">대체됨</option>
+            <option value="retired">폐기됨</option>
+          </select></label>
+        </div>
         <label
           >제목<input
             name="title"
@@ -1504,6 +1590,14 @@
         ><label
           >본문<textarea name="content" rows="12" required></textarea>
         </label>
+        <details class="form-details">
+          <summary>출처와 주입 설정</summary>
+          <div class="field-grid">
+            <label>출처 파일 또는 링크<input name="sourceRef" type="text" maxlength="1000" /></label>
+            <label>확인 커밋<input name="sourceCommit" type="text" maxlength="128" /></label>
+          </div>
+          <label class="check-row"><input name="pinned" type="checkbox" />검색 결과와 관계없이 항상 포함</label>
+        </details>
         <div class="notice" role="alert" hidden></div>
         <div class="form-actions">
           <button

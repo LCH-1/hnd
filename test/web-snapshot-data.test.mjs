@@ -1023,3 +1023,80 @@ test('projects expose scoped data and web metadata changes synchronize through t
   assert.equal(remoteIndex.repositories[repositoryId].name, 'platform-api');
   assert.equal(remoteMirror.description, '인증과 수업 API');
 });
+
+test('web knowledge review, named rules, task readiness, diagnostics, and briefing stay syncable', async () => {
+  const repositoryId = '33333333-3333-4333-8333-333333333333';
+  const repository = {
+    schemaVersion: 1,
+    id: repositoryId,
+    name: 'knowledge-app',
+    remoteAliases: ['github.com/example/knowledge-app'],
+    rootCommits: ['abc123'],
+    createdAt: '2026-09-04T00:00:00.000Z',
+    updatedAt: '2026-09-04T00:00:00.000Z',
+  };
+  const initial = {
+    schemaVersion: 1,
+    files: [textFile('repositories.json', `${JSON.stringify({
+      schemaVersion: 1,
+      repositories: { [repositoryId]: repository },
+    })}\n`)],
+  };
+  const remote = immediateRemote(initial);
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  await store.load();
+
+  const rule = await store.createRule({
+    title: 'SQL boundary',
+    scope: 'repo',
+    repository: repositoryId,
+    content: 'Run migration checks.',
+    status: 'draft',
+    activation: 'always',
+    paths: 'database/**',
+    files: '**/*.sql',
+  });
+  assert.equal(rule._record, true);
+  assert.equal((await store.rules({ q: 'SQL boundary' }))[0].status, 'draft');
+
+  const work = await store.createWork({
+    repository: repositoryId,
+    name: 'Document recovery',
+    goal: 'Write a recovery runbook',
+    current: 'Ready to begin',
+    priority: 'high',
+    workflowStatus: 'in_progress',
+    claimedBy: 'codex-session',
+  });
+  assert.equal(work.claimedBy, 'codex-session');
+  assert.ok(Number.isFinite(Date.parse(work.claimExpiresAt)));
+
+  const suggested = await store.createKnowledge({
+    title: 'Restore order',
+    content: 'Restore the database before the encrypted blobs.',
+    tags: ['recovery'],
+    scope: 'repo',
+    repository: repositoryId,
+    type: 'runbook',
+    state: 'review_needed',
+    approval: 'pending',
+    pinned: true,
+    sourceRef: 'https://example.invalid/runbook',
+  });
+  assert.equal(suggested.sources[0].kind, 'url');
+  assert.equal((await store.recentKnowledge()).length, 0);
+
+  let diagnostics = await store.diagnostics();
+  assert.equal(diagnostics.draftRules, 1);
+  assert.equal(diagnostics.knowledgeAttention, 1);
+  await store.reviewKnowledge(suggested.id, 'approve');
+  await store.feedbackKnowledge(suggested.id, 'helpful');
+  assert.equal((await store.recentKnowledge())[0].feedback.helpful, 1);
+
+  const project = await store.project(repositoryId);
+  assert.equal(project.briefing.nextWork.id, work.id);
+  assert.equal(project.briefing.pinnedKnowledge[0].id, suggested.id);
+  assert.ok((await store.activity()).some((item) => item.action === 'approved'));
+  diagnostics = await store.diagnostics();
+  assert.equal(diagnostics.knowledgeAttention, 0);
+});

@@ -176,6 +176,7 @@ function createdAt(item) {
     item?.updated_at ||
     item?.createdAt ||
     item?.created_at ||
+    item?.at ||
     null
   );
 }
@@ -473,9 +474,10 @@ async function loadOverview() {
         revisions: listFrom(revisions, "revisions"),
       };
     }
-    const [recentWork, recentKnowledge] = await Promise.all([
-      state.dataStore.recentWork(4),
+    const [recentActivity, recentKnowledge, diagnostics] = await Promise.all([
+      state.dataStore.activity(4),
       state.dataStore.recentKnowledge(4),
+      state.dataStore.diagnostics(),
     ]);
     const devices = Array.isArray(overview.devices) ? overview.devices : [];
     const revisions = Array.isArray(overview.revisions)
@@ -507,9 +509,9 @@ async function loadOverview() {
     $("#metric-storage").textContent = formatBytes(bytes);
     renderCompactList(
       $("#home-work-list"),
-      recentWork,
-      "진행 중인 작업이 없습니다.",
-      "work",
+      recentActivity,
+      "아직 변경 기록이 없습니다.",
+      "activity",
     );
     renderCompactList(
       $("#home-knowledge-list"),
@@ -517,6 +519,7 @@ async function loadOverview() {
       "저장한 지식이 없습니다.",
       "knowledge",
     );
+    renderDiagnostics(diagnostics);
     updateSyncChip(overview);
     const sync = state.dataStore.syncStatus();
     if (sync.conflict) {
@@ -545,17 +548,19 @@ function renderCompactList(container, values, emptyCopy, type) {
   }
   for (const value of items) {
     const item = element("div", {
-      className: `compact-item${type === "work" ? " activity-item" : ""}`,
+      className: `compact-item${["work", "activity"].includes(type) ? " activity-item" : ""}`,
     });
-    if (type === "work") {
+    if (["work", "activity"].includes(type)) {
       const timestamp = createdAt(value);
       const copy = element("div", { className: "activity-copy" });
       copy.append(
         element("strong", {
-          text: value.name || value.goal || "이름 없는 작업",
+          text: value.title || value.name || value.goal || "이름 없는 기록",
         }),
         element("span", {
-          text: truncate(value.next || value.current || value.goal, 90),
+          text: type === "activity"
+            ? t({ created: "추가", updated: "수정", closed: "완료", approved: "승인", rejected: "거절" }[value.action] || value.action)
+            : truncate(value.next || value.current || value.goal, 90),
         }),
       );
       item.append(
@@ -567,7 +572,9 @@ function renderCompactList(container, values, emptyCopy, type) {
         copy,
         element("span", {
           className: "status-badge active activity-status",
-          text: "진행 중",
+          text: type === "activity"
+            ? t({ work: "작업", knowledge: "지식", rule: "룰" }[value.kind] || "기록")
+            : t("진행 중"),
         }),
       );
     } else {
@@ -577,6 +584,27 @@ function renderCompactList(container, values, emptyCopy, type) {
       );
     }
     container.append(item);
+  }
+}
+
+function renderDiagnostics(value) {
+  const container = $("#home-diagnostics");
+  clearChildren(container);
+  const items = [
+    ["차단 작업", value.blockedWork, "#work"],
+    ["지식 검토", value.knowledgeAttention ?? value.pendingKnowledge + value.reviewKnowledge, "#knowledge"],
+    ["초안 룰", value.draftRules, "#rules"],
+    ["큰 룰", value.largeRules, "#rules"],
+  ];
+  const attention = items.filter(([, count]) => count > 0);
+  if (attention.length === 0) {
+    container.append(element("span", { className: "status-ok", text: t("확인할 항목 없음") }));
+    return;
+  }
+  for (const [label, count, href] of attention) {
+    const link = element("a", { text: `${t(label)} ${count}` });
+    link.href = href;
+    container.append(link);
   }
 }
 
@@ -640,9 +668,9 @@ function renderProjectRules(project) {
     const body = element("div");
     body.append(
       element("strong", {
-        text: rule.scope === "env"
+        text: rule.title || (rule.scope === "env"
           ? `${rule.environment} ${t("환경")}`
-          : "프로젝트 전체",
+          : t("프로젝트 전체")),
       }),
       element("p", { text: truncate(rule.content, 150) }),
     );
@@ -735,6 +763,41 @@ function renderProjectKnowledge(project) {
   }
 }
 
+function renderProjectBriefing(project) {
+  const container = $("#project-briefing-items");
+  clearChildren(container);
+  const next = project.briefing?.nextWork;
+  const pinned = project.briefing?.pinnedKnowledge || [];
+  if (next) {
+    const item = element("div", { className: "briefing-item" });
+    item.append(
+      element("span", { text: t("다음 작업") }),
+      element("strong", { text: next.name || "이름 없는 작업" }),
+      element("p", { text: truncate(next.current || next.goal, 140) }),
+    );
+    container.append(item);
+  }
+  for (const knowledge of pinned.slice(0, 2)) {
+    const item = element("div", { className: "briefing-item" });
+    item.append(
+      element("span", { text: t("고정 지식") }),
+      element("strong", { text: knowledge.title }),
+      element("p", { text: truncate(knowledge.content, 140) }),
+    );
+    container.append(item);
+  }
+  if (!next && pinned.length === 0) {
+    container.append(element("p", {
+      className: "project-data-empty",
+      text: t("진행 작업이나 고정 지식이 생기면 이곳에 요약됩니다."),
+    }));
+  }
+  const attention = project.briefing?.attentionCount || 0;
+  $("#project-briefing-copy").textContent = attention > 0
+    ? `${t("바로 확인할 항목")} ${attention}`
+    : t("현재 차단되거나 검토가 필요한 항목이 없습니다.");
+}
+
 async function renderProjectDetail(id) {
   setHidden($("#projects-index"), true);
   setHidden($("#project-detail"), false);
@@ -755,6 +818,7 @@ async function renderProjectDetail(id) {
   renderProjectRules(project);
   renderProjectWork(project);
   renderProjectKnowledge(project);
+  renderProjectBriefing(project);
 }
 
 async function loadProjects(values = {}) {
@@ -883,11 +947,23 @@ async function loadRules(values = {}) {
           ]
             .filter(Boolean)
             .join(" · ");
-    content.append(
-      badge,
-      element("h3", { text: context || `${ruleScopeLabel(rule.scope)} 룰` }),
-      element("p", { text: truncate(rule.content || rule.text, 500) }),
-    );
+    const ruleTitle = rule.title || context || `${ruleScopeLabel(rule.scope)} 룰`;
+    const ruleContext = [
+      context,
+      rule._record
+        ? rule.status === "draft"
+          ? t("초안")
+          : rule.activation === "manual"
+            ? t("수동")
+            : t("자동")
+        : null,
+      ...(rule.paths || []),
+      ...(rule.files || []),
+    ].filter(Boolean).join(" · ");
+    content.append(badge, element("h3", { text: ruleTitle }));
+    if (ruleContext)
+      content.append(element("small", { className: "rule-context", text: ruleContext }));
+    content.append(element("p", { text: truncate(rule.content || rule.text, 500) }));
     const actions = element("div", { className: "resource-actions" });
     if (rule.scope !== "pc") {
       actions.append(
@@ -946,10 +1022,16 @@ async function loadWork(values = {}) {
   }
   for (const work of items) {
     const card = element("article", { className: "work-card" });
+    const workflowLabel = {
+      todo: "할 일",
+      in_progress: "진행 중",
+      blocked: "차단됨",
+      done: "완료",
+    }[work.workflowStatus] || (workStatus(work) === "done" ? "완료" : "진행 중");
     card.append(
       element("span", {
-        className: `status-badge ${workStatus(work) === "done" ? "revoked" : "active"}`,
-        text: workStatus(work) === "done" ? "완료" : "진행 중",
+        className: `status-badge ${work.workflowStatus === "blocked" ? "attention" : workStatus(work) === "done" ? "revoked" : "active"}`,
+        text: t(workflowLabel),
       }),
     );
     card.append(
@@ -961,7 +1043,10 @@ async function loadWork(values = {}) {
       }),
     );
     const meta = element("div", { className: "card-meta" });
-    meta.append(element("span", { text: relativeTime(createdAt(work)) }));
+    const priority = { urgent: "긴급", high: "높음", normal: "보통", low: "낮음" }[work.priority] || "보통";
+    meta.append(element("span", {
+      text: `${t(priority)} · ${t(work.ready ? "시작 가능" : work.workflowStatus === "blocked" ? "차단됨" : "선행 작업 대기")} · ${relativeTime(createdAt(work))}`,
+    }));
     const actions = element("div", { className: "resource-actions" });
     actions.append(
       element("button", {
@@ -1019,6 +1104,21 @@ async function loadKnowledge(values = {}) {
         ? `${t("프로젝트")} · ${note.repositoryName || t("프로젝트")}`
         : t("공통");
     tags.append(element("span", { className: "tag tag-scope", text: scope }));
+    const typeLabel = {
+      note: "메모",
+      decision: "결정",
+      solution: "해결법",
+      failure: "실패",
+      caution: "주의사항",
+      command: "명령",
+      architecture: "설계",
+      runbook: "런북",
+    }[note.type] || "메모";
+    tags.append(element("span", { className: "tag", text: t(typeLabel) }));
+    if (note.pinned)
+      tags.append(element("span", { className: "tag tag-pinned", text: t("고정") }));
+    if (note.approval === "pending")
+      tags.append(element("span", { className: "tag tag-review", text: t("검토 필요") }));
     const values = Array.isArray(note.tags)
       ? note.tags
       : stringValue(note.tags)
@@ -1032,27 +1132,49 @@ async function loadKnowledge(values = {}) {
       element("h3", { text: note.title || "제목 없는 지식" }),
       element("p", { text: truncate(note.content || note.body, 280) }),
     );
+    if (note.sources?.length) {
+      card.append(element("small", {
+        className: "knowledge-source",
+        text: `${t("출처")} · ${note.sources[0].label || note.sources[0].ref}${note.sources[0].commit ? ` @ ${note.sources[0].commit}` : ""}`,
+      }));
+    }
     const meta = element("div", { className: "card-meta" });
     meta.append(element("span", { text: relativeTime(createdAt(note)) }));
     const actions = element("div", { className: "resource-actions" });
+    if (note.approval === "pending") {
+      actions.append(
+        element("button", {
+          className: "text-button",
+          text: t("승인"),
+          attrs: { type: "button", "data-action": "approve-knowledge", "data-id": note.id },
+        }),
+        element("button", {
+          className: "text-button danger",
+          text: t("거절"),
+          attrs: { type: "button", "data-action": "reject-knowledge", "data-id": note.id },
+        }),
+      );
+    }
     actions.append(
       element("button", {
         className: "text-button",
+        text: t("도움 됨"),
+        attrs: { type: "button", "data-action": "feedback-helpful", "data-id": note.id },
+      }),
+      element("button", {
+        className: "text-button",
+        text: t("틀림"),
+        attrs: { type: "button", "data-action": "feedback-wrong", "data-id": note.id },
+      }),
+      element("button", {
+        className: "text-button",
         text: "수정",
-        attrs: {
-          type: "button",
-          "data-action": "edit-knowledge",
-          "data-id": note.id,
-        },
+        attrs: { type: "button", "data-action": "edit-knowledge", "data-id": note.id },
       }),
       element("button", {
         className: "text-button danger",
         text: "삭제",
-        attrs: {
-          type: "button",
-          "data-action": "delete-knowledge",
-          "data-id": note.id,
-        },
+        attrs: { type: "button", "data-action": "delete-knowledge", "data-id": note.id },
       }),
     );
     meta.append(actions);
@@ -1629,11 +1751,19 @@ function fillForm(form, item) {
       environment: ["environment", "env"],
       displayName: ["displayName", "display_name"],
       next: ["next", "nextAction"],
+      sourceRef: ["sourceRef"],
+      sourceCommit: ["sourceCommit"],
     }[field.name] || [field.name];
-    const value = aliases
+    let value = aliases
       .map((key) => item[key])
       .find((candidate) => candidate !== undefined);
-    if (value !== undefined)
+    if (field.name === "sourceRef") value = item.sources?.[0]?.ref;
+    if (field.name === "sourceCommit") value = item.sources?.[0]?.commit;
+    if (["dependencies", "paths", "files"].includes(field.name) && Array.isArray(value)) {
+      value = value.join("\n");
+    }
+    if (field.type === "checkbox") field.checked = Boolean(value);
+    else if (value !== undefined)
       field.value = Array.isArray(value) ? value.join(", ") : value;
   }
 }
@@ -1743,6 +1873,7 @@ async function submitKnowledge(event) {
         .map((tag) => tag.trim())
         .filter(Boolean)
     : [];
+  values.pinned = form.elements.namedItem("pinned").checked;
   setBusy(button, true, "저장 중…");
   showNotice(notice);
   try {
@@ -1891,6 +2022,20 @@ async function handleAction(button) {
   if (action === "edit-knowledge") {
     state.returnAfterDialog = state.view === "projects" ? window.location.hash : null;
     openDialog("knowledge-dialog", state.knowledge.get(id));
+    return;
+  }
+  if (["approve-knowledge", "reject-knowledge"].includes(action)) {
+    await state.dataStore.reviewKnowledge(
+      id,
+      action === "approve-knowledge" ? "approve" : "reject",
+    );
+    await setView("knowledge", { force: true });
+    toast(localSaveMessage(action === "approve-knowledge" ? "지식을 승인했습니다." : "지식 후보를 거절했습니다."));
+    return;
+  }
+  if (["feedback-helpful", "feedback-wrong", "feedback-irrelevant"].includes(action)) {
+    await state.dataStore.feedbackKnowledge(id, action.replace("feedback-", ""));
+    toast(localSaveMessage("지식 평가를 반영했습니다."));
     return;
   }
   if (action === "back-projects") {
