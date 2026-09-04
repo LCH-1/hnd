@@ -12,7 +12,10 @@ import {
   disableOfflineWorkspace,
   enableOfflineWorkspace,
   finalizeBrowserWorkspaceReset,
+  listOfflineWorkspaceIds,
+  logoutAfterRevokingOfflineAccess,
   offlineWorkspaceEnabled,
+  prepareOfflineWorkspaceAccess,
   resetBrowserWorkspaceCache,
   SnapshotDataStore,
 } from "./snapshot-data.js";
@@ -85,6 +88,7 @@ const state = {
   dataStore: null,
   serverOwner: false,
   offlineBoot: false,
+  offlineAccessEpoch: null,
   pendingRecoveryCodes: [],
   pendingRecoveryConfirmationId: null,
   deviceInstallPlatform: "linux",
@@ -119,6 +123,37 @@ function tenantId(session) {
     session?.tenants?.[0]?.id ||
     null
   );
+}
+
+function webSessionId(session = state.session) {
+  const id = session?.session?.id;
+  return typeof id === "string" && id ? id : null;
+}
+
+async function localTenantIds(currentTenantId = state.tenantId) {
+  const [vaultIds, grantIds] = await Promise.all([
+    listLocalVaultIds(),
+    listOfflineWorkspaceIds(),
+  ]);
+  const ids = [...vaultIds, ...grantIds];
+  if (currentTenantId) ids.push(currentTenantId);
+  return [...new Set(ids)];
+}
+
+async function enableCurrentOfflineWorkspace() {
+  const sessionId = webSessionId();
+  if (
+    !state.tenantId ||
+    !sessionId ||
+    !Number.isSafeInteger(state.offlineAccessEpoch)
+  ) {
+    return false;
+  }
+  await enableOfflineWorkspace(state.tenantId, {
+    expectedAccessEpoch: state.offlineAccessEpoch,
+    sessionId,
+  });
+  return true;
 }
 
 function userIsOwner() {
@@ -230,7 +265,12 @@ function currentView() {
 
 function currentProjectId() {
   const [view, id] = window.location.hash.slice(1).split("/");
-  return view === "projects" && id ? decodeURIComponent(id) : null;
+  if (view !== "projects" || !id) return null;
+  try {
+    return decodeURIComponent(id);
+  } catch {
+    return null;
+  }
 }
 
 async function setView(view, { force = false } = {}) {
@@ -400,7 +440,7 @@ async function recoverStaleManagedCache(dataStore, resolved) {
   );
   const recovered = new SnapshotDataStore(state.tenantId);
   await recovered.load();
-  await enableOfflineWorkspace(state.tenantId).catch(() => {});
+  await enableCurrentOfflineWorkspace().catch(() => {});
   return recovered;
 }
 
@@ -432,7 +472,7 @@ async function reconnectManagedVault(event) {
     }
     const recovered = new SnapshotDataStore(state.tenantId);
     await recovered.load();
-    await enableOfflineWorkspace(state.tenantId).catch(() => {});
+    await enableCurrentOfflineWorkspace().catch(() => {});
     state.dataStore = recovered;
     state.vaultLocked = false;
     state.vaultProblem = null;
@@ -2318,7 +2358,7 @@ async function unlockVaultFromAccount(event) {
     }
     const dataStore = new SnapshotDataStore(state.tenantId);
     await dataStore.load();
-    await enableOfflineWorkspace(state.tenantId).catch(() => {});
+    await enableCurrentOfflineWorkspace().catch(() => {});
     state.dataStore = dataStore;
     state.vaultLocked = false;
     state.legacyResetAllowed = false;
@@ -2432,7 +2472,7 @@ async function submitVaultReset(event) {
     announceVaultReset(state.tenantId);
     const dataStore = new SnapshotDataStore(state.tenantId);
     await dataStore.load();
-    await enableOfflineWorkspace(state.tenantId).catch(() => {});
+    await enableCurrentOfflineWorkspace().catch(() => {});
     state.dataStore = dataStore;
     state.vaultLocked = false;
     state.keyManaged = true;
@@ -2456,9 +2496,9 @@ async function resolveAppSession() {
   try {
     const session = await api.session();
     if (!session?.authenticated) {
-      const localVaults = await listLocalVaultIds().catch(() => []);
+      const localVaults = await localTenantIds(null);
       await Promise.all(
-        localVaults.map((id) => disableOfflineWorkspace(id).catch(() => {})),
+        localVaults.map((id) => disableOfflineWorkspace(id)),
       );
       window.location.replace("/");
       return null;
@@ -2475,8 +2515,26 @@ async function resolveAppSession() {
     if (!activeTenantId) {
       throw new Error("현재 계정의 작업 공간을 확인할 수 없습니다.");
     }
-    await enableOfflineWorkspace(activeTenantId).catch(() => {});
-    return { session, tenantId: activeTenantId, offline: false };
+    let offlineAccessEpoch = null;
+    try {
+      offlineAccessEpoch = (
+        await prepareOfflineWorkspaceAccess(activeTenantId)
+      ).epoch;
+    } catch {
+      offlineAccessEpoch = null;
+    }
+    if (Number.isSafeInteger(offlineAccessEpoch)) {
+      await enableOfflineWorkspace(activeTenantId, {
+        expectedAccessEpoch: offlineAccessEpoch,
+        sessionId: webSessionId(session),
+      }).catch(() => {});
+    }
+    return {
+      session,
+      tenantId: activeTenantId,
+      offline: false,
+      offlineAccessEpoch,
+    };
   } catch (error) {
     if (error?.retryable !== true) throw error;
     const localVaults = await listLocalVaultIds();
@@ -2495,9 +2553,13 @@ async function resolveAppSession() {
       );
     }
     const localTenantId = enabledVaults[0];
+    const offlineAccessEpoch = (
+      await prepareOfflineWorkspaceAccess(localTenantId)
+    ).epoch;
     return {
       tenantId: localTenantId,
       offline: true,
+      offlineAccessEpoch,
       session: {
         authenticated: true,
         activeTenantId: localTenantId,
@@ -2783,6 +2845,7 @@ async function initialize() {
     }
     state.tenantId = resolved.tenantId;
     state.offlineBoot = resolved.offline;
+    state.offlineAccessEpoch = resolved.offlineAccessEpoch;
     setCsrfToken(resolved.session.csrfToken);
     renderSession(resolved.session, resolved.offline);
     updateDeviceCommands();
@@ -2906,10 +2969,17 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("online", async () => {
   if (!state.dataStore) return;
+  let unauthenticatedSession = false;
   try {
     const session = await api.session();
     if (!session?.authenticated) {
-      await disableOfflineWorkspace(state.tenantId).catch(() => {});
+      unauthenticatedSession = true;
+      const localVaults = await localTenantIds();
+      await Promise.all(
+        localVaults.map((id) =>
+          disableOfflineWorkspace(id, { sessionId: webSessionId() }),
+        ),
+      );
       window.location.replace("/");
       return;
     }
@@ -2938,7 +3008,7 @@ window.addEventListener("online", async () => {
       state.keyManaged = true;
     }
     renderSession(session, false);
-    await enableOfflineWorkspace(activeTenantId).catch(() => {});
+    await enableCurrentOfflineWorkspace().catch(() => {});
     await state.dataStore.sync();
     updateSyncChip();
     if (["home", "projects", "devices"].includes(state.view)) {
@@ -2946,7 +3016,12 @@ window.addEventListener("online", async () => {
     }
   } catch (error) {
     updateSyncChip();
-    if (!state.keyManaged) {
+    if (unauthenticatedSession) {
+      toast(
+        `${t("로그아웃 상태를 안전하게 반영하지 못했습니다. 페이지를 새로고침해 다시 시도해 주세요.")} ${error.message}`,
+        "error",
+      );
+    } else if (!state.keyManaged) {
       toast(
         `계정 보관함 전환을 마치지 못했습니다. 새로고침해 다시 시도해 주세요. ${error.message}`,
         "error",
@@ -2979,8 +3054,12 @@ $("#logout-button").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   setBusy(button, true, "…");
   try {
-    await api.logout();
-    await disableOfflineWorkspace(state.tenantId).catch(() => {});
+    const localVaults = await localTenantIds();
+    await logoutAfterRevokingOfflineAccess(
+      localVaults,
+      () => api.logout(),
+      { sessionId: webSessionId() },
+    );
     window.location.replace("/");
   } catch (error) {
     toast(error.message, "error");

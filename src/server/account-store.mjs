@@ -60,6 +60,11 @@ const SIGNUP_MODES = new Set(['first-user', 'invite', 'open', 'disabled']);
 const MEMBERSHIP_ROLES = new Set(['owner', 'admin', 'member']);
 const ROLE_RANK = Object.freeze({ member: 1, admin: 2, owner: 3 });
 const LANGUAGES = new Set(['auto', 'ko', 'en']);
+const REQUEST_GC_INTERVAL_MS = 60 * 1000;
+const REQUEST_GC_INTERVAL_REQUESTS = 64;
+const REQUEST_GC_BATCH_SIZE = 256;
+const REQUEST_GC_RETRY_MS = 1_000;
+const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const ACCOUNT_TABLE_COLUMNS = Object.freeze({
   users: Object.freeze([
@@ -466,10 +471,20 @@ function initializeAccountSchema(database) {
         ON account_invites(expires_at, used_at);
       CREATE INDEX IF NOT EXISTS webauthn_flows_expires
         ON webauthn_flows(expires_at, used_at);
+      CREATE INDEX IF NOT EXISTS webauthn_flows_used
+        ON webauthn_flows(used_at) WHERE used_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS passkey_registration_flows_expires
         ON passkey_registration_flows(expires_at, used_at);
+      CREATE INDEX IF NOT EXISTS passkey_registration_flows_used
+        ON passkey_registration_flows(used_at) WHERE used_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS web_sessions_user
         ON web_sessions(user_id, revoked_at, absolute_expires_at);
+      CREATE INDEX IF NOT EXISTS web_sessions_idle_expires
+        ON web_sessions(idle_expires_at);
+      CREATE INDEX IF NOT EXISTS web_sessions_absolute_expires
+        ON web_sessions(absolute_expires_at);
+      CREATE INDEX IF NOT EXISTS web_sessions_revoked
+        ON web_sessions(revoked_at) WHERE revoked_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS account_recovery_codes_user
         ON account_recovery_codes(user_id, used_at, created_at);
     `);
@@ -537,6 +552,8 @@ export class AccountStore {
     }
     this.database = null;
     this.initializing = null;
+    this.nextRequestGcAt = null;
+    this.requestsSinceGc = 0;
   }
 
   async init() {
@@ -557,7 +574,7 @@ export class AccountStore {
         try {
           database.exec(`
             PRAGMA foreign_keys = ON;
-            PRAGMA busy_timeout = 5000;
+            PRAGMA busy_timeout = ${DATABASE_BUSY_TIMEOUT_MS};
             PRAGMA journal_mode = DELETE;
             PRAGMA synchronous = FULL;
             PRAGMA secure_delete = ON;
@@ -568,7 +585,10 @@ export class AccountStore {
           database.enableDefensive(true);
           await ensurePrivatePermissions(this.databasePath);
           this.database = database;
-          this.#pruneExpired();
+          const now = this.clock();
+          this.#pruneExpired(now);
+          this.nextRequestGcAt = now + REQUEST_GC_INTERVAL_MS;
+          this.requestsSinceGc = 0;
           return this;
         } catch (error) {
           database.close();
@@ -585,6 +605,8 @@ export class AccountStore {
     if (!this.database) return;
     this.database.close();
     this.database = null;
+    this.nextRequestGcAt = null;
+    this.requestsSinceGc = 0;
   }
 
   getDatabase() {
@@ -592,22 +614,129 @@ export class AccountStore {
     return this.database;
   }
 
-  #pruneExpired() {
-    const now = isoTimestamp(this.clock());
+  #pruneExpired(nowMilliseconds, { waitForLock = true } = {}) {
+    const now = isoTimestamp(nowMilliseconds);
     const database = this.getDatabase();
-    database.prepare(`
-      DELETE FROM webauthn_flows WHERE expires_at <= ? OR used_at IS NOT NULL
-    `).run(now);
-    database.prepare(`
-      DELETE FROM passkey_registration_flows WHERE expires_at <= ? OR used_at IS NOT NULL
-    `).run(now);
-    database.prepare(`
-      DELETE FROM account_invites WHERE expires_at <= ? AND used_at IS NULL
-    `).run(now);
-    database.prepare(`
-      DELETE FROM web_sessions
-      WHERE revoked_at IS NOT NULL OR idle_expires_at <= ? OR absolute_expires_at <= ?
-    `).run(now, now);
+    if (!waitForLock) database.exec('PRAGMA busy_timeout = 0');
+    try {
+      withImmediateTransaction(database, () => {
+      let remainingWebAuthnFlows = REQUEST_GC_BATCH_SIZE;
+      const expiredWebAuthnFlows = database.prepare(`
+        DELETE FROM webauthn_flows
+        WHERE id IN (
+          SELECT id FROM webauthn_flows
+          WHERE expires_at <= ?
+          ORDER BY expires_at, id
+          LIMIT ?
+        )
+      `).run(now, remainingWebAuthnFlows);
+      remainingWebAuthnFlows -= Number(expiredWebAuthnFlows.changes);
+      if (remainingWebAuthnFlows > 0) {
+        database.prepare(`
+          DELETE FROM webauthn_flows
+          WHERE id IN (
+            SELECT id FROM webauthn_flows
+            WHERE used_at IS NOT NULL
+            ORDER BY used_at, id
+            LIMIT ?
+          )
+        `).run(remainingWebAuthnFlows);
+      }
+
+      let remainingPasskeyFlows = REQUEST_GC_BATCH_SIZE;
+      const expiredPasskeyFlows = database.prepare(`
+        DELETE FROM passkey_registration_flows
+        WHERE id IN (
+          SELECT id FROM passkey_registration_flows
+          WHERE expires_at <= ?
+          ORDER BY expires_at, id
+          LIMIT ?
+        )
+      `).run(now, remainingPasskeyFlows);
+      remainingPasskeyFlows -= Number(expiredPasskeyFlows.changes);
+      if (remainingPasskeyFlows > 0) {
+        database.prepare(`
+          DELETE FROM passkey_registration_flows
+          WHERE id IN (
+            SELECT id FROM passkey_registration_flows
+            WHERE used_at IS NOT NULL
+            ORDER BY used_at, id
+            LIMIT ?
+          )
+        `).run(remainingPasskeyFlows);
+      }
+
+      database.prepare(`
+        DELETE FROM account_invites
+        WHERE id IN (
+          SELECT id FROM account_invites
+          WHERE expires_at <= ? AND used_at IS NULL
+          ORDER BY expires_at, id
+          LIMIT ?
+        )
+      `).run(now, REQUEST_GC_BATCH_SIZE);
+
+      let remainingSessions = REQUEST_GC_BATCH_SIZE;
+      const idleExpired = database.prepare(`
+        DELETE FROM web_sessions
+        WHERE id IN (
+          SELECT id FROM web_sessions
+          WHERE idle_expires_at <= ?
+          ORDER BY idle_expires_at, id
+          LIMIT ?
+        )
+      `).run(now, remainingSessions);
+      remainingSessions -= Number(idleExpired.changes);
+      if (remainingSessions > 0) {
+        const absoluteExpired = database.prepare(`
+          DELETE FROM web_sessions
+          WHERE id IN (
+            SELECT id FROM web_sessions
+            WHERE absolute_expires_at <= ?
+            ORDER BY absolute_expires_at, id
+            LIMIT ?
+          )
+        `).run(now, remainingSessions);
+        remainingSessions -= Number(absoluteExpired.changes);
+      }
+      if (remainingSessions > 0) {
+        database.prepare(`
+          DELETE FROM web_sessions
+          WHERE id IN (
+            SELECT id FROM web_sessions
+            WHERE revoked_at IS NOT NULL
+            ORDER BY revoked_at, id
+            LIMIT ?
+          )
+        `).run(remainingSessions);
+      }
+      });
+    } finally {
+      if (!waitForLock) database.exec(`PRAGMA busy_timeout = ${DATABASE_BUSY_TIMEOUT_MS}`);
+    }
+  }
+
+  runRequestMaintenance() {
+    const now = this.clock();
+    this.requestsSinceGc += 1;
+    if (
+      this.nextRequestGcAt !== null
+      && now < this.nextRequestGcAt
+      && this.requestsSinceGc < REQUEST_GC_INTERVAL_REQUESTS
+    ) {
+      return false;
+    }
+    try {
+      this.#pruneExpired(now, { waitForLock: false });
+    } catch (error) {
+      if (error?.errcode !== 5 && error?.errcode !== 6) throw error;
+      this.nextRequestGcAt = now + REQUEST_GC_RETRY_MS;
+      this.requestsSinceGc = 0;
+      return false;
+    }
+    this.nextRequestGcAt = now + REQUEST_GC_INTERVAL_MS;
+    this.requestsSinceGc = 0;
+    return true;
   }
 
   userCount() {
@@ -1359,6 +1488,87 @@ export class AccountStore {
       }
     });
     return Object.freeze({ signupMode, revisionRetention });
+  }
+
+  updateSettings(userId, tenantId, patch = {}) {
+    const database = this.getDatabase();
+    return withImmediateTransaction(database, () => {
+      const currentUser = database.prepare(`
+        SELECT * FROM users WHERE id = ? AND status = 'active'
+      `).get(userId);
+      if (!currentUser) {
+        throw accountError('account_not_found', 'The account is unavailable.', 404);
+      }
+
+      const displayName = patch.displayName === undefined
+        ? currentUser.display_name
+        : normalizeDisplayName(patch.displayName, currentUser.username);
+      const language = patch.language === undefined
+        ? currentUser.language
+        : normalizeLanguage(patch.language);
+      const current = this.serverSettings(patch.defaults);
+      const updatesServerSettings = patch.signupMode !== undefined
+        || patch.revisionRetention !== undefined;
+      const signupMode = patch.signupMode === undefined
+        ? current.signupMode
+        : normalizeSignupMode(patch.signupMode);
+      const revisionRetention = patch.revisionRetention === undefined
+        ? current.revisionRetention
+        : Number(patch.revisionRetention);
+      if (!Number.isSafeInteger(revisionRetention) || revisionRetention < 1 || revisionRetention > 10_000) {
+        throw accountError('invalid_retention', 'Revision retention must be between 1 and 10000.');
+      }
+
+      if (updatesServerSettings) {
+        const owner = database.prepare(`
+          SELECT value FROM schema_metadata WHERE key = ?
+        `).get(SERVER_OWNER_METADATA_KEY);
+        if (!owner || owner.value !== userId) {
+          throw accountError('forbidden', 'Server owner access is required.', 403);
+        }
+        const membership = database.prepare(`
+          SELECT 1 AS present FROM tenant_memberships WHERE user_id = ? AND tenant_id = ?
+        `).get(userId, tenantId);
+        if (!membership) {
+          throw accountError('forbidden', 'The selected tenant is unavailable.', 403);
+        }
+      }
+
+      let updatedAt = currentUser.updated_at;
+      if (patch.displayName !== undefined || patch.language !== undefined) {
+        updatedAt = isoTimestamp(this.clock());
+        database.prepare(`
+          UPDATE users
+          SET display_name = ?, language = ?, updated_at = ?
+          WHERE id = ?
+        `).run(displayName, language, updatedAt, userId);
+      }
+
+      if (updatesServerSettings) {
+        const set = database.prepare(`
+          INSERT INTO schema_metadata (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `);
+        set.run('web_signup_mode', signupMode);
+        set.run('web_revision_retention', String(revisionRetention));
+        if (signupMode !== current.signupMode) {
+          database.prepare(`
+            DELETE FROM webauthn_flows WHERE type = 'signup'
+          `).run();
+        }
+      }
+
+      return Object.freeze({
+        user: publicUser({
+          ...currentUser,
+          display_name: displayName,
+          language,
+          updated_at: updatedAt,
+        }),
+        signupMode,
+        revisionRetention,
+      });
+    });
   }
 
   hasUsableRecoveryCodes(userId) {

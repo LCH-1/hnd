@@ -193,21 +193,12 @@ function skillInstallOperation(agent, skillPath, current, desired) {
   });
 }
 
-function disposableConfig(agent, value) {
-  const keys = Object.keys(value);
-  if (keys.length === 0) return true;
-  return agent === 'cursor'
-    && keys.length === 1
-    && keys[0] === 'version'
-    && value.version === 1;
-}
-
 export async function planAgentInstall(agent, options = {}) {
   const runtime = resolveRuntime(agent, options);
   const readFile = options.readFile ?? fs.readFile;
   const [currentConfig, currentSkill, desiredSkill] = await Promise.all([
-    readIfPresent(runtime.configPath, readFile),
-    readIfPresent(runtime.skillPath, readFile),
+    readIfPresent(runtime.configPath, { agent, readFile }),
+    readIfPresent(runtime.skillPath, { agent, readFile }),
     loadSkillContent(options),
   ]);
   const document = parseJsonDocument(currentConfig, {
@@ -255,8 +246,8 @@ export async function planAgentUninstall(agent, options = {}) {
   const runtime = resolveRuntime(agent, options);
   const readFile = options.readFile ?? fs.readFile;
   const [currentConfig, currentSkill] = await Promise.all([
-    readIfPresent(runtime.configPath, readFile),
-    readIfPresent(runtime.skillPath, readFile),
+    readIfPresent(runtime.configPath, { agent, readFile }),
+    readIfPresent(runtime.skillPath, { agent, readFile }),
   ]);
   const operations = [];
 
@@ -271,22 +262,14 @@ export async function planAgentUninstall(agent, options = {}) {
     });
     const nextConfig = serializeJsonDocument(nextValue, document.format);
     if (nextConfig !== currentConfig) {
-      operations.push(disposableConfig(agent, nextValue)
-        ? makeRemoveOperation({
-          path: runtime.configPath,
-          previous: currentConfig,
-          agent,
-          component: 'hook',
-          reason: 'Remove the hnd-owned hooks configuration.',
-        })
-        : makeWriteOperation({
-          path: runtime.configPath,
-          content: nextConfig,
-          previous: currentConfig,
-          agent,
-          component: 'hook',
-          reason: 'Remove only the hnd session context and automatic checkpoint hooks.',
-        }));
+      operations.push(makeWriteOperation({
+        path: runtime.configPath,
+        content: nextConfig,
+        previous: currentConfig,
+        agent,
+        component: 'hook',
+        reason: 'Remove only the hnd session context and automatic checkpoint hooks.',
+      }));
     }
   }
 
@@ -349,8 +332,8 @@ export async function doctorAgent(agent, options = {}) {
   const runtime = resolveRuntime(agent, options);
   const readFile = options.readFile ?? fs.readFile;
   const [currentConfig, currentSkill, desiredSkill] = await Promise.all([
-    readIfPresent(runtime.configPath, readFile),
-    readIfPresent(runtime.skillPath, readFile),
+    readIfPresent(runtime.configPath, { agent, readFile }),
+    readIfPresent(runtime.skillPath, { agent, readFile }),
     loadSkillContent(options),
   ]);
   const checks = [];

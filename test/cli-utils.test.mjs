@@ -55,3 +55,30 @@ test('file operations are atomic, idempotent, and conflict-aware', async (contex
     OperationConflictError,
   );
 });
+
+test('file operations never follow a target symlink', async (context) => {
+  if (process.platform === 'win32') {
+    context.skip('Windows symlink creation requires environment-specific privileges');
+    return;
+  }
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-ops-symlink-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const outside = path.join(directory, 'outside.json');
+  const target = path.join(directory, 'hooks.json');
+  await fs.writeFile(outside, 'user-owned\n');
+  await fs.symlink(outside, target);
+
+  await assert.rejects(applyOperations([{
+    kind: 'write',
+    path: target,
+    content: 'managed\n',
+    previous: 'user-owned\n',
+  }]), OperationConflictError);
+  await assert.rejects(applyOperations([{
+    kind: 'remove',
+    path: target,
+    previous: 'user-owned\n',
+  }]), OperationConflictError);
+  assert.equal((await fs.lstat(target)).isSymbolicLink(), true);
+  assert.equal(await fs.readFile(outside, 'utf8'), 'user-owned\n');
+});

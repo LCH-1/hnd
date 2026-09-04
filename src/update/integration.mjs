@@ -2,10 +2,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { MANAGED_SKILL_MARKER } from '../adapters/common.mjs';
-import { readJson, readText, writeTextAtomic } from '../core/fs.mjs';
+import { withAdapterMutationLock } from '../adapters/mutation-lock.mjs';
+import { readJson, readText, withFileLock } from '../core/fs.mjs';
+import { applyOperations } from '../fs-operations.mjs';
 import { agentPaths } from '../paths.mjs';
 import {
+  readRuntimePointer,
   runtimeDirectory as runtimeDirectoryForPointer,
+  runtimePaths,
   runtimeReady,
   validRuntimePointer,
 } from './state.mjs';
@@ -55,23 +59,54 @@ async function readReleaseSkill(runtimeDirectory, env) {
   if (!content.includes(MANAGED_SKILL_MARKER)) {
     throw new Error('Connector runtime skill has no managed marker');
   }
-  return content;
+  return Object.freeze({ content, release: marker.release });
 }
 
 export async function refreshManagedSkills(runtimeDirectory, env = process.env) {
-  const desired = await readReleaseSkill(runtimeDirectory, env);
-  const paths = agentPaths(env);
-  const updated = [];
-  for (const agent of ['claude', 'codex', 'cursor']) {
-    const target = paths[agent].skill;
-    const current = await readText(target, { optional: true });
-    // Never install a new integration or take over an unmanaged file during a
-    // background update. Initial setup remains an explicit user action.
-    if (current === null || !current.includes(MANAGED_SKILL_MARKER) || current === desired) {
-      continue;
+  return withFileLock(runtimePaths(env).lock, async () => {
+    const desired = await readReleaseSkill(runtimeDirectory, env);
+    const active = await readRuntimePointer('current', env);
+    if (
+      !active
+      || active.sha256 !== desired.release.sha256
+      || active.sequence !== desired.release.sequence
+      || active.version !== desired.release.version
+    ) {
+      return Object.freeze([]);
     }
-    await writeTextAtomic(target, desired, { mode: 0o600 });
-    updated.push(Object.freeze({ agent, path: target }));
+    return withAdapterMutationLock(env, async () => {
+      const paths = agentPaths(env);
+      const updated = [];
+      for (const agent of ['claude', 'codex', 'cursor']) {
+        const target = paths[agent].skill;
+        const current = await readText(target, { optional: true });
+        // Never install a new integration or take over an unmanaged file during a
+        // background update. Initial setup remains an explicit user action.
+        if (
+          current === null
+          || !current.includes(MANAGED_SKILL_MARKER)
+          || current === desired.content
+        ) {
+          continue;
+        }
+        const [result] = await applyOperations([{
+          kind: 'write',
+          path: target,
+          content: desired.content,
+          previous: current,
+          mode: 0o600,
+        }]);
+        if (result.changed) updated.push(Object.freeze({ agent, path: target }));
+      }
+      return Object.freeze(updated);
+    });
+  }, { timeoutMs: 5_000, staleMs: 10 * 60_000 });
+}
+
+export async function refreshManagedSkillsAfterUpdate(result, env = process.env) {
+  let directory = result?.directory ?? null;
+  if (!directory && result?.current && await runtimeReady(result.current, env)) {
+    directory = runtimeDirectoryForPointer(result.current, env);
   }
-  return Object.freeze(updated);
+  return directory ? refreshManagedSkills(directory, env) : Object.freeze([]);
 }

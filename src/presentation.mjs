@@ -7,7 +7,7 @@ export function writeJson(value, stream = process.stdout) {
 }
 
 export function formatOperationResults(results, { dryRun = false } = {}) {
-  if (results.length === 0) return 'No managed files found.\n';
+  if (results.length === 0) return 'No changes needed.\n';
   const prefix = dryRun ? 'would ' : '';
   return `${results.map((result) => {
     const status = result.changed ? `${prefix}${result.action}` : 'unchanged';

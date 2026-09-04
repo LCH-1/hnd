@@ -45,6 +45,8 @@ const LOCAL_STORE_NAME = "encrypted-content";
 const CACHE_RECORD_SCHEMA_VERSION = 4;
 const CACHE_LOCK_SCHEMA_VERSION = 2;
 const CACHE_RESET_SCHEMA_VERSION = 1;
+const OFFLINE_ACCESS_STATE_SCHEMA_VERSION = 1;
+const MAX_REVOKED_OFFLINE_SESSIONS = 32;
 const CACHE_LOCK_LEASE_MS = 15_000;
 const CACHE_LOCK_WAIT_MS = 3_000;
 let localDatabasePromise;
@@ -445,31 +447,314 @@ function offlineAccessKey(tenantId) {
   return `offline-access:${id}`;
 }
 
-export async function enableOfflineWorkspace(tenantId) {
-  const expectedResetEpoch = await loadSnapshotResetEpoch(tenantId);
-  const encrypted = await sealBrowserValue(tenantId, {
+export async function listOfflineWorkspaceIds() {
+  const keys = await localOperation("readonly", (store) => store.getAllKeys());
+  const prefix = "offline-access:";
+  return [...new Set(
+    keys
+      .filter((key) => typeof key === "string" && key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length))
+      .filter((id) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)),
+  )].sort(compareCodePoints);
+}
+
+function offlineAccessStateKey(tenantId) {
+  offlineAccessKey(tenantId);
+  return `offline-access-state:${tenantId}`;
+}
+
+function offlineAccessStateFromRecord(record) {
+  if (record === undefined) {
+    return {
+      epoch: 0,
+      authorizedSessionId: null,
+      revokedSessionIds: [],
+    };
+  }
+  if (
+    !record ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    record.schemaVersion !== OFFLINE_ACCESS_STATE_SCHEMA_VERSION ||
+    !Number.isSafeInteger(record.epoch) ||
+    record.epoch < 0 ||
+    !(
+      record.authorizedSessionId === null ||
+      (typeof record.authorizedSessionId === "string" &&
+        Boolean(record.authorizedSessionId) &&
+        record.authorizedSessionId.length <= 256 &&
+        !/[\0\r\n]/u.test(record.authorizedSessionId))
+    ) ||
+    !Array.isArray(record.revokedSessionIds) ||
+    record.revokedSessionIds.length > MAX_REVOKED_OFFLINE_SESSIONS ||
+    record.revokedSessionIds.some(
+      (sessionId) =>
+        typeof sessionId !== "string" ||
+        !sessionId ||
+        sessionId.length > 256 ||
+        /[\0\r\n]/u.test(sessionId),
+    )
+  ) {
+    throw new Error("오프라인 작업 권한 버전이 손상되었습니다.");
+  }
+  return {
+    epoch: record.epoch,
+    authorizedSessionId: record.authorizedSessionId,
+    revokedSessionIds: [...new Set(record.revokedSessionIds)],
+  };
+}
+
+function boundedRevokedSessionIds(existing, ...candidates) {
+  const additions = [...new Set(candidates.filter(Boolean))];
+  const refreshed = new Set(additions);
+  return [
+    ...existing.filter((sessionId) => !refreshed.has(sessionId)),
+    ...additions,
+  ].slice(-MAX_REVOKED_OFFLINE_SESSIONS);
+}
+
+function requiredWebSessionId(value) {
+  const sessionId = typeof value === "string" ? value.trim() : "";
+  if (
+    !sessionId ||
+    sessionId.length > 256 ||
+    /[\0\r\n]/u.test(sessionId)
+  ) {
+    throw new TypeError("오프라인 작업을 허용할 로그인 세션이 올바르지 않습니다.");
+  }
+  return sessionId;
+}
+
+async function loadOfflineAccessState(tenantId) {
+  const record = await localOperation("readonly", (store) =>
+    store.get(offlineAccessStateKey(tenantId)),
+  );
+  return offlineAccessStateFromRecord(record);
+}
+
+async function commitOfflineWorkspaceEnable({
+  tenantId,
+  expectedAccessEpoch,
+  expectedResetEpoch,
+  sessionId,
+  encrypted,
+}) {
+  const database = await openLocalDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(LOCAL_STORE_NAME);
+    const accessRequest = store.get(offlineAccessStateKey(tenantId));
+    const resetRequest = store.get(snapshotResetEpochKey(tenantId));
+    let accessReady = false;
+    let resetReady = false;
+    let committed = false;
+    let failure;
+    const commit = () => {
+      if (!accessReady || !resetReady || committed || failure) return;
+      committed = true;
+      try {
+        const access = offlineAccessStateFromRecord(accessRequest.result);
+        const resetEpoch = resetEpochFromRecord(resetRequest.result);
+        if (resetEpoch !== expectedResetEpoch) {
+          throw new SnapshotCacheResetError();
+        }
+        if (
+          access.epoch !== expectedAccessEpoch ||
+          access.revokedSessionIds.includes(sessionId)
+        ) {
+          throw new SnapshotCacheConflictError(
+            "로그아웃 중이거나 이미 로그아웃한 세션에서는 오프라인 작업 권한을 다시 만들 수 없습니다.",
+          );
+        }
+        const copy = encrypted.buffer.slice(
+          encrypted.byteOffset,
+          encrypted.byteOffset + encrypted.byteLength,
+        );
+        store.put(
+          { schemaVersion: 1, encrypted: copy },
+          offlineAccessKey(tenantId),
+        );
+        store.put(
+          {
+            schemaVersion: OFFLINE_ACCESS_STATE_SCHEMA_VERSION,
+            epoch: access.epoch,
+            authorizedSessionId: sessionId,
+            revokedSessionIds: access.revokedSessionIds,
+          },
+          offlineAccessStateKey(tenantId),
+        );
+      } catch (error) {
+        failure = error;
+        transaction.abort();
+      }
+    };
+    accessRequest.onsuccess = () => {
+      accessReady = true;
+      commit();
+    };
+    resetRequest.onsuccess = () => {
+      resetReady = true;
+      commit();
+    };
+    accessRequest.onerror = () => {
+      failure =
+        accessRequest.error ||
+        new Error("오프라인 작업 권한 버전을 확인하지 못했습니다.");
+    };
+    resetRequest.onerror = () => {
+      failure =
+        resetRequest.error ||
+        new Error("브라우저 보관함 초기화 버전을 확인하지 못했습니다.");
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () =>
+      reject(
+        failure ||
+          transaction.error ||
+          new Error("오프라인 작업 권한 저장이 취소되었습니다."),
+      );
+    transaction.onerror = () => {};
+  });
+}
+
+async function revokeOfflineWorkspace({ tenantId, sessionId }) {
+  const database = await openLocalDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(LOCAL_STORE_NAME);
+    const request = store.get(offlineAccessStateKey(tenantId));
+    let failure;
+    request.onsuccess = () => {
+      try {
+        const access = offlineAccessStateFromRecord(request.result);
+        if (access.epoch >= Number.MAX_SAFE_INTEGER) {
+          throw new Error("오프라인 작업 권한 버전을 더 늘릴 수 없습니다.");
+        }
+        store.delete(offlineAccessKey(tenantId));
+        store.put(
+          {
+            schemaVersion: OFFLINE_ACCESS_STATE_SCHEMA_VERSION,
+            epoch: access.epoch + 1,
+            authorizedSessionId: null,
+            revokedSessionIds: boundedRevokedSessionIds(
+              access.revokedSessionIds,
+              access.authorizedSessionId,
+              sessionId,
+            ),
+          },
+          offlineAccessStateKey(tenantId),
+        );
+      } catch (error) {
+        failure = error;
+        transaction.abort();
+      }
+    };
+    request.onerror = () => {
+      failure =
+        request.error ||
+        new Error("오프라인 작업 권한 버전을 확인하지 못했습니다.");
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () =>
+      reject(
+        failure ||
+          transaction.error ||
+          new Error("오프라인 작업 권한 해제가 취소되었습니다."),
+      );
+    transaction.onerror = () => {};
+  });
+}
+
+const browserOfflineAccessStore = Object.freeze({
+  prepare: loadOfflineAccessState,
+  enable: commitOfflineWorkspaceEnable,
+  revoke: revokeOfflineWorkspace,
+});
+
+export async function prepareOfflineWorkspaceAccess(tenantId, options = {}) {
+  const accessStore = options.accessStore ?? browserOfflineAccessStore;
+  if (!accessStore || typeof accessStore.prepare !== "function") {
+    throw new TypeError("오프라인 작업 권한 준비를 지원하지 않습니다.");
+  }
+  const access = await accessStore.prepare(tenantId);
+  if (!Number.isSafeInteger(access?.epoch) || access.epoch < 0) {
+    throw new Error("오프라인 작업 권한 버전을 확인할 수 없습니다.");
+  }
+  return { epoch: access.epoch };
+}
+
+export async function enableOfflineWorkspace(tenantId, options = {}) {
+  const sessionId = requiredWebSessionId(options.sessionId);
+  const accessStore = options.accessStore ?? browserOfflineAccessStore;
+  if (!accessStore || typeof accessStore.enable !== "function") {
+    throw new TypeError("오프라인 작업 권한 저장을 지원하지 않습니다.");
+  }
+  const expectedAccessEpoch = options.expectedAccessEpoch;
+  if (!Number.isSafeInteger(expectedAccessEpoch) || expectedAccessEpoch < 0) {
+    throw new TypeError("오프라인 작업 권한 기준 버전이 올바르지 않습니다.");
+  }
+  const expectedResetEpoch =
+    options.expectedResetEpoch ?? (await loadSnapshotResetEpoch(tenantId));
+  if (!Number.isSafeInteger(expectedResetEpoch) || expectedResetEpoch < 0) {
+    throw new TypeError("브라우저 보관함 초기화 기준 버전이 올바르지 않습니다.");
+  }
+  const seal = options.sealBrowserValue ?? sealBrowserValue;
+  const encrypted = await seal(tenantId, {
     schemaVersion: 1,
     tenantId: String(tenantId),
+    sessionId,
     enabled: true,
   });
   try {
-    const copy = encrypted.buffer.slice(
-      encrypted.byteOffset,
-      encrypted.byteOffset + encrypted.byteLength,
-    );
-    await mutateLocalRecordAtResetEpoch(tenantId, expectedResetEpoch, (store) =>
-      store.put({ schemaVersion: 1, encrypted: copy }, offlineAccessKey(tenantId)),
-    );
+    await accessStore.enable({
+      tenantId,
+      expectedAccessEpoch,
+      expectedResetEpoch,
+      sessionId,
+      encrypted,
+    });
   } finally {
     encrypted.fill(0);
   }
 }
 
-export async function disableOfflineWorkspace(tenantId) {
-  const expectedResetEpoch = await loadSnapshotResetEpoch(tenantId);
-  await mutateLocalRecordAtResetEpoch(tenantId, expectedResetEpoch, (store) =>
-    store.delete(offlineAccessKey(tenantId)),
-  );
+export async function disableOfflineWorkspace(tenantId, options = {}) {
+  const accessStore = options.accessStore ?? browserOfflineAccessStore;
+  if (!accessStore || typeof accessStore.revoke !== "function") {
+    throw new TypeError("오프라인 작업 권한 해제를 지원하지 않습니다.");
+  }
+  const sessionId =
+    options.sessionId === undefined || options.sessionId === null
+      ? null
+      : requiredWebSessionId(options.sessionId);
+  await accessStore.revoke({ tenantId, sessionId });
+}
+
+export async function logoutAfterRevokingOfflineAccess(
+  tenantIds,
+  logout,
+  options = {},
+) {
+  if (!Array.isArray(tenantIds)) {
+    throw new TypeError("로그아웃할 작업 공간 목록이 올바르지 않습니다.");
+  }
+  if (typeof logout !== "function") {
+    throw new TypeError("로그아웃 요청을 실행할 수 없습니다.");
+  }
+  const revoke = options.disableOfflineWorkspace ?? disableOfflineWorkspace;
+  if (typeof revoke !== "function") {
+    throw new TypeError("오프라인 작업 권한을 해제할 수 없습니다.");
+  }
+
+  // Keep the authenticated session usable until every browser-local offline
+  // grant is durably gone. Both deletion and logout are idempotent, so either
+  // failure can be retried without restoring a stale grant or losing the
+  // opportunity to ask the server to end the session again.
+  const sessionId = options.sessionId ?? null;
+  for (const tenantId of new Set(tenantIds.map((value) => String(value)))) {
+    await revoke(tenantId, { sessionId });
+  }
+  return logout();
 }
 
 export async function offlineWorkspaceEnabled(tenantId) {
@@ -1440,6 +1725,26 @@ function snapshotFiles(snapshot) {
   return new Map(snapshot.files.map((file) => [file.path, file]));
 }
 
+function workIdFromPath(path) {
+  const match = ACTIVE_WORK_PATTERN.exec(path) || CLOSED_WORK_PATTERN.exec(path);
+  return match?.[2]?.toLowerCase() || null;
+}
+
+function workFilesById(snapshot) {
+  const result = new Map();
+  for (const file of snapshot.files) {
+    const id = workIdFromPath(file.path);
+    if (!id) continue;
+    const files = result.get(id) || [];
+    files.push(file);
+    result.set(id, files);
+  }
+  for (const files of result.values()) {
+    files.sort((left, right) => compareCodePoints(left.path, right.path));
+  }
+  return result;
+}
+
 function snapshotFilesEqual(left, right) {
   if (left === null || right === null) return left === right;
   return (
@@ -1449,6 +1754,63 @@ function snapshotFilesEqual(left, right) {
     left.sha256 === right.sha256 &&
     left.content === right.content
   );
+}
+
+function workFileGroupsEqual(left, right) {
+  return (
+    left.length === right.length &&
+    left.every((file, index) => snapshotFilesEqual(file, right[index]))
+  );
+}
+
+function parsedTimestamp(value) {
+  const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+}
+
+function workFileRank(file) {
+  const match =
+    ACTIVE_WORK_PATTERN.exec(file.path) || CLOSED_WORK_PATTERN.exec(file.path);
+  const record = parsedJsonFile(file);
+  const closed = Boolean(CLOSED_WORK_PATTERN.test(file.path));
+  const valid = Boolean(
+    match &&
+      record &&
+      record.schemaVersion === STATE_SCHEMA_VERSION &&
+      record.id === match[2] &&
+      record.repoId === match[1] &&
+      record.status === (closed ? "closed" : "active"),
+  );
+  const historyAt = Array.isArray(record?.history)
+    ? Math.max(
+        Number.NEGATIVE_INFINITY,
+        ...record.history.map((entry) => parsedTimestamp(entry?.at)),
+      )
+    : Number.NEGATIVE_INFINITY;
+  return {
+    valid,
+    closed: valid && closed,
+    updatedAt: parsedTimestamp(record?.updatedAt),
+    closedAt: parsedTimestamp(record?.closedAt),
+    historyAt,
+  };
+}
+
+function preferredWorkFile(files) {
+  if (files.length === 0) return null;
+  return [...files].sort((left, right) => {
+    const leftRank = workFileRank(left);
+    const rightRank = workFileRank(right);
+    return (
+      Number(rightRank.valid) - Number(leftRank.valid) ||
+      Number(rightRank.closed) - Number(leftRank.closed) ||
+      rightRank.updatedAt - leftRank.updatedAt ||
+      rightRank.closedAt - leftRank.closedAt ||
+      rightRank.historyAt - leftRank.historyAt ||
+      compareCodePoints(left.path, right.path) ||
+      compareCodePoints(left.sha256, right.sha256)
+    );
+  })[0];
 }
 
 const MISSING_JSON_VALUE = Symbol("missing JSON member");
@@ -1565,6 +1927,9 @@ export async function mergeBrowserSnapshots(base, local, remote) {
   const baseFiles = snapshotFiles(base);
   const localFiles = snapshotFiles(local);
   const remoteFiles = snapshotFiles(remote);
+  const baseWork = workFilesById(base);
+  const localWork = workFilesById(local);
+  const remoteWork = workFilesById(remote);
   const paths = new Set([
     ...baseFiles.keys(),
     ...localFiles.keys(),
@@ -1573,6 +1938,7 @@ export async function mergeBrowserSnapshots(base, local, remote) {
   const files = [];
   const conflicts = [];
   for (const path of [...paths].sort(compareCodePoints)) {
+    if (workIdFromPath(path)) continue;
     const baseFile = baseFiles.get(path) ?? null;
     const localFile = localFiles.get(path) ?? null;
     const remoteFile = remoteFiles.get(path) ?? null;
@@ -1594,9 +1960,55 @@ export async function mergeBrowserSnapshots(base, local, remote) {
     if (file !== null) files.push(structuredClone(file));
     if (conflicted) conflicts.push(path);
   }
+
+  // A handoff's path is part of its logical value: moving repositories and
+  // closing both change that path. Merge every ID as one three-way value so a
+  // delete cannot be silently combined with a move and resurrect the record.
+  // Old crash/concurrent-write duplicates are canonicalized to one file
+  // instead of being propagated back to the server. A duplicate group alone
+  // is repairable corruption, not a new logical conflict: only divergent
+  // three-way group values require the user to choose a side.
+  const workIds = new Set([
+    ...baseWork.keys(),
+    ...localWork.keys(),
+    ...remoteWork.keys(),
+  ]);
+  for (const id of [...workIds].sort(compareCodePoints)) {
+    const baseGroup = baseWork.get(id) || [];
+    const localGroup = localWork.get(id) || [];
+    const remoteGroup = remoteWork.get(id) || [];
+    let selected;
+    let conflicted = false;
+    if (workFileGroupsEqual(localGroup, remoteGroup)) {
+      selected = localGroup;
+    } else if (workFileGroupsEqual(localGroup, baseGroup)) {
+      selected = remoteGroup;
+    } else if (workFileGroupsEqual(remoteGroup, baseGroup)) {
+      selected = localGroup;
+    } else {
+      selected = localGroup;
+      conflicted = true;
+    }
+
+    const chosen = preferredWorkFile(selected);
+    if (chosen) files.push(structuredClone(chosen));
+    if (conflicted) {
+      conflicts.push(
+        ...new Set(
+          [...baseGroup, ...localGroup, ...remoteGroup].map(
+            (file) => file.path,
+          ),
+        ),
+      );
+    }
+  }
+  files.sort((left, right) => compareCodePoints(left.path, right.path));
   const snapshot = { schemaVersion: SNAPSHOT_SCHEMA_VERSION, files };
   await validateSnapshot(snapshot);
-  return { snapshot, conflicts };
+  return {
+    snapshot,
+    conflicts: [...new Set(conflicts)].sort(compareCodePoints),
+  };
 }
 
 function snapshotIsEmpty(snapshot) {
@@ -2083,6 +2495,7 @@ export class SnapshotDataStore {
     this.loadRemote = options.loadRemote ?? loadEncryptedSnapshot;
     this.saveRemote = options.saveRemote ?? saveEncryptedSnapshot;
     this.loadLocalRule = options.loadLocalRule ?? loadLocalRule;
+    this.saveLocalRule = options.saveLocalRule ?? saveLocalRule;
     this.snapshot = null;
     this.baseSnapshot = null;
     this.etag = null;
@@ -2381,6 +2794,38 @@ export class SnapshotDataStore {
           throw error;
         }
         await this._syncPending();
+        return result.value;
+      });
+    this.writeQueue = run;
+    return run;
+  }
+
+  async _commitLocalRule(mutator) {
+    const run = this.writeQueue
+      .catch(() => {})
+      .then(async () => {
+        await this.load();
+        let result;
+        await this._withCacheLock(async () => {
+          const latest = await this.loadLocalRule(this.tenantId);
+          if (!jsonValueEqual(latest, this.localRule)) {
+            throw new SnapshotCacheConflictError(
+              "다른 탭에서 브라우저 룰을 먼저 바꿨습니다. 현재 입력을 덮어쓰지 않았으니 새로고침 후 다시 저장해 주세요.",
+            );
+          }
+          result = await mutator(
+            latest === null ? null : structuredClone(latest),
+          );
+          await this.saveLocalRule(
+            this.tenantId,
+            result.rule,
+            this.resetEpoch,
+          );
+          await this._assertResetEpoch();
+          this.localRule = result.rule
+            ? structuredClone(result.rule)
+            : null;
+        });
         return result.value;
       });
     this.writeQueue = run;
@@ -2881,23 +3326,21 @@ export class SnapshotDataStore {
     const path = rulePath(this.snapshot, values);
     const content = policyContent(values.content);
     if (path === "pc") {
-      if (this.localRule)
-        throw new Error(
-          "이 브라우저 룰은 이미 있습니다. 기존 룰을 수정해 주세요.",
-        );
-      const now = new Date().toISOString();
-      const rule = {
-        id: "pc",
-        scope: "pc",
-        content,
-        createdAt: now,
-        updatedAt: now,
-      };
-      await this._assertResetEpoch();
-      await saveLocalRule(this.tenantId, rule, this.resetEpoch);
-      await this._assertResetEpoch();
-      this.localRule = rule;
-      return structuredClone(rule);
+      return this._commitLocalRule(async (current) => {
+        if (current)
+          throw new Error(
+            "이 브라우저 룰은 이미 있습니다. 기존 룰을 수정해 주세요.",
+          );
+        const now = new Date().toISOString();
+        const rule = {
+          id: "pc",
+          scope: "pc",
+          content,
+          createdAt: now,
+          updatedAt: now,
+        };
+        return { rule, value: structuredClone(rule) };
+      });
     }
     return this._commit(async (snapshot) => {
       if (fileAt(snapshot, path))
@@ -2933,17 +3376,15 @@ export class SnapshotDataStore {
     }
     const content = policyContent(values.content);
     if (id === "pc") {
-      if (!this.localRule) throw new Error("수정할 브라우저 룰이 없습니다.");
-      const rule = {
-        ...this.localRule,
-        content,
-        updatedAt: new Date().toISOString(),
-      };
-      await this._assertResetEpoch();
-      await saveLocalRule(this.tenantId, rule, this.resetEpoch);
-      await this._assertResetEpoch();
-      this.localRule = rule;
-      return structuredClone(rule);
+      return this._commitLocalRule(async (current) => {
+        if (!current) throw new Error("수정할 브라우저 룰이 없습니다.");
+        const rule = {
+          ...current,
+          content,
+          updatedAt: new Date().toISOString(),
+        };
+        return { rule, value: structuredClone(rule) };
+      });
     }
     return this._commit(async (snapshot) => {
       if (!fileAt(snapshot, id)) throw new Error("수정할 룰이 없습니다.");
@@ -2957,11 +3398,7 @@ export class SnapshotDataStore {
   async deleteRule(id) {
     await this.load();
     if (id === "pc") {
-      await this._assertResetEpoch();
-      await saveLocalRule(this.tenantId, null, this.resetEpoch);
-      await this._assertResetEpoch();
-      this.localRule = null;
-      return true;
+      return this._commitLocalRule(async () => ({ rule: null, value: true }));
     }
     return this._commit(async (snapshot) => {
       if (!fileAt(snapshot, id)) throw new Error("삭제할 룰이 없습니다.");

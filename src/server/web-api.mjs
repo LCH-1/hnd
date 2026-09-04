@@ -316,6 +316,11 @@ export class WebApiRouter {
     } catch (error) {
       this.#error(res, error);
     }
+    try {
+      this.accounts.runRequestMaintenance();
+    } catch (error) {
+      this.onError(error);
+    }
     return true;
   }
 
@@ -837,31 +842,25 @@ export class WebApiRouter {
           throw new WebApiError(403, 'forbidden', 'Server owner access is required.');
         }
       }
-      let user = authenticated.user;
-      if (body.displayName !== undefined) {
-        user = this.accounts.updateDisplayName(authenticated.user.id, body.displayName);
-      }
-      if (body.language !== undefined) {
-        user = this.accounts.updateLanguage(authenticated.user.id, body.language);
-      }
-      let settings = {
-        signupMode: this.auth.signupMode,
-        revisionRetention: this.snapshots.maxRevisionsPerTenant,
-      };
-      if (updatesServerSettings) {
-        settings = this.accounts.updateServerSettings(
-          authenticated.user.id,
-          authenticated.session.activeTenantId,
-          {
-            signupMode: body.signupMode,
-            revisionRetention: body.revisionRetention,
-            defaults: settings,
+      const settings = this.accounts.updateSettings(
+        authenticated.user.id,
+        authenticated.session.activeTenantId,
+        {
+          displayName: body.displayName,
+          language: body.language,
+          signupMode: body.signupMode,
+          revisionRetention: body.revisionRetention,
+          defaults: {
+            signupMode: this.auth.signupMode,
+            revisionRetention: this.snapshots.maxRevisionsPerTenant,
           },
-        );
+        },
+      );
+      if (updatesServerSettings) {
         this.auth.signupMode = settings.signupMode;
         this.snapshots.maxRevisionsPerTenant = settings.revisionRetention;
       }
-      sendJson(res, 200, { user, ...settings });
+      sendJson(res, 200, settings);
       return;
     }
 

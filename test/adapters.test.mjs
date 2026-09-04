@@ -294,12 +294,31 @@ test('setup migrates standalone launcher hooks and uninstall removes the npm hoo
   }
 
   await applyOperations(await planUninstall(movedOptions));
-  for (const agent of ['claude', 'codex', 'cursor']) {
-    const configPath = agent === 'claude'
-      ? fixture.paths.claude.settings
-      : fixture.paths[agent].hooks;
-    await assert.rejects(fs.stat(configPath), { code: 'ENOENT' });
-  }
+  assert.deepEqual(await readJson(fixture.paths.claude.settings), {});
+  assert.deepEqual(await readJson(fixture.paths.codex.hooks), {});
+  assert.deepEqual(await readJson(fixture.paths.cursor.hooks), { version: 1 });
+});
+
+test('uninstall preserves pre-existing minimal agent configuration files', async (t) => {
+  const fixture = await makeHome(t);
+  const setupOptions = options(fixture.env);
+  const originals = {
+    claude: '{}\n',
+    codex: '{}',
+    cursor: '{"version":1}',
+  };
+  await Promise.all([
+    write(fixture.paths.claude.settings, originals.claude),
+    write(fixture.paths.codex.hooks, originals.codex),
+    write(fixture.paths.cursor.hooks, originals.cursor),
+  ]);
+
+  await applyOperations(await planInstall(setupOptions));
+  await applyOperations(await planUninstall(setupOptions));
+
+  assert.equal(await fs.readFile(fixture.paths.claude.settings, 'utf8'), originals.claude);
+  assert.equal(await fs.readFile(fixture.paths.codex.hooks, 'utf8'), originals.codex);
+  assert.equal(await fs.readFile(fixture.paths.cursor.hooks, 'utf8'), originals.cursor);
 });
 
 test('uninstall removes only exact hnd hooks and managed skills', async (t) => {
@@ -412,6 +431,52 @@ test('an unmanaged skill collision is never overwritten or removed', async (t) =
     '---\nname: hnd-handoff\n---\nuser content\n',
   );
   assert.deepEqual(await planUninstall(setupOptions), []);
+});
+
+test('adapter setup refuses symlinked configuration and skill targets', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const fixture = await makeHome(t);
+  const configTarget = path.join(fixture.home, 'user-claude-settings.json');
+  const configContent = '{}\n';
+  await write(configTarget, configContent);
+  await fs.mkdir(path.dirname(fixture.paths.claude.settings), { recursive: true });
+  await fs.symlink(configTarget, fixture.paths.claude.settings);
+
+  await assert.rejects(
+    planInstall(options(fixture.env, { agents: 'claude' })),
+    (error) => (
+      error instanceof AdapterConflictError
+      && error.path === fixture.paths.claude.settings
+      && /symbolic link/u.test(error.message)
+    ),
+  );
+  await assert.rejects(
+    planUninstall(options(fixture.env, { agents: 'claude' })),
+    (error) => (
+      error instanceof AdapterConflictError
+      && error.path === fixture.paths.claude.settings
+      && /symbolic link/u.test(error.message)
+    ),
+  );
+  assert.equal((await fs.lstat(fixture.paths.claude.settings)).isSymbolicLink(), true);
+  assert.equal(await fs.readFile(configTarget, 'utf8'), configContent);
+
+  const skillTarget = path.join(fixture.home, 'user-cursor-skill.md');
+  await write(skillTarget, SKILL);
+  await fs.mkdir(path.dirname(fixture.paths.cursor.skill), { recursive: true });
+  await fs.symlink(skillTarget, fixture.paths.cursor.skill);
+
+  await assert.rejects(
+    planInstall(options(fixture.env, { agents: 'cursor' })),
+    (error) => (
+      error instanceof AdapterConflictError
+      && error.path === fixture.paths.cursor.skill
+      && /symbolic link/u.test(error.message)
+    ),
+  );
+  assert.equal((await fs.lstat(fixture.paths.cursor.skill)).isSymbolicLink(), true);
+  assert.equal(await fs.readFile(skillTarget, 'utf8'), SKILL);
 });
 
 test('hook output uses each agent vendor schema and safely escapes context', () => {

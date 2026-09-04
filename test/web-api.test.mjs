@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import {
@@ -1286,6 +1287,185 @@ test('sensitive device issuance requires recent passkey authentication and suppo
   });
   assert.equal(issuedInvitation.response.status, 201);
   assert.match(issuedInvitation.body.connectionCode, /^hndj_/);
+});
+
+test('settings validation rejects the whole update before changing any field', async (t) => {
+  const { url } = await fixture(t);
+  const owner = await registerOwner(null, url);
+
+  const invalidUpdates = [
+    {
+      displayName: 'Must not survive invalid language',
+      language: 'unsupported',
+    },
+    {
+      displayName: 'Must not survive invalid retention',
+      language: 'en',
+      signupMode: 'disabled',
+      revisionRetention: 0,
+    },
+  ];
+  for (const body of invalidUpdates) {
+    const rejected = await jsonRequest(url, '/api/web/settings', {
+      method: 'PUT',
+      headers: mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf }),
+      body,
+    });
+    assert.equal(rejected.response.status, 400);
+
+    const settings = await jsonRequest(url, '/api/web/settings', {
+      headers: { Cookie: owner.cookie },
+    });
+    assert.equal(settings.response.status, 200);
+    assert.equal(settings.body.user.displayName, 'Owner');
+    assert.equal(settings.body.user.language, 'auto');
+    assert.equal(settings.body.signupMode, 'open');
+    assert.equal(settings.body.revisionRetention, 50);
+  }
+});
+
+test('web requests garbage-collect expired auth state in bounded batches without a restart', async (t) => {
+  let now = Date.parse('2026-09-04T06:00:00.000Z');
+  const { server, url } = await fixture(t, { clock: () => now });
+  const owner = await registerOwner(server, url);
+  const passkeyOptions = await jsonRequest(url, '/api/web/security/passkeys/options', {
+    method: 'POST',
+    headers: mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf }),
+    body: { label: 'GC regression passkey' },
+  });
+  assert.equal(passkeyOptions.response.status, 200);
+  const passkeyVerification = await jsonRequest(url, '/api/web/security/passkeys/verify', {
+    method: 'POST',
+    headers: mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf }),
+    body: {
+      flowId: passkeyOptions.body.flowId,
+      response: { id: 'gc_regression_passkey', response: { clientDataJSON: 'test' } },
+    },
+  });
+  assert.equal(passkeyVerification.response.status, 201);
+  const database = server.accounts.getDatabase();
+  const createdAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + 1_000).toISOString();
+  const staleRows = 266;
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const insertWebAuthnFlow = database.prepare(`
+      INSERT INTO webauthn_flows
+        (id, token_hash, type, challenge, user_id, session_id, invite_id, signup_policy,
+         pending_username, pending_display_name, pending_webauthn_user_id,
+         pending_tenant_id, pending_role, created_at, expires_at, used_at)
+      VALUES (?, ?, 'login', ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL)
+    `);
+    const insertPasskeyFlow = database.prepare(`
+      INSERT INTO passkey_registration_flows
+        (id, token_hash, challenge, user_id, session_id, label, created_at, expires_at, used_at)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+    `);
+    const insertSession = database.prepare(`
+      INSERT INTO web_sessions
+        (id, token_hash, csrf_hash, user_id, active_tenant_id, created_at, last_seen_at,
+         idle_expires_at, absolute_expires_at, reauthenticated_at, recovery_required, revoked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+    `);
+    for (let index = 0; index < staleRows; index += 1) {
+      insertWebAuthnFlow.run(
+        `expired-webauthn-${index}`,
+        `expired-webauthn-hash-${index}`,
+        `expired_webauthn_challenge_${index}`,
+        createdAt,
+        expiresAt,
+      );
+      insertPasskeyFlow.run(
+        `expired-passkey-${index}`,
+        `expired-passkey-hash-${index}`,
+        `expired_passkey_challenge_${index}`,
+        owner.body.user.id,
+        owner.body.session.id,
+        createdAt,
+        expiresAt,
+      );
+      insertSession.run(
+        `expired-session-${index}`,
+        `expired-session-hash-${index}`,
+        `expired-csrf-hash-${index}`,
+        owner.body.user.id,
+        owner.body.activeTenantId,
+        createdAt,
+        createdAt,
+        expiresAt,
+        expiresAt,
+        createdAt,
+      );
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    if (database.isTransaction) database.exec('ROLLBACK');
+    throw error;
+  }
+
+  now += 2 * 60 * 1000;
+  const firstSweep = await jsonRequest(url, '/api/web/auth/session');
+  assert.equal(firstSweep.response.status, 200);
+  assert.equal(firstSweep.body.authenticated, false);
+  const afterFirstSweep = {
+    webauthn: Number(database.prepare(`
+      SELECT count(*) AS count FROM webauthn_flows WHERE expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+    passkey: Number(database.prepare(`
+      SELECT count(*) AS count FROM passkey_registration_flows WHERE expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+    sessions: Number(database.prepare(`
+      SELECT count(*) AS count FROM web_sessions WHERE idle_expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+  };
+  assert.deepEqual(afterFirstSweep, { webauthn: 10, passkey: 10, sessions: 10 });
+
+  now += 60_001;
+  const secondSweep = await jsonRequest(url, '/api/web/auth/session');
+  assert.equal(secondSweep.response.status, 200);
+  const afterSecondSweep = {
+    webauthn: Number(database.prepare(`
+      SELECT count(*) AS count FROM webauthn_flows WHERE expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+    passkey: Number(database.prepare(`
+      SELECT count(*) AS count FROM passkey_registration_flows WHERE expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+    sessions: Number(database.prepare(`
+      SELECT count(*) AS count FROM web_sessions WHERE idle_expires_at <= ?
+    `).get(new Date(now).toISOString()).count),
+  };
+  assert.deepEqual(afterSecondSweep, { webauthn: 0, passkey: 0, sessions: 0 });
+  assert.equal(
+    Number(database.prepare('SELECT count(*) AS count FROM webauthn_flows').get().count),
+    0,
+  );
+  assert.equal(
+    Number(database.prepare('SELECT count(*) AS count FROM passkey_registration_flows').get().count),
+    0,
+  );
+  assert.equal(
+    Number(database.prepare('SELECT count(*) AS count FROM web_sessions').get().count),
+    1,
+  );
+});
+
+test('request maintenance never turns an unrelated read into a database-busy failure', async (t) => {
+  let now = Date.parse('2026-09-04T06:00:00.000Z');
+  const { root, url } = await fixture(t, { clock: () => now });
+  const blocker = new DatabaseSync(path.join(root, 'data', 'hnd.sqlite'));
+  t.after(() => blocker.close());
+  blocker.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
+  now += 2 * 60 * 1000;
+
+  const startedAt = performance.now();
+  const session = await jsonRequest(url, '/api/web/auth/session');
+  const elapsed = performance.now() - startedAt;
+  assert.equal(session.response.status, 200);
+  assert.equal(session.body.authenticated, false);
+  assert.ok(elapsed < 2_500, `request maintenance waited ${elapsed}ms for a GC lock`);
+
+  blocker.exec('ROLLBACK');
 });
 
 test('rate limiting separates nginx clients using explicitly trusted private proxy metadata', async (t) => {

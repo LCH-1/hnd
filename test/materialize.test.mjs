@@ -39,6 +39,16 @@ test('exclude marker round-trips user bytes with LF, CRLF, and no final newline'
   }
 });
 
+test('exclude removal keeps user lines appended after a managed block separate', () => {
+  for (const [source, appended, expected] of [
+    ['user-pattern', 'later-pattern\n', 'user-pattern\nlater-pattern\n'],
+    ['user-pattern\r\nnext-pattern', 'later-pattern\r\n', 'user-pattern\r\nnext-pattern\r\nlater-pattern\r\n'],
+  ]) {
+    const installed = installExcludeBlock(source);
+    assert.equal(removeExcludeBlock(`${installed}${appended}`), expected);
+  }
+});
+
 test('materialization owns one Cursor rule, is idempotent, and uninstall restores exclude bytes', async (t) => {
   const fixture = await repositoryFixture(t);
   const originalExclude = 'node_modules/\n# user bytes stay exact';

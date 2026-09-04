@@ -45,6 +45,8 @@ export const KNOWLEDGE_RELATIONS = Object.freeze([
 const MAX_SOURCES = 20;
 const MAX_RELATIONSHIPS = 20;
 const MAX_HISTORY = 20;
+const KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION = 1;
+const KNOWLEDGE_MERGE_JOURNAL_FILENAME = 'knowledge-merge-journal.json';
 
 function requireText(value, field, { maxChars, maxBytes, allowEmpty = false } = {}) {
   if (typeof value !== 'string' || value.includes('\0')) {
@@ -333,14 +335,89 @@ async function resolveKnowledgeScope({
   return { scope: normalizedScope, repoId: resolvedRepoId, environment: label };
 }
 
-async function readAll(env, clock) {
-  const state = await initializeState({ env, clock });
+async function readAllUnlocked(state) {
   const files = await listFiles(state.knowledge, { suffix: '.json' });
   return Promise.all(files.map((file) => readEntry(file, path.basename(file, '.json'))));
 }
 
 function publicEntry(entry) {
   return structuredClone(entry);
+}
+
+function knowledgeMergeJournalPath(state) {
+  return path.join(state.locks, KNOWLEDGE_MERGE_JOURNAL_FILENAME);
+}
+
+function validKnowledgeMergeJournal(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length === 4
+    && value.schemaVersion === KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION
+    && value.kind === 'knowledge-merge'
+    && validateKnowledgeEntry(value.target)
+    && validateKnowledgeEntry(value.source)
+    && value.target.id !== value.source.id
+    && value.source.state === 'superseded'
+    && Array.isArray(value.target.relationships)
+    && value.target.relationships.some((relationship) => (
+      relationship.type === 'supersedes' && relationship.targetId === value.source.id
+    ))
+    && Array.isArray(value.source.relationships)
+    && value.source.relationships.some((relationship) => (
+      relationship.type === 'related' && relationship.targetId === value.target.id
+    ))
+  );
+}
+
+function relationshipsWithRequiredLink(relationships, required) {
+  const withoutRequired = relationships.filter((relationship) => (
+    relationship.type !== required.type || relationship.targetId !== required.targetId
+  ));
+  return [
+    ...withoutRequired.slice(0, MAX_RELATIONSHIPS - 1),
+    required,
+  ];
+}
+
+async function recoverKnowledgeMerge(state) {
+  const journalFile = knowledgeMergeJournalPath(state);
+  const journal = await readJson(journalFile, {
+    optional: true,
+    validate: validKnowledgeMergeJournal,
+  });
+  if (!journal) return false;
+  await writeJsonAtomic(notePath(state.knowledge, journal.target.id), journal.target);
+  await writeJsonAtomic(notePath(state.knowledge, journal.source.id), journal.source);
+  await removeFile(journalFile);
+  return true;
+}
+
+async function withKnowledgeLock(state, callback) {
+  return withFileLock(path.join(state.locks, 'knowledge.lock'), async () => {
+    await recoverKnowledgeMerge(state);
+    return callback();
+  });
+}
+
+export async function withKnowledgeSnapshotLock(homeDirectory, callback) {
+  const home = path.resolve(homeDirectory);
+  return withKnowledgeLock({
+    knowledge: path.join(home, 'knowledge'),
+    locks: path.join(home, 'locks'),
+  }, callback);
+}
+
+async function getKnowledgeUnlocked(state, id) {
+  try {
+    return publicEntry(await readEntry(notePath(state.knowledge, id), id));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new CoreError('KNOWLEDGE_NOT_FOUND', `Knowledge entry not found: ${id}`);
+    }
+    throw error;
+  }
 }
 
 export async function addKnowledge({
@@ -391,7 +468,7 @@ export async function addKnowledge({
     createdAt: now,
     updatedAt: now,
   };
-  await withFileLock(path.join(state.locks, 'knowledge.lock'), async () => {
+  await withKnowledgeLock(state, async () => {
     await writeJsonAtomic(notePath(state.knowledge, entry.id), entry, { overwrite: false });
   });
   return publicEntry(entry);
@@ -399,17 +476,10 @@ export async function addKnowledge({
 
 export async function getKnowledge({ id, env = process.env, clock = Date } = {}) {
   const state = await initializeState({ env, clock });
-  try {
-    return publicEntry(await readEntry(notePath(state.knowledge, id), id));
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      throw new CoreError('KNOWLEDGE_NOT_FOUND', `Knowledge entry not found: ${id}`);
-    }
-    throw error;
-  }
+  return withKnowledgeLock(state, () => getKnowledgeUnlocked(state, id));
 }
 
-export async function listKnowledge({
+async function listKnowledgeUnlocked({
   tag,
   scope,
   repoId,
@@ -421,11 +491,11 @@ export async function listKnowledge({
   pinned,
   env = process.env,
   clock = Date,
-} = {}) {
+}, state) {
   const requestedTag = tag === undefined
     ? null
     : requireText(tag, 'tag', { maxChars: MAX_TAG_CHARS }).normalize('NFKC').toLocaleLowerCase('und');
-  const entries = await readAll(env, clock);
+  const entries = await readAllUnlocked(state);
   const requestedScope = scope === undefined ? null : normalizeKnowledgeScope(scope);
   let requestedRepoId = repoId ?? null;
   if (!requestedRepoId && cwd) {
@@ -450,11 +520,21 @@ export async function listKnowledge({
     .map(publicEntry);
 }
 
+export async function listKnowledge(options = {}) {
+  const env = options.env === undefined ? process.env : options.env;
+  const clock = options.clock === undefined ? Date : options.clock;
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(
+    state,
+    () => listKnowledgeUnlocked({ ...options, env, clock }, state),
+  );
+}
+
 function searchable(value) {
   return value.normalize('NFKC').toLocaleLowerCase('und');
 }
 
-export async function searchKnowledge({
+async function searchKnowledgeUnlocked({
   query,
   tag,
   scope,
@@ -464,10 +544,13 @@ export async function searchKnowledge({
   env = process.env,
   clock = Date,
   limit = 100,
-} = {}) {
+}, state) {
   const normalizedQuery = requireText(query, 'query', { maxChars: 500 });
-  const entries = await listKnowledge({ tag, scope, repoId, cwd, environment, env, clock });
-  const allEntries = await readAll(env, clock);
+  const entries = await listKnowledgeUnlocked(
+    { tag, scope, repoId, cwd, environment, env, clock },
+    state,
+  );
+  const allEntries = await readAllUnlocked(state);
   const allowed = new Map(entries.map((entry) => [entry.id, entry]));
   let matches;
   try {
@@ -495,10 +578,20 @@ export async function searchKnowledge({
   }).filter(Boolean).sort((left, right) => right.score - left.score).slice(0, limit);
 }
 
-export async function relevantKnowledge({
+export async function searchKnowledge(options = {}) {
+  const env = options.env === undefined ? process.env : options.env;
+  const clock = options.clock === undefined ? Date : options.clock;
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(
+    state,
+    () => searchKnowledgeUnlocked({ ...options, env, clock }, state),
+  );
+}
+
+async function relevantKnowledgeUnlocked({
   query = '', repoId, environment, limit = 5, env = process.env, clock = Date,
-} = {}) {
-  const entries = await readAll(env, clock);
+}, state) {
+  const entries = await readAllUnlocked(state);
   const applicable = entries.filter((entry) => (
     entry.approval === 'approved'
     && !['contradicted', 'retired', 'superseded'].includes(entry.state)
@@ -559,6 +652,16 @@ export async function relevantKnowledge({
   return [...selected.values()];
 }
 
+export async function relevantKnowledge(options = {}) {
+  const env = options.env === undefined ? process.env : options.env;
+  const clock = options.clock === undefined ? Date : options.clock;
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(
+    state,
+    () => relevantKnowledgeUnlocked({ ...options, env, clock }, state),
+  );
+}
+
 export async function assessKnowledgeFreshness(entry, { root } = {}) {
   const result = publicEntry(entry);
   const fileSources = result.sources.filter((source) => source.kind === 'file' && source.hash);
@@ -581,6 +684,99 @@ export async function assessKnowledgeFreshness(entry, { root } = {}) {
     }
   }
   return { ...result, freshness: 'current' };
+}
+
+async function normalizeKnowledgeUpdate(current, patch, { env, clock }) {
+  const {
+    id,
+    title,
+    body,
+    tags,
+    scope,
+    repoId,
+    cwd,
+    environment,
+    type,
+    state: knowledgeState,
+    pinned,
+    sources,
+    relationships,
+    approval,
+    feedback,
+    feedbackKind,
+    actor,
+    deviceId,
+    agent,
+  } = patch;
+  if (
+    title === undefined
+    && body === undefined
+    && tags === undefined
+    && scope === undefined
+    && repoId === undefined
+    && environment === undefined
+    && type === undefined
+    && knowledgeState === undefined
+    && pinned === undefined
+    && sources === undefined
+    && relationships === undefined
+    && approval === undefined
+    && feedback === undefined
+    && feedbackKind === undefined
+  ) {
+    throw new CoreError('INVALID_KNOWLEDGE', 'Provide content or scope fields to update');
+  }
+  const location = scope === undefined && repoId === undefined && environment === undefined
+    ? {
+        scope: current.scope,
+        repoId: current.repoId,
+        environment: current.environment,
+      }
+    : await resolveKnowledgeScope({
+        scope: scope ?? current.scope,
+        repoId: repoId ?? current.repoId,
+        cwd,
+        environment: environment ?? current.environment,
+        env,
+        clock,
+      });
+  const entry = {
+    ...current,
+    title: title === undefined ? current.title : requireText(title, 'title', { maxChars: MAX_TITLE_CHARS }),
+    body: body === undefined ? current.body : requireText(body, 'body', { maxBytes: MAX_BODY_BYTES, allowEmpty: true }),
+    tags: tags === undefined ? current.tags : normalizeTags(tags),
+    type: type === undefined ? current.type : enumValue(type, KNOWLEDGE_TYPES, 'type', 'note'),
+    state: knowledgeState === undefined
+      ? current.state
+      : enumValue(knowledgeState, KNOWLEDGE_STATES, 'state', 'verified'),
+    pinned: pinned === undefined ? current.pinned : Boolean(pinned),
+    sources: sources === undefined ? current.sources : normalizeSources(sources),
+    relationships: relationships === undefined
+      ? current.relationships
+      : normalizeRelationships(relationships),
+    approval: approval === undefined
+      ? current.approval
+      : enumValue(approval, KNOWLEDGE_APPROVALS, 'approval', 'approved'),
+    feedback: feedback === undefined ? current.feedback : normalizeFeedback(feedback),
+    ...location,
+    updatedAt: isoNow(clock),
+  };
+  if (feedbackKind !== undefined) {
+    const key = enumValue(feedbackKind, ['helpful', 'wrong', 'irrelevant'], 'feedbackKind');
+    entry.feedback = { ...entry.feedback, [key]: entry.feedback[key] + 1 };
+  }
+  entry.history = [
+    ...current.history,
+    historyRecord({
+      at: entry.updatedAt,
+      action: feedbackKind ? `feedback:${feedbackKind}` : approval && approval !== current.approval ? approval : 'updated',
+      actor,
+      deviceId,
+      agent,
+      before: historySnapshot(current),
+    }),
+  ].slice(-MAX_HISTORY);
+  return entry;
 }
 
 export async function updateKnowledge({
@@ -607,76 +803,29 @@ export async function updateKnowledge({
   clock = Date,
 } = {}) {
   const state = await initializeState({ env, clock });
-  return withFileLock(path.join(state.locks, 'knowledge.lock'), async () => {
-    const current = await getKnowledge({ id, env, clock });
-    if (
-      title === undefined
-      && body === undefined
-      && tags === undefined
-      && scope === undefined
-      && repoId === undefined
-      && environment === undefined
-      && type === undefined
-      && knowledgeState === undefined
-      && pinned === undefined
-      && sources === undefined
-      && relationships === undefined
-      && approval === undefined
-      && feedback === undefined
-      && feedbackKind === undefined
-    ) {
-      throw new CoreError('INVALID_KNOWLEDGE', 'Provide content or scope fields to update');
-    }
-    const location = scope === undefined && repoId === undefined && environment === undefined
-      ? {
-          scope: current.scope,
-          repoId: current.repoId,
-          environment: current.environment,
-        }
-      : await resolveKnowledgeScope({
-          scope: scope ?? current.scope,
-          repoId: repoId ?? current.repoId,
-          cwd,
-          environment: environment ?? current.environment,
-          env,
-          clock,
-        });
-    const entry = {
-      ...current,
-      title: title === undefined ? current.title : requireText(title, 'title', { maxChars: MAX_TITLE_CHARS }),
-      body: body === undefined ? current.body : requireText(body, 'body', { maxBytes: MAX_BODY_BYTES, allowEmpty: true }),
-      tags: tags === undefined ? current.tags : normalizeTags(tags),
-      type: type === undefined ? current.type : enumValue(type, KNOWLEDGE_TYPES, 'type', 'note'),
-      state: knowledgeState === undefined
-        ? current.state
-        : enumValue(knowledgeState, KNOWLEDGE_STATES, 'state', 'verified'),
-      pinned: pinned === undefined ? current.pinned : Boolean(pinned),
-      sources: sources === undefined ? current.sources : normalizeSources(sources),
-      relationships: relationships === undefined
-        ? current.relationships
-        : normalizeRelationships(relationships),
-      approval: approval === undefined
-        ? current.approval
-        : enumValue(approval, KNOWLEDGE_APPROVALS, 'approval', 'approved'),
-      feedback: feedback === undefined ? current.feedback : normalizeFeedback(feedback),
-      ...location,
-      updatedAt: isoNow(clock),
-    };
-    if (feedbackKind !== undefined) {
-      const key = enumValue(feedbackKind, ['helpful', 'wrong', 'irrelevant'], 'feedbackKind');
-      entry.feedback = { ...entry.feedback, [key]: entry.feedback[key] + 1 };
-    }
-    entry.history = [
-      ...current.history,
-      historyRecord({
-        at: entry.updatedAt,
-        action: feedbackKind ? `feedback:${feedbackKind}` : approval && approval !== current.approval ? approval : 'updated',
-        actor,
-        deviceId,
-        agent,
-        before: historySnapshot(current),
-      }),
-    ].slice(-MAX_HISTORY);
+  return withKnowledgeLock(state, async () => {
+    const current = await getKnowledgeUnlocked(state, id);
+    const entry = await normalizeKnowledgeUpdate(current, {
+      id,
+      title,
+      body,
+      tags,
+      scope,
+      repoId,
+      cwd,
+      environment,
+      type,
+      state: knowledgeState,
+      pinned,
+      sources,
+      relationships,
+      approval,
+      feedback,
+      feedbackKind,
+      actor,
+      deviceId,
+      agent,
+    }, { env, clock });
     await writeJsonAtomic(notePath(state.knowledge, id), entry);
     return publicEntry(entry);
   });
@@ -684,7 +833,7 @@ export async function updateKnowledge({
 
 export async function removeKnowledge({ id, env = process.env, clock = Date } = {}) {
   const state = await initializeState({ env, clock });
-  return withFileLock(path.join(state.locks, 'knowledge.lock'), async () => ({
+  return withKnowledgeLock(state, async () => ({
     id,
     removed: await removeFile(notePath(state.knowledge, id)),
   }));
@@ -702,13 +851,13 @@ function similarityTokens(entry) {
   return new Set(grams);
 }
 
-export async function findKnowledgeDuplicates({
+async function findKnowledgeDuplicatesUnlocked({
   threshold = 0.65, env = process.env, clock = Date,
-} = {}) {
+}, state) {
   if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
     throw new CoreError('INVALID_KNOWLEDGE', 'threshold must be between 0 and 1');
   }
-  const entries = (await readAll(env, clock)).filter((entry) => (
+  const entries = (await readAllUnlocked(state)).filter((entry) => (
     entry.approval === 'approved' && !['retired', 'superseded'].includes(entry.state)
   ));
   const sets = new Map(entries.map((entry) => [entry.id, similarityTokens(entry)]));
@@ -730,38 +879,69 @@ export async function findKnowledgeDuplicates({
   return matches.sort((a, b) => b.score - a.score).slice(0, 100);
 }
 
+export async function findKnowledgeDuplicates(options = {}) {
+  const env = options.env === undefined ? process.env : options.env;
+  const clock = options.clock === undefined ? Date : options.clock;
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(
+    state,
+    () => findKnowledgeDuplicatesUnlocked({ ...options, env, clock }, state),
+  );
+}
+
 export async function mergeKnowledge({
   targetId, sourceId, env = process.env, clock = Date, actor,
 } = {}) {
   if (targetId === sourceId) throw new CoreError('INVALID_KNOWLEDGE', 'Choose two different entries');
-  const [target, source] = await Promise.all([
-    getKnowledge({ id: targetId, env, clock }),
-    getKnowledge({ id: sourceId, env, clock }),
-  ]);
-  const mergedBody = target.body.includes(source.body)
-    ? target.body
-    : [target.body, source.body].filter(Boolean).join('\n\n---\n\n');
-  const updated = await updateKnowledge({
-    id: target.id,
-    body: mergedBody,
-    tags: [...target.tags, ...source.tags],
-    sources: [...target.sources, ...source.sources].slice(0, MAX_SOURCES),
-    relationships: [
-      ...target.relationships,
-      { type: 'supersedes', targetId: source.id },
-    ].slice(0, MAX_RELATIONSHIPS),
-    actor,
-    env,
-    clock,
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(state, async () => {
+    const [target, source] = await Promise.all([
+      getKnowledgeUnlocked(state, targetId),
+      getKnowledgeUnlocked(state, sourceId),
+    ]);
+    const mergedBody = target.body.includes(source.body)
+      ? target.body
+      : [target.body, source.body].filter(Boolean).join('\n\n---\n\n');
+    const targetRelationship = { type: 'supersedes', targetId: source.id };
+    const sourceRelationship = { type: 'related', targetId: target.id };
+    const updatedTarget = await normalizeKnowledgeUpdate(target, {
+      id: target.id,
+      body: mergedBody,
+      tags: [...target.tags, ...source.tags],
+      sources: [...target.sources, ...source.sources].slice(0, MAX_SOURCES),
+      relationships: relationshipsWithRequiredLink(target.relationships, targetRelationship),
+      actor,
+    }, { env, clock });
+    const updatedSource = await normalizeKnowledgeUpdate(source, {
+      id: source.id,
+      state: 'superseded',
+      relationships: relationshipsWithRequiredLink(source.relationships, sourceRelationship),
+      actor,
+    }, { env, clock });
+    const journalFile = knowledgeMergeJournalPath(state);
+    const journal = {
+      schemaVersion: KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION,
+      kind: 'knowledge-merge',
+      target: updatedTarget,
+      source: updatedSource,
+    };
+    if (!validKnowledgeMergeJournal(journal)) {
+      throw new CoreError(
+        'STATE_CORRUPT',
+        'Generated knowledge merge journal is inconsistent',
+      );
+    }
+    const journalCreated = await writeJsonAtomic(journalFile, journal, { overwrite: false });
+    if (!journalCreated) {
+      throw new CoreError(
+        'STATE_CORRUPT',
+        `Knowledge merge journal already exists: ${journalFile}`,
+        { path: journalFile },
+      );
+    }
+    await writeJsonAtomic(notePath(state.knowledge, target.id), updatedTarget);
+    await writeJsonAtomic(notePath(state.knowledge, source.id), updatedSource);
+    await removeFile(journalFile);
+    return publicEntry(updatedTarget);
   });
-  await updateKnowledge({
-    id: source.id,
-    state: 'superseded',
-    relationships: [...source.relationships, { type: 'related', targetId: target.id }]
-      .slice(0, MAX_RELATIONSHIPS),
-    actor,
-    env,
-    clock,
-  });
-  return updated;
 }

@@ -63,8 +63,17 @@ test('setup keeps a server retry path and lets users defer the optional PC conne
     /\$\("#recovery-retry"\)\.addEventListener\("click", loadRecoveryCodes\)/u,
   );
   assert.match(script, /api\.recoveryConfirm/u);
+  assert.match(script, /listOfflineWorkspaceIds/u);
   assert.match(script, /withRecentAuthentication[\s\S]*?unlockManagedBrowserVault/u);
   assert.match(script, /withRecentAuthentication[\s\S]*?adoptBrowserVaultKey/u);
+  const logoutHandler = script.slice(
+    script.indexOf('$("#setup-exit").addEventListener'),
+    script.indexOf('window.addEventListener("beforeunload"'),
+  );
+  assert.match(
+    logoutHandler,
+    /localTenantIds\(\)[\s\S]*?logoutAfterRevokingOfflineAccess\([\s\S]*?localVaults[\s\S]*?\(\) => api\.logout\(\)[\s\S]*?sessionId: webSessionId\(\)[\s\S]*?window\.location\.replace/u,
+  );
   assert.match(
     script,
     /catch \(error\) \{[\s\S]*?setHidden\(createPanel, !retryWithCreate\)[\s\S]*?setHidden\(pairPanel, retryWithCreate\)/u,

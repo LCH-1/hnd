@@ -3,6 +3,7 @@ import { webcrypto } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  encryptBytes,
   encryptSnapshot,
   loadBrowserVault,
 } from '../src/browser/index.mjs';
@@ -197,5 +198,37 @@ test('remote snapshot authentication failures expose a stable vault-key mismatch
   );
   serverKey.fill(0);
   staleBrowserKey.fill(0);
+  encrypted.fill(0);
+});
+
+test('authenticated malformed snapshot data is not presented as a replaceable key mismatch', async () => {
+  const key = new Uint8Array(32).fill(0x51);
+  const encrypted = await encryptBytes(
+    new TextEncoder().encode('{"schemaVersion":'),
+    key,
+    { crypto: webcrypto },
+  );
+
+  await assert.rejects(
+    loadEncryptedSnapshot('tenant-malformed', {
+      crypto: webcrypto,
+      storage: {},
+      api: {
+        async vaultSnapshot() {
+          return {
+            snapshot: Buffer.from(encrypted).toString('base64url'),
+            etag: '"malformed"',
+          };
+        },
+      },
+      async loadBrowserVault() {
+        return { vaultKey: key.slice() };
+      },
+    }),
+    (error) =>
+      error?.code !== 'vault_key_mismatch' &&
+      /저장본의 암호를 풀 수 없습니다/u.test(error?.message),
+  );
+  key.fill(0);
   encrypted.fill(0);
 });

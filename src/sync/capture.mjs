@@ -7,6 +7,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { withKnowledgeSnapshotLock } from '../core/knowledge.mjs';
 import {
   atomicWriteFile,
   ensurePrivateDirectory,
@@ -223,13 +224,15 @@ export async function captureSyncSnapshot(homeDirectory, options = {}) {
     files,
     'repositories',
   );
-  await walkManagedDirectory(
-    safeJoin(home, 'knowledge'),
-    'knowledge',
-    limits,
-    files,
-    'knowledge',
-  );
+  if (homeMetadata) {
+    await withKnowledgeSnapshotLock(home, () => walkManagedDirectory(
+      safeJoin(home, 'knowledge'),
+      'knowledge',
+      limits,
+      files,
+      'knowledge',
+    ));
+  }
   await walkManagedDirectory(
     safeJoin(home, 'rules'),
     'rules',

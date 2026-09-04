@@ -22,6 +22,7 @@ import {
   generateVaultKey,
   importBrowserVault,
   loadBrowserVault,
+  SNAPSHOT_AUTHENTICATION_ERROR_CODE,
   unwrapVaultKey,
   wrapVaultKey,
 } from '../src/browser/index.mjs';
@@ -125,7 +126,9 @@ test('browser WebCrypto snapshots are byte-compatible with the existing Node env
   tampered[tampered.byteLength - 1] ^= 1;
   await assert.rejects(
     decryptSnapshot(tampered, vaultKey, { crypto: webcrypto }),
-    /authentication failed/,
+    (error) =>
+      error?.code === SNAPSHOT_AUTHENTICATION_ERROR_CODE &&
+      /authentication failed/.test(error.message),
   );
   await assert.rejects(
     encryptBytes(Uint8Array.of(1, 2), vaultKey, { crypto: webcrypto, maxBytes: 1 }),

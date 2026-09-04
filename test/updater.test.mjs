@@ -3,14 +3,16 @@ import {
   generateKeyPairSync,
   sign,
 } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { MANAGED_SKILL_MARKER } from '../src/adapters/common.mjs';
+import { withAdapterMutationLock } from '../src/adapters/mutation-lock.mjs';
 import { VERSION as RUNTIME_VERSION } from '../src/constants.mjs';
-import { launcherMain } from '../src/launcher.mjs';
+import { launcherMain, scheduleAutomaticUpdate } from '../src/launcher.mjs';
 import { LAUNCHER_VERSION } from '../src/launcher-version.mjs';
 import { agentPaths, statePaths } from '../src/paths.mjs';
 import {
@@ -22,7 +24,10 @@ import {
   installConnectorBundle,
   smokeConnectorRuntime,
 } from '../src/update/install.mjs';
-import { refreshManagedSkills } from '../src/update/integration.mjs';
+import {
+  refreshManagedSkills,
+  refreshManagedSkillsAfterUpdate,
+} from '../src/update/integration.mjs';
 import {
   CONNECTOR_RELEASE_KEY_ID,
   canonicalJson,
@@ -199,6 +204,28 @@ test('update help describes the command-triggered short background check accurat
   assert.match(help, /계속 실행되는 업데이트 프로그램은 없습니다/u);
   assert.doesNotMatch(help, /평소에는 6시간마다/u);
   assert.equal(stderr.text(), '');
+});
+
+test('automatic update spawn errors never escape into the foreground command', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  env.HND_DISABLE_AUTO_UPDATE = '0';
+  await configureRemote(env);
+  const child = new EventEmitter();
+  let unrefCalled = false;
+  child.unref = () => {
+    unrefCalled = true;
+  };
+
+  const scheduled = await scheduleAutomaticUpdate(env, {
+    execPath: path.join(env.HND_USER_HOME, 'missing-node'),
+    spawnImpl: () => child,
+  });
+
+  assert.equal(scheduled, true);
+  assert.equal(unrefCalled, true);
+  assert.doesNotThrow(() => child.emit('error', Object.assign(new Error('spawn failed'), {
+    code: 'ENOENT',
+  })));
 });
 
 test('update status separates the npm launcher, local runtime, and server runtime', async (t) => {
@@ -445,6 +472,81 @@ test('runtime refresh updates only existing managed skills and never installs or
   assert.deepEqual(await refreshManagedSkills(installed.directory, env), []);
 });
 
+test('a delayed older updater cannot replace skills from the active runtime', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  const keys = releaseKeyPair();
+  const oldSkill = `${MANAGED_SKILL_MARKER}\n# Runtime v1 skill\n`;
+  const newSkill = `${MANAGED_SKILL_MARKER}\n# Runtime v2 skill\n`;
+  const oldRelease = releaseFixture(keys, {
+    sequence: 1,
+    version: '1.0.0',
+    files: [
+      fileDescriptor('src/cli.mjs', 'export async function main() {}\n'),
+      fileDescriptor('assets/hnd-handoff/SKILL.md', oldSkill),
+    ],
+  });
+  const newRelease = releaseFixture(keys, {
+    sequence: 2,
+    version: '2.0.0',
+    files: [
+      fileDescriptor('src/cli.mjs', 'export async function main() {}\n'),
+      fileDescriptor('assets/hnd-handoff/SKILL.md', newSkill),
+    ],
+  });
+  const oldInstalled = await installConnectorBundle(
+    oldRelease.manifest,
+    oldRelease.bundle.bytes,
+    { env, smoke: async () => {} },
+  );
+  const skillPath = agentPaths(env).claude.skill;
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.writeFile(skillPath, `${MANAGED_SKILL_MARKER}\n# Initial skill\n`);
+  const newInstalled = await installConnectorBundle(
+    newRelease.manifest,
+    newRelease.bundle.bytes,
+    { env, smoke: async () => {} },
+  );
+
+  assert.deepEqual(await refreshManagedSkills(newInstalled.directory, env), [{
+    agent: 'claude',
+    path: skillPath,
+  }]);
+  assert.equal(await fs.readFile(skillPath, 'utf8'), newSkill);
+  assert.deepEqual(await refreshManagedSkills(oldInstalled.directory, env), []);
+  assert.equal(await fs.readFile(skillPath, 'utf8'), newSkill);
+});
+
+test('runtime refresh cannot recreate a managed skill removed by concurrent uninstall', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  const keys = releaseKeyPair();
+  const desired = `${MANAGED_SKILL_MARKER}\n# Updated runtime skill\n`;
+  const release = releaseFixture(keys, {
+    files: [
+      fileDescriptor('src/cli.mjs', 'export async function main() {}\n'),
+      fileDescriptor('assets/hnd-handoff/SKILL.md', desired),
+    ],
+  });
+  const installed = await installConnectorBundle(release.manifest, release.bundle.bytes, {
+    env,
+    smoke: async () => {},
+  });
+  const skillPath = agentPaths(env).claude.skill;
+  const oldManaged = `${MANAGED_SKILL_MARKER}\n# Old managed skill\n`;
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.writeFile(skillPath, oldManaged, { mode: 0o600 });
+
+  let refresh;
+  await withAdapterMutationLock(env, async () => {
+    refresh = refreshManagedSkills(installed.directory, env);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(await fs.readFile(skillPath, 'utf8'), oldManaged);
+    await fs.rm(skillPath);
+  });
+
+  assert.deepEqual(await refresh, []);
+  await assert.rejects(fs.lstat(skillPath), { code: 'ENOENT' });
+});
+
 test('runtime refresh refuses a managed-skill symlink without following or replacing it', async (t) => {
   if (process.platform === 'win32') {
     t.skip('Windows symlink creation requires environment-specific privileges');
@@ -539,6 +641,64 @@ test('runtime refresh requires an intact completion marker and real hash-verifie
     );
     assert.equal(await fs.readFile(paths.claude.skill, 'utf8'), oldManaged);
   }
+});
+
+test('a no-change apply retries managed skill refresh for the active runtime', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows symlink creation requires environment-specific privileges');
+    return;
+  }
+  const { root, env } = await temporaryEnvironment(t);
+  const remote = await configureRemote(env);
+  const keys = releaseKeyPair();
+  const publicKeyPath = await writePublicKey(root, keys.publicKey);
+  const desired = `${MANAGED_SKILL_MARKER}\n# Current runtime skill\n`;
+  const release = releaseFixture(keys, {
+    files: [
+      fileDescriptor('src/cli.mjs', 'export async function main() {}\n'),
+      fileDescriptor('assets/hnd-handoff/SKILL.md', desired),
+    ],
+  });
+  const fetchImpl = async (target, options) => {
+    assert.equal(options.headers.Authorization, `Bearer ${remote.deviceToken}`);
+    const url = new URL(target);
+    if (url.pathname === '/v1/connector/manifest') {
+      return byteResponse(Buffer.from(JSON.stringify(release.manifest), 'utf8'));
+    }
+    if (url.pathname === release.manifest.bundle.path) return byteResponse(release.bundle.bytes);
+    return byteResponse(Buffer.from('not found'), 404);
+  };
+  const updateOptions = {
+    env,
+    launcherVersion: '0.1.1',
+    publicKeyPath,
+    fetchImpl,
+    smoke: async () => {},
+  };
+  const first = await applyConnectorUpdate(updateOptions);
+  assert.equal(first.installed, true);
+
+  const skillPath = agentPaths(env).claude.skill;
+  const outside = path.join(root, 'linked-managed-skill.md');
+  await fs.writeFile(outside, `${MANAGED_SKILL_MARKER}\n# Linked skill\n`);
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.symlink(outside, skillPath);
+  await assert.rejects(
+    refreshManagedSkillsAfterUpdate(first, env),
+    /regular file|symbolic link|unsafe/i,
+  );
+
+  await fs.unlink(skillPath);
+  await fs.writeFile(skillPath, `${MANAGED_SKILL_MARKER}\n# Stale skill\n`);
+  const second = await applyConnectorUpdate(updateOptions);
+  assert.equal(second.installed, false);
+  assert.equal(second.current.sha256, first.pointer.sha256);
+  assert.equal(second.directory, undefined);
+  assert.deepEqual(await refreshManagedSkillsAfterUpdate(second, env), [{
+    agent: 'claude',
+    path: skillPath,
+  }]);
+  assert.equal(await fs.readFile(skillPath, 'utf8'), desired);
 });
 
 test('the real runtime smoke check imports a valid module and rejects a broken module', async (t) => {
@@ -707,6 +867,51 @@ test('launcher uses a cached previous runtime offline, rolls back a broken impor
   const updateState = await readUpdateState(env);
   assert.deepEqual(
     updateState.origins[new URL('https://offline.example.test').href].quarantine,
+    [2],
+  );
+});
+
+test('launcher rolls back a hash-invalid current runtime only once', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  await configureRemote(env, 'https://integrity.example.test');
+  const keys = releaseKeyPair();
+  const previous = releaseFixture(keys, {
+    sequence: 1,
+    version: '1.0.0',
+    source: 'export async function main(_argv, options) { options.stdout.write("previous\\n"); }\n',
+  });
+  const current = releaseFixture(keys, {
+    sequence: 2,
+    version: '1.1.0',
+    source: 'export async function main(_argv, options) { options.stdout.write("current\\n"); }\n',
+  });
+  await installConnectorBundle(previous.manifest, previous.bundle.bytes, {
+    env,
+    smoke: async () => {},
+  });
+  const installedCurrent = await installConnectorBundle(current.manifest, current.bundle.bytes, {
+    env,
+    smoke: async () => {},
+  });
+  await fs.appendFile(path.join(installedCurrent.directory, 'src', 'cli.mjs'), '// corrupt\n');
+  assert.equal(await runtimeReady(installedCurrent.pointer, env), false);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const stdout = outputStream();
+    await launcherMain(['integrity-probe'], {
+      env,
+      cwd: env.HND_USER_HOME,
+      stdin: null,
+      stdout,
+      stderr: outputStream(),
+    });
+    assert.equal(stdout.text(), 'previous\n');
+    assert.equal((await readRuntimePointer('current', env)).sequence, 1);
+    assert.equal((await readRuntimePointer('previous', env)).sequence, 2);
+  }
+  const updateState = await readUpdateState(env);
+  assert.deepEqual(
+    updateState.origins[new URL('https://integrity.example.test').href].quarantine,
     [2],
   );
 });

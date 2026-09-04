@@ -32,6 +32,7 @@ import {
   inspectAdapters,
   renderHookOutput,
 } from './adapters/index.mjs';
+import { withAdapterMutationLock } from './adapters/mutation-lock.mjs';
 import {
   CURSOR_LIVE_CONTEXT_SESSION_ENV,
   listLiveContextDeliveries,
@@ -227,12 +228,14 @@ async function cursorFallbackEnabled({ cwd, env, execPath, binPath }) {
 
 async function refreshCursorAfterMutation({ core, cwd, env, execPath, binPath, force = false }) {
   try {
-    if (!force && !(await cursorFallbackEnabled({ cwd, env, execPath, binPath }))) {
-      return { paths: null, operations: [], skipped: 'CURSOR_FALLBACK_DISABLED' };
-    }
-    const planned = await planCurrentCursorMaterialization({ core, cwd, optional: true });
-    if (planned.operations.length > 0) await applyOperations(planned.operations);
-    return planned;
+    return await withAdapterMutationLock(env, async () => {
+      if (!force && !(await cursorFallbackEnabled({ cwd, env, execPath, binPath }))) {
+        return { paths: null, operations: [], skipped: 'CURSOR_FALLBACK_DISABLED' };
+      }
+      const planned = await planCurrentCursorMaterialization({ core, cwd, optional: true });
+      if (planned.operations.length > 0) await applyOperations(planned.operations);
+      return planned;
+    });
   } catch (cause) {
     throw new MaterializeError(
       'MATERIALIZE_AFTER_MUTATION_FAILED',
@@ -964,29 +967,41 @@ async function handleAdapters({
   assertOptions(options, ['agents', 'dry_run']);
   const agents = selectAgents(options.agents);
   const dryRun = optionBoolean(options, 'dry_run');
-  const adapterOperations = await buildAdapterOperations({
-    agents,
-    action,
-    env,
-    execPath,
-    binPath,
-    skillSource: defaultSkillSource,
-  });
-  const materialized = agents.includes('cursor')
-    ? await planCurrentCursorMaterialization({
-        action,
-        core,
-        cwd,
-        optional: true,
-      })
-    : { operations: [] };
-  const operations = [...materialized.operations, ...adapterOperations];
-  const applied = await applyOperations(operations, { dryRun });
+  const planAndApply = async () => {
+    const adapterOperations = await buildAdapterOperations({
+      agents,
+      action,
+      env,
+      execPath,
+      binPath,
+      skillSource: defaultSkillSource,
+    });
+    const materialized = agents.includes('cursor')
+      ? await planCurrentCursorMaterialization({
+          action,
+          core,
+          cwd,
+          optional: true,
+        })
+      : { operations: [] };
+    return applyOperations([...materialized.operations, ...adapterOperations], { dryRun });
+  };
+  const applied = dryRun
+    ? await planAndApply()
+    : await withAdapterMutationLock(env, planAndApply);
   const summary = summarizeOperations(applied);
   if (jsonOutput) writeJson({ dryRun, operations: summary }, stdout);
   else {
     if (summary.length === 0) {
-      writeText(stdout, 'No managed files found.');
+      if (action === 'install') {
+        writeText(stdout, cliLanguage() === 'ko'
+          ? '설정이 이미 완료되어 변경할 내용이 없습니다.'
+          : 'Setup is already complete. No changes needed.');
+      } else {
+        writeText(stdout, cliLanguage() === 'ko'
+          ? '제거할 HND 관리 파일이 없습니다.'
+          : 'No HND-managed files found. Nothing to uninstall.');
+      }
       return;
     }
     for (const item of summary) {

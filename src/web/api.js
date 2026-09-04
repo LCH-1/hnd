@@ -127,13 +127,14 @@ function errorMessage(status, body) {
   return t(known[status] || "요청을 처리하지 못했습니다.");
 }
 
-async function parseResponse(response) {
+async function parseResponse(response, signal) {
   if (response.status === 204 || response.status === 205) return null;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     try {
       return await response.json();
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       throw new ApiError("서버 응답을 읽을 수 없습니다.", {
         status: response.status,
         code: "invalid_json",
@@ -166,14 +167,23 @@ export async function request(pathname, options = {}) {
 
   const controller = new AbortController();
   const timeout = Number.isFinite(options.timeout) ? options.timeout : 20_000;
+  let timedOut = false;
   const timeoutId = window.setTimeout(
-    () => controller.abort("timeout"),
+    () => {
+      if (controller.signal.aborted) return;
+      timedOut = true;
+      controller.abort();
+    },
     timeout,
   );
-  const onAbort = () => controller.abort(options.signal?.reason || "cancelled");
-  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const onAbort = () => {
+    if (!controller.signal.aborted) controller.abort(options.signal?.reason);
+  };
+  if (options.signal?.aborted) onAbort();
+  else options.signal?.addEventListener("abort", onAbort, { once: true });
 
   let response;
+  let parsed;
   try {
     response = await fetch(endpoint(pathname), {
       method,
@@ -184,16 +194,21 @@ export async function request(pathname, options = {}) {
       redirect: "error",
       signal: controller.signal,
     });
+    parsed = await parseResponse(response, controller.signal);
   } catch (error) {
-    if (error?.name === "AbortError") {
+    if (controller.signal.aborted) {
       throw new ApiError(
-        "서버 응답이 늦습니다. 연결을 확인하고 다시 시도하세요.",
+        timedOut
+          ? "서버 응답이 늦습니다. 연결을 확인하고 다시 시도하세요."
+          : "요청을 취소했습니다.",
         {
-          code: "timeout",
-          retryable: true,
+          code: timedOut ? "timeout" : "cancelled",
+          details: error,
+          retryable: timedOut,
         },
       );
     }
+    if (error instanceof ApiError) throw error;
     throw new ApiError(
       "서버에 연결할 수 없습니다. 네트워크 상태를 확인해 주세요.",
       {
@@ -207,7 +222,6 @@ export async function request(pathname, options = {}) {
     options.signal?.removeEventListener("abort", onAbort);
   }
 
-  const parsed = await parseResponse(response);
   const responseEtag = response.headers.get("etag");
   if (
     responseEtag &&

@@ -50,6 +50,8 @@ const MANAGED_KEY_ENVELOPE_BYTES = MANAGED_KEY_HEADER.byteLength
   + MANAGED_KEY_TAG_BYTES
   + VAULT_KEY_BYTES;
 const SERVER_MASTER_KEY_DIGEST_METADATA = 'server_vault_key_sha256';
+const CANONICAL_CONTROL_TIMESTAMPS_METADATA = 'canonical_control_timestamps_v1';
+const ENROLLMENT_DEVICE_BACKFILL_METADATA = 'enrollment_device_backfill_v1';
 
 export class AuthenticationError extends Error {
   constructor(message = 'Invalid or revoked credential') {
@@ -246,7 +248,8 @@ function initializeSchema(database) {
           token_hash TEXT NOT NULL UNIQUE,
           created_at TEXT NOT NULL,
           expires_at TEXT NOT NULL,
-          used_at TEXT
+          used_at TEXT,
+          device_id TEXT REFERENCES devices(id) ON DELETE SET NULL
         ) STRICT;
 
         CREATE TABLE invitations (
@@ -286,6 +289,7 @@ function initializeSchema(database) {
         ) STRICT;
 
         CREATE INDEX enrollments_expires_at ON enrollments(expires_at);
+        CREATE INDEX enrollments_device_id ON enrollments(device_id);
         CREATE INDEX invitations_expires_at ON invitations(expires_at);
         CREATE INDEX devices_tenant_id ON devices(tenant_id, created_at, id);
         CREATE INDEX revisions_tenant_created ON revisions(tenant_id, created_at DESC, id);
@@ -295,6 +299,27 @@ function initializeSchema(database) {
     });
   } else if (version !== DATABASE_SCHEMA_VERSION || applicationId !== DATABASE_APPLICATION_ID) {
     throw new Error(`Unsupported hnd database schema version: ${version}`);
+  }
+  const enrollmentColumns = new Set(database.prepare('PRAGMA table_info(enrollments)')
+    .all().map((row) => row.name));
+  const enrollmentDeviceIndex = database.prepare(`
+    SELECT 1 AS present FROM sqlite_schema
+    WHERE type = 'index' AND name = 'enrollments_device_id'
+  `).get();
+  if (!enrollmentColumns.has('device_id') || !enrollmentDeviceIndex) {
+    withImmediateTransaction(database, () => {
+      const currentColumns = new Set(database.prepare('PRAGMA table_info(enrollments)')
+        .all().map((row) => row.name));
+      if (!currentColumns.has('device_id')) {
+        database.exec(`
+          ALTER TABLE enrollments
+          ADD COLUMN device_id TEXT REFERENCES devices(id) ON DELETE SET NULL;
+        `);
+      }
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS enrollments_device_id ON enrollments(device_id);
+      `);
+    });
   }
   database.enableLoadExtension(false);
   database.enableDefensive(true);
@@ -315,6 +340,63 @@ function setMetadata(database, key, value = '1') {
 
 function hasMetadata(database, key) {
   return database.prepare('SELECT 1 AS present FROM schema_metadata WHERE key = ?').get(key) !== undefined;
+}
+
+function canonicalTimestamp(value) {
+  return value === null ? null : new Date(value).toISOString();
+}
+
+function normalizeControlTimestamps(database) {
+  if (hasMetadata(database, CANONICAL_CONTROL_TIMESTAMPS_METADATA)) return;
+  withImmediateTransaction(database, () => {
+    if (hasMetadata(database, CANONICAL_CONTROL_TIMESTAMPS_METADATA)) return;
+    const definitions = [
+      ['tenants', ['created_at']],
+      ['enrollments', ['created_at', 'expires_at', 'used_at']],
+      ['invitations', ['created_at', 'expires_at', 'used_at']],
+      ['devices', ['created_at', 'revoked_at']],
+    ];
+    for (const [table, columns] of definitions) {
+      const rows = database.prepare(`
+        SELECT rowid, ${columns.join(', ')} FROM ${table}
+      `).all();
+      for (const row of rows) {
+        const normalized = columns.map((column) => canonicalTimestamp(row[column]));
+        if (normalized.every((value, index) => value === row[columns[index]])) continue;
+        database.prepare(`
+          UPDATE ${table}
+          SET ${columns.map((column) => `${column} = ?`).join(', ')}
+          WHERE rowid = ?
+        `).run(...normalized, row.rowid);
+      }
+    }
+    setMetadata(database, CANONICAL_CONTROL_TIMESTAMPS_METADATA);
+  });
+}
+
+function backfillEnrollmentDeviceLinks(database) {
+  if (hasMetadata(database, ENROLLMENT_DEVICE_BACKFILL_METADATA)) return;
+  withImmediateTransaction(database, () => {
+    if (hasMetadata(database, ENROLLMENT_DEVICE_BACKFILL_METADATA)) return;
+    const candidates = database.prepare(`
+      SELECT id FROM devices
+      WHERE tenant_id = ? AND created_at = ?
+      LIMIT 2
+    `);
+    const link = database.prepare(`
+      UPDATE enrollments SET device_id = ?
+      WHERE id = ? AND device_id IS NULL
+    `);
+    const enrollments = database.prepare(`
+      SELECT id, tenant_id, used_at FROM enrollments
+      WHERE used_at IS NOT NULL AND device_id IS NULL
+    `).all();
+    for (const enrollment of enrollments) {
+      const matches = candidates.all(enrollment.tenant_id, enrollment.used_at);
+      if (matches.length === 1) link.run(matches[0].id, enrollment.id);
+    }
+    setMetadata(database, ENROLLMENT_DEVICE_BACKFILL_METADATA);
+  });
 }
 
 function initializeManagedVaultKeySchema(database) {
@@ -558,10 +640,8 @@ function validateSnapshotWithVaultKey(blob, vaultKey) {
 }
 
 function pruneExpiredInvitations(database, now) {
-  const remove = database.prepare('DELETE FROM invitations WHERE id = ?');
-  for (const invitation of database.prepare('SELECT id, expires_at FROM invitations').all()) {
-    if (Date.parse(invitation.expires_at) <= now) remove.run(invitation.id);
-  }
+  database.prepare('DELETE FROM invitations WHERE expires_at <= ?')
+    .run(new Date(now).toISOString());
 }
 
 class SqliteStoreBase {
@@ -647,6 +727,8 @@ export class ControlStore extends SqliteStoreBase {
         setMetadata(database, 'legacy_control_imported');
       });
     }
+    normalizeControlTimestamps(database);
+    backfillEnrollmentDeviceLinks(database);
     pruneExpiredInvitations(database, this.clock());
     return this;
   }
@@ -740,13 +822,18 @@ export class ControlStore extends SqliteStoreBase {
     return withImmediateTransaction(database, () => {
       const now = this.clock();
       pruneExpiredInvitations(database, now);
-      const enrollment = database.prepare('SELECT * FROM enrollments').all()
-        .find((candidate) => hashesEqual(candidate.token_hash, presentedHash));
-      if (!enrollment || enrollment.used_at || Date.parse(enrollment.expires_at) <= now) {
+      const enrollment = database.prepare(`
+        SELECT * FROM enrollments WHERE token_hash = ?
+      `).get(presentedHash);
+      if (
+        !enrollment
+        || !hashesEqual(enrollment.token_hash, presentedHash)
+        || enrollment.used_at
+        || Date.parse(enrollment.expires_at) <= now
+      ) {
         throw new AuthenticationError('Invalid or expired enrollment key');
       }
       const usedAt = new Date(now).toISOString();
-      database.prepare('UPDATE enrollments SET used_at = ? WHERE id = ?').run(usedAt, enrollment.id);
       const deviceToken = randomToken('hndd_');
       const device = {
         id: randomUUID(),
@@ -767,6 +854,9 @@ export class ControlStore extends SqliteStoreBase {
         device.createdAt,
         device.revokedAt,
       );
+      database.prepare(`
+        UPDATE enrollments SET used_at = ?, device_id = ? WHERE id = ?
+      `).run(usedAt, device.id, enrollment.id);
       return Object.freeze({ deviceToken, device: publicDevice(device) });
     });
   }
@@ -835,9 +925,14 @@ export class ControlStore extends SqliteStoreBase {
     pruneExpiredInvitations(database, this.clock());
     return withImmediateTransaction(database, () => {
       const now = this.clock();
-      const invitation = database.prepare('SELECT * FROM invitations').all()
-        .find((candidate) => hashesEqual(candidate.token_hash, presentedHash));
-      if (!invitation || Date.parse(invitation.expires_at) <= now) {
+      const invitation = database.prepare(`
+        SELECT * FROM invitations WHERE token_hash = ?
+      `).get(presentedHash);
+      if (
+        !invitation
+        || !hashesEqual(invitation.token_hash, presentedHash)
+        || Date.parse(invitation.expires_at) <= now
+      ) {
         throw new AuthenticationError('Invalid or expired device invitation');
       }
       const wrappedVaultKey = Buffer.from(invitation.wrapped_vault_key);
@@ -908,13 +1003,22 @@ export class ControlStore extends SqliteStoreBase {
       SELECT * FROM enrollments WHERE id = ? AND tenant_id = ?
     `).get(normalizedEnrollmentId, normalizedTenantId);
     if (!enrollment) return null;
-    const device = enrollment.used_at
-      ? database.prepare(`
-          SELECT * FROM devices
-          WHERE tenant_id = ? AND created_at = ?
-          ORDER BY rowid DESC LIMIT 1
-        `).get(normalizedTenantId, enrollment.used_at)
-      : null;
+    let device = null;
+    if (enrollment.device_id) {
+      device = database.prepare(`
+        SELECT * FROM devices WHERE id = ? AND tenant_id = ?
+      `).get(enrollment.device_id, normalizedTenantId);
+    } else if (enrollment.used_at) {
+      // A legacy timestamp is safe only when it identifies exactly one device.
+      // Returning no device is preferable to attributing an enrollment to the
+      // wrong device when multiple consumptions happened in the same instant.
+      const matches = database.prepare(`
+        SELECT * FROM devices
+        WHERE tenant_id = ? AND created_at = ?
+        LIMIT 2
+      `).all(normalizedTenantId, enrollment.used_at);
+      if (matches.length === 1) [device] = matches;
+    }
     return Object.freeze({
       id: enrollment.id,
       tenantId: enrollment.tenant_id,
@@ -934,9 +1038,12 @@ export class ControlStore extends SqliteStoreBase {
     const presentedHash = tokenHash(deviceToken);
     const database = this.getDatabase();
     pruneExpiredInvitations(database, this.clock());
-    const device = database.prepare('SELECT * FROM devices').all()
-      .find((candidate) => hashesEqual(candidate.token_hash, presentedHash));
-    if (!device || device.revoked_at) throw new AuthenticationError();
+    const device = database.prepare(`
+      SELECT * FROM devices WHERE token_hash = ?
+    `).get(presentedHash);
+    if (!device || !hashesEqual(device.token_hash, presentedHash) || device.revoked_at) {
+      throw new AuthenticationError();
+    }
     return publicDevice(device);
   }
 

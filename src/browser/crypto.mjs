@@ -2,6 +2,7 @@ export const VAULT_KEY_BYTES = 32;
 export const GCM_NONCE_BYTES = 12;
 export const GCM_TAG_BYTES = 16;
 export const MAX_SNAPSHOT_PLAINTEXT_BYTES = 4 * 1024 * 1024;
+export const SNAPSHOT_AUTHENTICATION_ERROR_CODE = 'snapshot_authentication_failed';
 
 const AUTHENTICATED_HEADER = Uint8Array.of(
   0x48, 0x4e, 0x44, 0x45, // HNDE
@@ -162,7 +163,9 @@ export async function decryptBytes(envelope, vaultKey, options = {}) {
       tagLength: GCM_TAG_BYTES * 8,
     }, key, sealed));
   } catch {
-    throw new Error('Encrypted snapshot authentication failed');
+    const error = new Error('Encrypted snapshot authentication failed');
+    error.code = SNAPSHOT_AUTHENTICATION_ERROR_CODE;
+    throw error;
   }
 }
 

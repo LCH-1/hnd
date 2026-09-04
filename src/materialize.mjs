@@ -193,13 +193,14 @@ export function removeExcludeBlock(source) {
   const block = inspectExcludeBlock(source);
   if (!block) return source;
   let prefix = source.slice(0, block.start);
-  if (!block.previousEol) {
+  const suffix = source.slice(block.end);
+  if (!block.previousEol && suffix.length === 0) {
     if (!prefix.endsWith(block.eol)) {
       conflict('The hnd block cannot restore the original .git/info/exclude ending.');
     }
     prefix = prefix.slice(0, -block.eol.length);
   }
-  return `${prefix}${source.slice(block.end)}`;
+  return `${prefix}${suffix}`;
 }
 
 export function renderCursorRule(content) {

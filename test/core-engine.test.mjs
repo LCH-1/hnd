@@ -119,7 +119,7 @@ test('managed directory creation refuses an intermediate symlink below its trust
   await assert.rejects(fs.stat(path.join(outside, 'prepared-repo')), { code: 'ENOENT' });
 });
 
-test('a stale lock holder cannot delete the replacement owner lock', async (t) => {
+test('a live long-running lock holder is not displaced after staleMs', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-owner-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const lockFile = path.join(directory, 'state.lock');
@@ -131,81 +131,379 @@ test('a stale lock holder cannot delete the replacement owner lock', async (t) =
   const first = withFileLock(lockFile, async () => {
     firstEntered();
     await firstCanExit;
-  });
+  }, { timeoutMs: 1_000, staleMs: 20 });
   await firstIsEntered;
-  const firstOwner = JSON.parse(await fs.readFile(lockFile, 'utf8')).owner;
+  const acquiredMetadata = await fs.stat(lockFile);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const heartbeatMetadata = await fs.stat(lockFile);
+  assert.ok(heartbeatMetadata.mtimeMs > acquiredMetadata.mtimeMs);
 
-  const old = new Date(0);
-  await fs.utimes(lockFile, old, old);
-  let releaseSecond;
-  let secondEntered;
-  const secondIsEntered = new Promise((resolve) => { secondEntered = resolve; });
-  const secondCanExit = new Promise((resolve) => { releaseSecond = resolve; });
-  const second = withFileLock(lockFile, async () => {
-    secondEntered();
-    await secondCanExit;
-  }, { timeoutMs: 1_000, staleMs: 1 });
-  await secondIsEntered;
+  try {
+    await assert.rejects(
+      withFileLock(lockFile, async () => {}, { timeoutMs: 75, staleMs: 20 }),
+      (error) => error instanceof CoreError && error.code === 'STATE_BUSY',
+    );
+  } finally {
+    releaseFirst();
+    await first;
+  }
 
-  const secondOwner = JSON.parse(await fs.readFile(lockFile, 'utf8')).owner;
-  assert.notEqual(secondOwner, firstOwner);
-  releaseFirst();
-  await first;
-  assert.equal(JSON.parse(await fs.readFile(lockFile, 'utf8')).owner, secondOwner);
-
-  await assert.rejects(
-    withFileLock(lockFile, async () => {}, { timeoutMs: 75, staleMs: 60_000 }),
-    (error) => error instanceof CoreError && error.code === 'STATE_BUSY',
-  );
-
-  releaseSecond();
-  await second;
+  await withFileLock(lockFile, async () => {}, { timeoutMs: 1_000, staleMs: 20 });
   await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
 });
 
-test('competing stale-lock waiters serialize inspection and preserve replacement ownership', async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-waiters-'));
+test('a delayed lock publication never exposes an incomplete live lease', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-publication-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const lockFile = path.join(directory, 'state.lock');
 
-  let releaseOriginal;
-  let originalEntered;
-  const originalIsEntered = new Promise((resolve) => { originalEntered = resolve; });
-  const originalCanExit = new Promise((resolve) => { releaseOriginal = resolve; });
-  const original = withFileLock(lockFile, async () => {
-    originalEntered();
-    await originalCanExit;
-  });
-  await originalIsEntered;
+  const originalOpen = fs.open;
+  let delayFirstPublication = true;
+  let publicationStarted;
+  const firstPublicationStarted = new Promise((resolve) => { publicationStarted = resolve; });
+  fs.open = async function delayAfterCreatingFirstLease(file, flags, ...args) {
+    const handle = await originalOpen.call(this, file, flags, ...args);
+    if (
+      flags === 'wx'
+      && delayFirstPublication
+      && (file === lockFile || (file.startsWith(`${lockFile}.`) && file.endsWith('.pending')))
+    ) {
+      delayFirstPublication = false;
+      publicationStarted();
+      // Longer than the minimum incomplete-record grace. Publishing an empty
+      // lock inode before this pause lets a waiter reclaim it and enter too.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+    }
+    return handle;
+  };
+
+  let active = 0;
+  let maximumActive = 0;
+  const enter = async () => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    active -= 1;
+  };
+  try {
+    const first = withFileLock(lockFile, enter, { timeoutMs: 4_000, staleMs: 1 });
+    await firstPublicationStarted;
+    const second = withFileLock(lockFile, enter, { timeoutMs: 4_000, staleMs: 1 });
+    await Promise.all([first, second]);
+  } finally {
+    fs.open = originalOpen;
+  }
+
+  assert.equal(maximumActive, 1);
+  assert.equal(active, 0);
+  await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readdir(directory), []);
+});
+
+test('a same-process stale lock left by a failed release is reclaimed', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-orphan-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const lockFile = path.join(directory, 'state.lock');
+
+  const originalUnlink = fs.unlink;
+  let rejectRelease = true;
+  fs.unlink = async function failFirstRelease(file, ...args) {
+    if (file === lockFile && rejectRelease) {
+      rejectRelease = false;
+      const error = new Error('simulated release failure');
+      error.code = 'EACCES';
+      throw error;
+    }
+    return originalUnlink.call(this, file, ...args);
+  };
+  try {
+    await assert.rejects(
+      withFileLock(lockFile, async () => {}, { timeoutMs: 1_000, staleMs: 1 }),
+      { code: 'EACCES' },
+    );
+  } finally {
+    fs.unlink = originalUnlink;
+  }
+
+  const orphan = JSON.parse(await fs.readFile(lockFile, 'utf8'));
+  assert.equal(orphan.pid, process.pid);
+  await fs.utimes(lockFile, new Date(0), new Date(0));
+
+  let entered = false;
+  await withFileLock(lockFile, async () => {
+    entered = true;
+  }, { timeoutMs: 1_000, staleMs: 1 });
+  assert.equal(entered, true);
+  await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+});
+
+test('an out-of-range PID cannot make a corrupt stale lock permanent', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-invalid-pid-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const lockFile = path.join(directory, 'state.lock');
   const old = new Date(0);
+  await fs.writeFile(lockFile, `${JSON.stringify({
+    owner: 'invalid-pid-owner',
+    pid: 0x80000000,
+    acquiredAt: old.toISOString(),
+  })}\n`);
   await fs.utimes(lockFile, old, old);
 
-  // Hold the first stale-file inspection open. Without serialized deletion,
-  // every waiter can inspect the same old inode and later unlink a fresh
-  // replacement. With the guard, exactly one inspection reaches fs.stat.
-  const originalStat = fs.stat;
-  let inspectionCount = 0;
-  let firstInspection;
-  let releaseInspection;
-  const firstInspectionStarted = new Promise((resolve) => { firstInspection = resolve; });
-  const firstInspectionCanFinish = new Promise((resolve) => { releaseInspection = resolve; });
-  fs.stat = async function interceptedStat(file, ...args) {
-    if (file === lockFile) {
-      inspectionCount += 1;
-      if (inspectionCount === 1) {
-        firstInspection();
-        await firstInspectionCanFinish;
+  let entered = false;
+  await withFileLock(lockFile, async () => {
+    entered = true;
+  }, { timeoutMs: 2_000, staleMs: 1 });
+  assert.equal(entered, true);
+  await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+});
+
+test('a heartbeat after stale inspection prevents snapshot removal', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-heartbeat-race-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const lockFile = path.join(directory, 'state.lock');
+  const old = new Date(0);
+  await fs.writeFile(lockFile, `${JSON.stringify({
+    owner: 'namespace-hidden-owner',
+    pid: 0x7fffffff,
+    acquiredAt: old.toISOString(),
+  })}\n`);
+  await fs.utimes(lockFile, old, old);
+
+  const originalOpen = fs.open;
+  let readOpenCount = 0;
+  fs.open = async function heartbeatBeforeRemoval(file, flags, ...args) {
+    const handle = await originalOpen.call(this, file, flags, ...args);
+    if (file === lockFile && typeof flags === 'number') {
+      readOpenCount += 1;
+      if (readOpenCount === 2) {
+        const now = new Date();
+        await fs.utimes(lockFile, now, now);
       }
     }
-    return originalStat.call(this, file, ...args);
+    return handle;
   };
+  try {
+    await assert.rejects(
+      withFileLock(lockFile, async () => {}, { timeoutMs: 100, staleMs: 1_000 }),
+      (error) => error instanceof CoreError && error.code === 'STATE_BUSY',
+    );
+  } finally {
+    fs.open = originalOpen;
+  }
+
+  assert.equal(readOpenCount >= 2, true);
+  assert.equal(JSON.parse(await fs.readFile(lockFile, 'utf8')).owner, 'namespace-hidden-owner');
+  assert.ok((await fs.stat(lockFile)).mtimeMs > old.getTime());
+});
+
+test('an orphaned deletion guard does not permanently block the lock', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-guard-orphan-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const lockFile = path.join(directory, 'state.lock');
+  const guardFile = `${lockFile}.delete`;
+  const recoveryFile = `${guardFile}.recovery`;
+  await fs.writeFile(lockFile, `${JSON.stringify({
+    owner: 'orphaned-lock-owner',
+    acquiredAt: new Date(0).toISOString(),
+  })}\n`);
+  // Older HND releases created an empty deletion-guard file, so recovery must
+  // also handle that exact crash artifact.
+  await fs.writeFile(guardFile, '');
+  // A second crash while reclaiming the guard must not move the permanent
+  // blockage to the recovery lease.
+  await fs.writeFile(recoveryFile, '');
+  await fs.utimes(lockFile, new Date(0), new Date(0));
+  await fs.utimes(guardFile, new Date(0), new Date(0));
+  await fs.utimes(recoveryFile, new Date(0), new Date(0));
+
+  let entered = false;
+  await withFileLock(lockFile, async () => {
+    entered = true;
+  }, { timeoutMs: 1_000, staleMs: 1 });
+  assert.equal(entered, true);
+  await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(guardFile), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(recoveryFile), { code: 'ENOENT' });
+});
+
+test('lock, deletion guard, and recovery lease symlinks fail closed', async (t) => {
+  if (process.platform === 'win32') t.skip('symlink creation requires elevated privileges on Windows');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-symlink-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const old = new Date(0);
+
+  for (const lease of ['lock', 'guard', 'recovery']) {
+    const lockFile = path.join(directory, `${lease}.lock`);
+    const guardFile = `${lockFile}.delete`;
+    const recoveryFile = `${guardFile}.recovery`;
+    const leaseFile = lease === 'lock'
+      ? lockFile
+      : lease === 'guard'
+        ? guardFile
+        : recoveryFile;
+    const target = path.join(directory, `${lease}.outside`);
+    const targetSource = `outside-${lease}\n`;
+    await fs.writeFile(target, targetSource);
+    await fs.utimes(target, old, old);
+
+    if (lease !== 'lock') {
+      await fs.writeFile(lockFile, `${JSON.stringify({
+        owner: `orphaned-lock-${lease}`,
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(lockFile, old, old);
+    }
+    if (lease === 'recovery') {
+      await fs.writeFile(guardFile, `${JSON.stringify({
+        owner: 'orphaned-guard-recovery',
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(guardFile, old, old);
+    }
+    await fs.symlink(target, leaseFile);
+
+    await assert.rejects(
+      withFileLock(lockFile, async () => {}, { timeoutMs: 250, staleMs: 1 }),
+      (error) => (
+        error instanceof CoreError
+        && error.code === 'UNSAFE_STATE_PATH'
+        && error.details?.path === leaseFile
+      ),
+    );
+    assert.equal(await fs.readFile(target, 'utf8'), targetSource);
+    assert.equal((await fs.lstat(leaseFile)).isSymbolicLink(), true);
+  }
+});
+
+test('lock, deletion guard, and recovery lease FIFOs fail closed without blocking', async (t) => {
+  if (process.platform === 'win32') t.skip('FIFO files are not available on Windows');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-fifo-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const old = new Date(0);
+
+  for (const lease of ['lock', 'guard', 'recovery']) {
+    const lockFile = path.join(directory, `${lease}.lock`);
+    const guardFile = `${lockFile}.delete`;
+    const recoveryFile = `${guardFile}.recovery`;
+    const leaseFile = lease === 'lock'
+      ? lockFile
+      : lease === 'guard'
+        ? guardFile
+        : recoveryFile;
+
+    if (lease !== 'lock') {
+      await fs.writeFile(lockFile, `${JSON.stringify({
+        owner: `orphaned-lock-${lease}`,
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(lockFile, old, old);
+    }
+    if (lease === 'recovery') {
+      await fs.writeFile(guardFile, `${JSON.stringify({
+        owner: 'orphaned-guard-recovery-fifo',
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(guardFile, old, old);
+    }
+    await execFileAsync('mkfifo', [leaseFile]);
+
+    await assert.rejects(
+      withFileLock(lockFile, async () => {}, { timeoutMs: 250, staleMs: 1 }),
+      (error) => (
+        error instanceof CoreError
+        && error.code === 'UNSAFE_STATE_PATH'
+        && error.details?.path === leaseFile
+      ),
+    );
+    assert.equal((await fs.lstat(leaseFile)).isFIFO(), true);
+  }
+});
+
+test('regular guard and recovery generation churn is retried safely', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-generation-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const old = new Date(0);
+
+  for (const lease of ['guard', 'recovery']) {
+    const lockFile = path.join(directory, `${lease}.lock`);
+    const guardFile = `${lockFile}.delete`;
+    const recoveryFile = `${guardFile}.recovery`;
+    const churnFile = lease === 'guard' ? guardFile : recoveryFile;
+    for (const [file, owner] of [
+      [lockFile, `orphaned-lock-${lease}`],
+      [guardFile, `orphaned-guard-${lease}`],
+      ...(lease === 'recovery'
+        ? [[recoveryFile, 'orphaned-recovery-generation']]
+        : []),
+    ]) {
+      await fs.writeFile(file, `${JSON.stringify({
+        owner,
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(file, old, old);
+    }
+
+    const originalLstat = fs.lstat;
+    let churnLstatCount = 0;
+    fs.lstat = async function replaceBetweenOpenAndVerification(file, ...args) {
+      if (file === churnFile) {
+        churnLstatCount += 1;
+        if (churnLstatCount === 2) {
+          await fs.unlink(file);
+          await fs.writeFile(file, `${JSON.stringify({
+            owner: `replacement-${lease}`,
+            pid: process.pid,
+            acquiredAt: old.toISOString(),
+          })}\n`);
+          await fs.utimes(file, old, old);
+        }
+      }
+      return originalLstat.call(this, file, ...args);
+    };
+    try {
+      await withFileLock(lockFile, async () => {}, { timeoutMs: 2_000, staleMs: 1 });
+    } finally {
+      fs.lstat = originalLstat;
+    }
+
+    assert.equal(churnLstatCount >= 2, true);
+    await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(guardFile), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(recoveryFile), { code: 'ENOENT' });
+  }
+});
+
+test('competing waiters recover stale lock leases without violating mutual exclusion', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-waiters-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
 
   let activeReplacement = 0;
   let maximumActiveReplacements = 0;
   const waiterCount = 12;
-  let waiters = [];
-  try {
-    waiters = Array.from({ length: waiterCount }, (_, index) => withFileLock(
+  const old = new Date(0);
+  for (let round = 0; round < 5; round += 1) {
+    const lockFile = path.join(directory, `state-${round}.lock`);
+    const guardFile = `${lockFile}.delete`;
+    const recoveryFile = `${guardFile}.recovery`;
+    for (const [file, owner] of [
+      [lockFile, `orphaned-lock-${round}`],
+      [guardFile, `orphaned-guard-${round}`],
+      [recoveryFile, `orphaned-recovery-${round}`],
+    ]) {
+      await fs.writeFile(file, `${JSON.stringify({
+        owner,
+        pid: process.pid,
+        acquiredAt: old.toISOString(),
+      })}\n`);
+      await fs.utimes(file, old, old);
+    }
+
+    const waiters = Array.from({ length: waiterCount }, (_, index) => withFileLock(
       lockFile,
       async () => {
         activeReplacement += 1;
@@ -213,26 +511,16 @@ test('competing stale-lock waiters serialize inspection and preserve replacement
         await new Promise((resolve) => setTimeout(resolve, 5 + (index % 3)));
         activeReplacement -= 1;
       },
-      { timeoutMs: 5_000, staleMs: 60_000 },
+      { timeoutMs: 5_000, staleMs: 1 },
     ));
 
-    await firstInspectionStarted;
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    assert.equal(inspectionCount, 1);
-
-    releaseInspection();
     await Promise.all(waiters);
-    assert.equal(maximumActiveReplacements, 1);
-    assert.equal(activeReplacement, 0);
-  } finally {
-    fs.stat = originalStat;
-    releaseInspection?.();
-    releaseOriginal();
-    await Promise.allSettled(waiters);
-    await original;
+    await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(guardFile), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(recoveryFile), { code: 'ENOENT' });
   }
-
-  await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+  assert.equal(maximumActiveReplacements, 1);
+  assert.equal(activeReplacement, 0);
 });
 
 test('remote URL normalization equates common SSH and HTTPS forms', () => {

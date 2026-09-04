@@ -5,7 +5,12 @@ import test from 'node:test';
 import { ApiError } from '../src/web/api.js';
 import {
   beginBrowserWorkspaceReset,
+  disableOfflineWorkspace,
+  enableOfflineWorkspace,
   finalizeBrowserWorkspaceReset,
+  logoutAfterRevokingOfflineAccess,
+  mergeBrowserSnapshots,
+  prepareOfflineWorkspaceAccess,
   resetBrowserWorkspaceCache,
   SnapshotDataStore,
 } from '../src/web/snapshot-data.js';
@@ -192,14 +197,334 @@ function textFile(path, value) {
   };
 }
 
-function storeOptions(cache, remote) {
+function handoffFile(repositoryId, workId, {
+  closed = false,
+  updatedAt = '2026-01-01T00:00:00.000Z',
+} = {}) {
+  const directory = closed ? 'archive' : 'handoffs';
+  return textFile(
+    `repositories/${repositoryId}/${directory}/${workId}.json`,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: workId,
+      repoId: repositoryId,
+      status: closed ? 'closed' : 'active',
+      task: 'merge test',
+      objective: 'preserve one logical handoff',
+      currentState: 'testing',
+      updatedAt,
+      closedAt: closed ? updatedAt : null,
+      history: [{ at: updatedAt, action: closed ? 'closed' : 'updated' }],
+    })}\n`,
+  );
+}
+
+function storeOptions(cache, remote, localRules = null) {
   return {
     cache,
     loadRemote: () => remote.load(),
     saveRemote: (...args) => remote.save(...args),
-    loadLocalRule: async () => null,
+    loadLocalRule: localRules
+      ? (...args) => localRules.load(...args)
+      : async () => null,
+    ...(localRules
+      ? { saveLocalRule: (...args) => localRules.save(...args) }
+      : {}),
   };
 }
+
+function localRuleStorage() {
+  let rule = null;
+  return {
+    async load() {
+      return rule === null ? null : structuredClone(rule);
+    },
+    async save(_tenantId, next) {
+      rule = next === null ? null : structuredClone(next);
+    },
+    inspect() {
+      return rule === null ? null : structuredClone(rule);
+    },
+  };
+}
+
+function offlineAccessStore() {
+  const maxRevokedSessions = 32;
+  const states = new Map();
+  const grants = new Map();
+  const current = (tenantId) =>
+    states.get(tenantId) || {
+      epoch: 0,
+      authorizedSessionId: null,
+      revokedSessionIds: [],
+    };
+  return {
+    async prepare(tenantId) {
+      return structuredClone(current(tenantId));
+    },
+    async enable({
+      tenantId,
+      expectedAccessEpoch,
+      sessionId,
+      encrypted,
+    }) {
+      const state = current(tenantId);
+      if (
+        state.epoch !== expectedAccessEpoch ||
+        state.revokedSessionIds.includes(sessionId)
+      ) {
+        throw new Error(
+          '로그아웃 중이거나 이미 로그아웃한 세션에서는 오프라인 작업 권한을 다시 만들 수 없습니다.',
+        );
+      }
+      states.set(tenantId, {
+        ...state,
+        authorizedSessionId: sessionId,
+      });
+      grants.set(tenantId, encrypted.slice());
+    },
+    async revoke({ tenantId, sessionId }) {
+      const state = current(tenantId);
+      states.set(tenantId, {
+        epoch: state.epoch + 1,
+        authorizedSessionId: null,
+        revokedSessionIds: [
+          ...state.revokedSessionIds.filter(
+            (revoked) =>
+              revoked !== state.authorizedSessionId && revoked !== sessionId,
+          ),
+          ...new Set([state.authorizedSessionId, sessionId].filter(Boolean)),
+        ].slice(-maxRevokedSessions),
+      });
+      grants.delete(tenantId);
+    },
+    inspect(tenantId) {
+      return {
+        state: structuredClone(current(tenantId)),
+        granted: grants.has(tenantId),
+      };
+    },
+  };
+}
+
+test('logout keeps the server session retryable until offline access revocation succeeds', async () => {
+  let revokeAttempts = 0;
+  let logoutAttempts = 0;
+  let failRevocation = true;
+  const options = {
+    async disableOfflineWorkspace(tenantId) {
+      revokeAttempts += 1;
+      assert.equal(tenantId, 'tenant');
+      if (failRevocation) throw new Error('local deletion failed');
+    },
+  };
+  const logout = async () => {
+    logoutAttempts += 1;
+    return { loggedOut: true };
+  };
+
+  await assert.rejects(
+    logoutAfterRevokingOfflineAccess(['tenant'], logout, options),
+    /local deletion failed/u,
+  );
+  assert.equal(revokeAttempts, 1);
+  assert.equal(logoutAttempts, 0);
+
+  failRevocation = false;
+  assert.deepEqual(
+    await logoutAfterRevokingOfflineAccess(['tenant'], logout, options),
+    { loggedOut: true },
+  );
+  assert.equal(revokeAttempts, 2);
+  assert.equal(logoutAttempts, 1);
+});
+
+test('logout can be retried after the server request fails with offline access already revoked', async () => {
+  let revokeAttempts = 0;
+  let logoutAttempts = 0;
+  const options = {
+    async disableOfflineWorkspace() {
+      revokeAttempts += 1;
+    },
+  };
+  const logout = async () => {
+    logoutAttempts += 1;
+    if (logoutAttempts === 1) throw new Error('server logout failed');
+    return { loggedOut: true };
+  };
+
+  await assert.rejects(
+    logoutAfterRevokingOfflineAccess(['tenant'], logout, options),
+    /server logout failed/u,
+  );
+  assert.equal(revokeAttempts, 1);
+  assert.equal(logoutAttempts, 1);
+
+  assert.deepEqual(
+    await logoutAfterRevokingOfflineAccess(['tenant'], logout, options),
+    { loggedOut: true },
+  );
+  assert.equal(revokeAttempts, 2);
+  assert.equal(logoutAttempts, 2);
+});
+
+test('logout revokes each distinct local workspace before ending the server session', async () => {
+  const calls = [];
+  await logoutAfterRevokingOfflineAccess(
+    ['tenant-a', 'tenant-b', 'tenant-a'],
+    async () => {
+      calls.push('logout');
+    },
+    {
+      sessionId: 'web-session',
+      async disableOfflineWorkspace(tenantId, options) {
+        calls.push(`revoke:${tenantId}:${options.sessionId}`);
+      },
+    },
+  );
+  assert.deepEqual(calls, [
+    'revoke:tenant-a:web-session',
+    'revoke:tenant-b:web-session',
+    'logout',
+  ]);
+});
+
+test('offline access epoch prevents an in-flight or revoked session from restoring a grant', async () => {
+  const accessStore = offlineAccessStore();
+  const started = deferred();
+  const release = deferred();
+  const authorization = await prepareOfflineWorkspaceAccess('tenant', {
+    accessStore,
+  });
+  const enabling = enableOfflineWorkspace('tenant', {
+    accessStore,
+    expectedAccessEpoch: authorization.epoch,
+    expectedResetEpoch: 0,
+    sessionId: 'old-session',
+    async sealBrowserValue() {
+      started.resolve();
+      await release.promise;
+      return Uint8Array.of(1, 2, 3);
+    },
+  });
+  await started.promise;
+  await disableOfflineWorkspace('tenant', {
+    accessStore,
+    sessionId: 'old-session',
+  });
+  release.resolve();
+  await assert.rejects(enabling, /로그아웃 중이거나 이미 로그아웃한 세션/u);
+  assert.deepEqual(accessStore.inspect('tenant'), {
+    state: {
+      epoch: 1,
+      authorizedSessionId: null,
+      revokedSessionIds: ['old-session'],
+    },
+    granted: false,
+  });
+
+  const afterLogout = await prepareOfflineWorkspaceAccess('tenant', {
+    accessStore,
+  });
+  await assert.rejects(
+    enableOfflineWorkspace('tenant', {
+      accessStore,
+      expectedAccessEpoch: afterLogout.epoch,
+      expectedResetEpoch: 0,
+      sessionId: 'old-session',
+      sealBrowserValue: async () => Uint8Array.of(4),
+    }),
+    /로그아웃 중이거나 이미 로그아웃한 세션/u,
+  );
+  await enableOfflineWorkspace('tenant', {
+    accessStore,
+    expectedAccessEpoch: afterLogout.epoch,
+    expectedResetEpoch: 0,
+    sessionId: 'new-session',
+    sealBrowserValue: async () => Uint8Array.of(5),
+  });
+  assert.equal(accessStore.inspect('tenant').granted, true);
+});
+
+test('offline revocation blocks both the grant session and the logout session', async () => {
+  const accessStore = offlineAccessStore();
+  const beforeGrant = await prepareOfflineWorkspaceAccess('tenant', {
+    accessStore,
+  });
+  await enableOfflineWorkspace('tenant', {
+    accessStore,
+    expectedAccessEpoch: beforeGrant.epoch,
+    expectedResetEpoch: 0,
+    sessionId: 'grant-session',
+    sealBrowserValue: async () => Uint8Array.of(1),
+  });
+  await disableOfflineWorkspace('tenant', {
+    accessStore,
+    sessionId: 'logout-session',
+  });
+  const afterLogout = await prepareOfflineWorkspaceAccess('tenant', {
+    accessStore,
+  });
+
+  for (const sessionId of ['grant-session', 'logout-session']) {
+    await assert.rejects(
+      enableOfflineWorkspace('tenant', {
+        accessStore,
+        expectedAccessEpoch: afterLogout.epoch,
+        expectedResetEpoch: 0,
+        sessionId,
+        sealBrowserValue: async () => Uint8Array.of(2),
+      }),
+      /로그아웃 중이거나 이미 로그아웃한 세션/u,
+    );
+  }
+  await assert.rejects(
+    enableOfflineWorkspace('tenant', {
+      accessStore,
+      expectedResetEpoch: 0,
+      sessionId: 'unversioned-stale-session',
+      sealBrowserValue: async () => Uint8Array.of(3),
+    }),
+    /기준 버전이 올바르지 않습니다/u,
+  );
+  assert.deepEqual(accessStore.inspect('tenant'), {
+    state: {
+      epoch: 1,
+      authorizedSessionId: null,
+      revokedSessionIds: ['grant-session', 'logout-session'],
+    },
+    granted: false,
+  });
+});
+
+test('offline revocation history stays bounded while epochs keep advancing', async () => {
+  const accessStore = offlineAccessStore();
+  for (let index = 0; index < 40; index += 1) {
+    const authorization = await prepareOfflineWorkspaceAccess('tenant', {
+      accessStore,
+    });
+    await enableOfflineWorkspace('tenant', {
+      accessStore,
+      expectedAccessEpoch: authorization.epoch,
+      expectedResetEpoch: 0,
+      sessionId: `grant-${index}`,
+      sealBrowserValue: async () => Uint8Array.of(index),
+    });
+    await disableOfflineWorkspace('tenant', {
+      accessStore,
+      sessionId: `logout-${index}`,
+    });
+  }
+
+  const { state: access, granted } = accessStore.inspect('tenant');
+  assert.equal(access.epoch, 40);
+  assert.equal(access.revokedSessionIds.length, 32);
+  assert.deepEqual(access.revokedSessionIds.slice(-2), [
+    'grant-39',
+    'logout-39',
+  ]);
+  assert.equal(granted, false);
+});
 
 test('a stale clean result cannot overwrite a newer pending change from another tab', async () => {
   const cache = memoryCache();
@@ -406,6 +731,301 @@ test('browser and connector changes to different items merge automatically', asy
   });
   assert.equal((await browser.rules({ scope: 'repo' })).length, 1);
   assert.equal((await browser.work({ repository: repositoryId })).length, 1);
+});
+
+test('concurrent handoff moves resolve as one logical record without duplicating unrelated data', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const unrelatedId = '44444444-4444-4444-8444-444444444444';
+  const activeA = `repositories/${repositoryA}/handoffs/${workId}.json`;
+  const activeB = `repositories/${repositoryB}/handoffs/${workId}.json`;
+  const archivedA = `repositories/${repositoryA}/archive/${workId}.json`;
+  const unrelatedPath = `knowledge/${unrelatedId}.json`;
+  const base = {
+    schemaVersion: 1,
+    files: [textFile(activeA, '{"status":"active","version":"base"}\n')],
+  };
+  const local = {
+    schemaVersion: 1,
+    files: [
+      textFile(activeB, '{"status":"active","version":"moved"}\n'),
+      textFile(unrelatedPath, '{"title":"local-only"}\n'),
+    ],
+  };
+  const remote = {
+    schemaVersion: 1,
+    files: [
+      textFile(archivedA, '{"status":"closed","version":"finished"}\n'),
+      textFile('policies/global.md', 'remote-only policy\n'),
+    ],
+  };
+
+  const localPreferred = await mergeBrowserSnapshots(base, local, remote);
+  assert.deepEqual(
+    localPreferred.snapshot.files.map((file) => file.path),
+    [
+      unrelatedPath,
+      'policies/global.md',
+      activeB,
+    ].sort(),
+  );
+  assert.deepEqual(localPreferred.conflicts, [activeA, archivedA, activeB].sort());
+  assert.equal(
+    localPreferred.snapshot.files.filter(
+      (file) => file.path.endsWith(`/${workId}.json`),
+    ).length,
+    1,
+  );
+
+  const repeated = await mergeBrowserSnapshots(
+    base,
+    localPreferred.snapshot,
+    remote,
+  );
+  assert.deepEqual(repeated, localPreferred);
+
+  const serverPreferred = await mergeBrowserSnapshots(base, remote, local);
+  assert.equal(
+    serverPreferred.snapshot.files.filter(
+      (file) => file.path.endsWith(`/${workId}.json`),
+    ).length,
+    1,
+  );
+  assert.ok(serverPreferred.snapshot.files.some((file) => file.path === archivedA));
+  assert.ok(!serverPreferred.snapshot.files.some((file) => file.path === activeB));
+  assert.ok(
+    serverPreferred.snapshot.files.some((file) => file.path === unrelatedPath),
+  );
+  assert.ok(
+    serverPreferred.snapshot.files.some(
+      (file) => file.path === 'policies/global.md',
+    ),
+  );
+});
+
+test('handoff deletion and a concurrent move remain a selectable logical conflict', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const active = handoffFile(repositoryA, workId);
+  const archived = handoffFile(repositoryB, workId, {
+    closed: true,
+    updatedAt: '2026-02-01T00:00:00.000Z',
+  });
+  const base = { schemaVersion: 1, files: [active] };
+  const deleted = emptySnapshot();
+  const moved = { schemaVersion: 1, files: [archived] };
+
+  const localPreferred = await mergeBrowserSnapshots(base, deleted, moved);
+  assert.deepEqual(localPreferred.snapshot.files, []);
+  assert.deepEqual(
+    localPreferred.conflicts,
+    [active.path, archived.path].sort(),
+  );
+
+  const serverPreferred = await mergeBrowserSnapshots(base, moved, deleted);
+  assert.deepEqual(
+    serverPreferred.snapshot.files.map((file) => file.path),
+    [archived.path],
+  );
+  assert.deepEqual(serverPreferred.conflicts, localPreferred.conflicts);
+});
+
+test('one-sided duplicate handoffs canonicalize without a false conflict', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const active = handoffFile(repositoryA, workId, {
+    updatedAt: '2026-03-01T00:00:00.000Z',
+  });
+  const archived = handoffFile(repositoryB, workId, {
+    closed: true,
+    updatedAt: '2026-02-01T00:00:00.000Z',
+  });
+  const base = { schemaVersion: 1, files: [active] };
+  const duplicated = { schemaVersion: 1, files: [active, archived] };
+
+  for (const [local, remote] of [
+    [base, duplicated],
+    [duplicated, base],
+  ]) {
+    const merged = await mergeBrowserSnapshots(base, local, remote);
+    assert.deepEqual(
+      merged.snapshot.files.map((file) => file.path),
+      [archived.path],
+    );
+    assert.deepEqual(merged.conflicts, []);
+  }
+});
+
+test('unchanged duplicate handoffs canonicalize without a false conflict', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const active = handoffFile(repositoryA, workId);
+  const archived = handoffFile(repositoryB, workId, {
+    closed: true,
+    updatedAt: '2026-02-01T00:00:00.000Z',
+  });
+  const duplicated = { schemaVersion: 1, files: [active, archived] };
+
+  const merged = await mergeBrowserSnapshots(
+    duplicated,
+    duplicated,
+    duplicated,
+  );
+
+  assert.deepEqual(
+    merged.snapshot.files.map((file) => file.path),
+    [archived.path],
+  );
+  assert.deepEqual(merged.conflicts, []);
+});
+
+test('resolving a true duplicate handoff conflict honors the selected side', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const repositoryC = '44444444-4444-4444-8444-444444444444';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const active = handoffFile(repositoryA, workId);
+  const archived = handoffFile(repositoryB, workId, {
+    closed: true,
+    updatedAt: '2026-02-01T00:00:00.000Z',
+  });
+  const moved = handoffFile(repositoryC, workId, {
+    updatedAt: '2026-03-01T00:00:00.000Z',
+  });
+  const base = { schemaVersion: 1, files: [active] };
+  const duplicated = { schemaVersion: 1, files: [active, archived] };
+  const remoteSnapshot = { schemaVersion: 1, files: [moved] };
+  const prepared = await mergeBrowserSnapshots(base, duplicated, remoteSnapshot);
+
+  assert.deepEqual(
+    prepared.snapshot.files.map((file) => file.path),
+    [archived.path],
+  );
+  assert.deepEqual(
+    prepared.conflicts,
+    [active.path, archived.path, moved.path].sort(),
+  );
+
+  for (const strategy of ['local', 'server']) {
+    const cache = memoryCache();
+    const remote = immediateRemote(remoteSnapshot);
+    const pending = await cache.compareAndSet({
+      snapshot: prepared.snapshot,
+      baseSnapshot: base,
+      etag: '"0"',
+      pending: true,
+      expectedGeneration: 0,
+      expectedResetEpoch: 0,
+    });
+    const store = new SnapshotDataStore(
+      'tenant',
+      storeOptions(cache, remote),
+    );
+    store._adoptCached(pending);
+    store.conflict = true;
+
+    assert.equal(await store.resolveConflict(strategy), true);
+    const workFiles = remote.inspect().snapshot.files.filter((file) =>
+      file.path.endsWith(`/${workId}.json`),
+    );
+    assert.deepEqual(
+      workFiles.map((file) => file.path),
+      [strategy === 'local' ? archived.path : moved.path],
+    );
+    assert.equal(store.syncStatus().pending, false);
+    assert.equal(store.syncStatus().conflict, false);
+  }
+});
+
+test('opposite cleanup of an existing duplicate preserves the selected side', async () => {
+  const repositoryA = '11111111-1111-4111-8111-111111111111';
+  const repositoryB = '22222222-2222-4222-8222-222222222222';
+  const workId = '33333333-3333-4333-8333-333333333333';
+  const active = handoffFile(repositoryA, workId);
+  const archived = handoffFile(repositoryB, workId, {
+    closed: true,
+    updatedAt: '2026-02-01T00:00:00.000Z',
+  });
+  const base = { schemaVersion: 1, files: [active, archived] };
+  const keptActive = { schemaVersion: 1, files: [active] };
+  const keptArchive = { schemaVersion: 1, files: [archived] };
+
+  const localPreferred = await mergeBrowserSnapshots(
+    base,
+    keptActive,
+    keptArchive,
+  );
+  assert.deepEqual(
+    localPreferred.snapshot.files.map((file) => file.path),
+    [active.path],
+  );
+  assert.deepEqual(
+    localPreferred.conflicts,
+    [active.path, archived.path].sort(),
+  );
+
+  const serverPreferred = await mergeBrowserSnapshots(
+    base,
+    keptArchive,
+    keptActive,
+  );
+  assert.deepEqual(
+    serverPreferred.snapshot.files.map((file) => file.path),
+    [archived.path],
+  );
+  assert.deepEqual(serverPreferred.conflicts, localPreferred.conflicts);
+});
+
+test('a stale tab cannot overwrite a newer browser-only PC rule', async () => {
+  const cache = memoryCache();
+  const remote = immediateRemote();
+  const localRules = localRuleStorage();
+  const first = new SnapshotDataStore(
+    'tenant',
+    storeOptions(cache, remote, localRules),
+  );
+  const stale = new SnapshotDataStore(
+    'tenant',
+    storeOptions(cache, remote, localRules),
+  );
+  await first.load();
+  await stale.load();
+
+  await first.createRule({ scope: 'pc', content: 'first browser rule' });
+  await assert.rejects(
+    stale.createRule({ scope: 'pc', content: 'stale browser rule' }),
+    /다른 탭에서 브라우저 룰을 먼저 바꿨습니다/u,
+  );
+  assert.equal(localRules.inspect().content, 'first browser rule');
+  assert.equal(stale.syncStatus().conflict, false);
+
+  const current = new SnapshotDataStore(
+    'tenant',
+    storeOptions(cache, remote, localRules),
+  );
+  const staleUpdate = new SnapshotDataStore(
+    'tenant',
+    storeOptions(cache, remote, localRules),
+  );
+  await current.load();
+  await staleUpdate.load();
+  await current.updateRule('pc', {
+    scope: 'pc',
+    content: 'newer browser rule',
+  });
+  await assert.rejects(
+    staleUpdate.updateRule('pc', {
+      scope: 'pc',
+      content: 'older browser rule',
+    }),
+    /다른 탭에서 브라우저 룰을 먼저 바꿨습니다/u,
+  );
+  assert.equal(localRules.inspect().content, 'newer browser rule');
+  assert.equal(staleUpdate.syncStatus().conflict, false);
 });
 
 test('authentication and integrity failures need attention while network failures are offline', async () => {

@@ -38,7 +38,13 @@ async function fixture(t) {
   await fs.writeFile(path.join(repository, 'README.md'), '# fixture\n');
   git(repository, 'add', 'README.md');
   git(repository, 'commit', '-m', 'initial');
-  const env = { ...process.env, HND_HOME: stateHome, HND_USER_HOME: userHome };
+  const env = {
+    ...process.env,
+    LANG: 'en_US.UTF-8',
+    LC_ALL: '',
+    HND_HOME: stateHome,
+    HND_USER_HOME: userHome,
+  };
   const run = async (argv, input = '') => {
     const stdout = captureStream();
     const stderr = captureStream();
@@ -104,6 +110,8 @@ test('setup installs the fallback and cursor hook preserves output when a user t
   await assert.rejects(fs.stat(item.rule), { code: 'ENOENT' });
 
   await item.run(['setup', '--agents', 'cursor']);
+  const repeatedSetup = await item.run(['setup', '--agents', 'cursor']);
+  assert.equal(repeatedSetup.stdout, 'Setup is already complete. No changes needed.\n');
   assert.match(await fs.readFile(item.rule, 'utf8'), /SETUP-MATERIALIZED/);
   await item.run(['uninstall', '--agents', 'cursor']);
 

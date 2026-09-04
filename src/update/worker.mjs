@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { LAUNCHER_VERSION } from '../launcher-version.mjs';
 import { applyConnectorUpdate, recordUpdateError } from './client.mjs';
-import { refreshManagedSkills } from './integration.mjs';
+import { refreshManagedSkillsAfterUpdate } from './integration.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicKeyPath = path.resolve(moduleDirectory, '..', '..', 'assets', 'release-public-key.pem');
@@ -17,9 +17,7 @@ export async function runUpdateWorker({ env = process.env } = {}) {
       timeoutMs: 15_000,
       lockTimeoutMs: 250,
     });
-    const refreshedSkills = result.directory
-      ? await refreshManagedSkills(result.directory, env)
-      : [];
+    const refreshedSkills = await refreshManagedSkillsAfterUpdate(result, env);
     return { ...result, refreshedSkills };
   } catch (error) {
     // Background updates never block a coding-agent session. Keep the failure

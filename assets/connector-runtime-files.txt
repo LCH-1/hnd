@@ -5,6 +5,7 @@ src/adapters/codex.mjs
 src/adapters/common.mjs
 src/adapters/cursor.mjs
 src/adapters/index.mjs
+src/adapters/mutation-lock.mjs
 src/args.mjs
 src/cli-help.mjs
 src/cli-i18n.mjs

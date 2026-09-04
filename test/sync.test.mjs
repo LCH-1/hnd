@@ -482,6 +482,224 @@ test('control store serializes mutations across independent server/admin instanc
   assert.equal(enrollmentCount, 16);
 });
 
+test('bearer credentials use indexed token-hash lookups without scanning token tables', async (t) => {
+  const directory = await temporaryDirectory(t, 'hnd-sync-indexed-token-lookup-');
+  const control = await new ControlStore(directory).init();
+  t.after(() => control.close());
+
+  const statements = [];
+  const database = control.getDatabase();
+  const prepare = database.prepare.bind(database);
+  database.prepare = (sql) => {
+    statements.push(String(sql).replace(/\s+/g, ' ').trim());
+    return prepare(sql);
+  };
+
+  const enrollment = await control.createEnrollmentKey('indexed-token-tenant');
+  const enrolled = await control.consumeEnrollmentKey(
+    enrollment.enrollmentKey,
+    'indexed-enrollment-device',
+  );
+  const invitation = await control.createDeviceInvitation(
+    'indexed-token-tenant',
+    Buffer.from('indexed-wrapped-vault-key'),
+  );
+  await control.consumeDeviceInvitation(invitation.invitationToken, 'indexed-invitation-device');
+  await control.authenticateDevice(enrolled.deviceToken);
+
+  assert.ok(statements.includes('DELETE FROM invitations WHERE expires_at <= ?'));
+  assert.equal(
+    statements.some((statement) => statement.includes('SELECT id, expires_at FROM invitations')),
+    false,
+  );
+  const prunePlan = prepare(`
+    EXPLAIN QUERY PLAN DELETE FROM invitations WHERE expires_at <= ?
+  `).all(new Date().toISOString());
+  assert.ok(prunePlan.some((row) => (
+    /SEARCH invitations USING (?:COVERING )?INDEX invitations_expires_at/.test(row.detail)
+    && row.detail.includes('(expires_at<?)')
+  )));
+
+  for (const table of ['enrollments', 'invitations', 'devices']) {
+    assert.ok(
+      statements.includes(`SELECT * FROM ${table} WHERE token_hash = ?`),
+      `missing indexed ${table} token lookup`,
+    );
+    assert.equal(statements.includes(`SELECT * FROM ${table}`), false);
+    const queryPlan = prepare(`
+      EXPLAIN QUERY PLAN SELECT * FROM ${table} WHERE token_hash = ?
+    `).all('0'.repeat(64));
+    assert.ok(queryPlan.some((row) => (
+      row.detail.includes(`SEARCH ${table} USING INDEX`)
+      && row.detail.includes('(token_hash=?)')
+    )));
+  }
+});
+
+test('enrollment status uses an explicit device relation and migrates legacy rows with fallback', async (t) => {
+  const directory = await temporaryDirectory(t, 'hnd-sync-enrollment-device-link-');
+  const now = Date.parse('2026-09-04T03:04:05.678Z');
+  const initial = await new ControlStore(directory, { clock: () => now }).init();
+  const legacyEnrollment = await initial.createEnrollmentKey('enrollment-link-tenant');
+  const legacyDevice = await initial.consumeEnrollmentKey(
+    legacyEnrollment.enrollmentKey,
+    'legacy-linked-device',
+  );
+  initial.close();
+
+  const oldSchema = new DatabaseSync(path.join(directory, DEFAULT_DATABASE_FILENAME));
+  oldSchema.exec(`
+    DROP INDEX enrollments_device_id;
+    ALTER TABLE enrollments DROP COLUMN device_id;
+    DELETE FROM schema_metadata WHERE key = 'enrollment_device_backfill_v1';
+  `);
+  oldSchema.close();
+
+  const control = await new ControlStore(directory, { clock: () => now }).init();
+  t.after(() => control.close());
+  const migrated = inspectServerDatabase(directory, (database) => ({
+    columns: new Set(database.prepare('PRAGMA table_info(enrollments)').all().map((row) => row.name)),
+    index: database.prepare(`
+      SELECT 1 AS present FROM sqlite_schema
+      WHERE type = 'index' AND name = 'enrollments_device_id'
+    `).get(),
+    foreignKeyViolations: database.prepare('PRAGMA foreign_key_check').all(),
+  }));
+  assert.equal(migrated.columns.has('device_id'), true);
+  assert.equal(migrated.index.present, 1);
+  assert.deepEqual(migrated.foreignKeyViolations, []);
+
+  const legacyStatus = await control.enrollmentStatus(
+    'enrollment-link-tenant',
+    legacyEnrollment.enrollmentId,
+  );
+  assert.equal(legacyStatus.device.id, legacyDevice.device.id);
+  assert.equal(legacyStatus.device.name, 'legacy-linked-device');
+  assert.equal(inspectServerDatabase(directory, (database) => database.prepare(`
+    SELECT device_id FROM enrollments WHERE id = ?
+  `).get(legacyEnrollment.enrollmentId).device_id), legacyDevice.device.id);
+
+  const firstEnrollment = await control.createEnrollmentKey('enrollment-link-tenant');
+  const secondEnrollment = await control.createEnrollmentKey('enrollment-link-tenant');
+  const firstDevice = await control.consumeEnrollmentKey(
+    firstEnrollment.enrollmentKey,
+    'same-millisecond-first',
+  );
+  const secondDevice = await control.consumeEnrollmentKey(
+    secondEnrollment.enrollmentKey,
+    'same-millisecond-second',
+  );
+  assert.equal(firstDevice.device.createdAt, secondDevice.device.createdAt);
+
+  const firstStatus = await control.enrollmentStatus(
+    'enrollment-link-tenant',
+    firstEnrollment.enrollmentId,
+  );
+  const secondStatus = await control.enrollmentStatus(
+    'enrollment-link-tenant',
+    secondEnrollment.enrollmentId,
+  );
+  assert.equal(firstStatus.device.id, firstDevice.device.id);
+  assert.equal(firstStatus.device.name, 'same-millisecond-first');
+  assert.equal(secondStatus.device.id, secondDevice.device.id);
+  assert.equal(secondStatus.device.name, 'same-millisecond-second');
+
+  const storedLinks = inspectServerDatabase(directory, (database) => database.prepare(`
+    SELECT id, device_id FROM enrollments
+    WHERE id IN (?, ?)
+    ORDER BY id
+  `).all(firstEnrollment.enrollmentId, secondEnrollment.enrollmentId));
+  assert.deepEqual(
+    new Map(storedLinks.map((row) => [row.id, row.device_id])),
+    new Map([
+      [firstEnrollment.enrollmentId, firstDevice.device.id],
+      [secondEnrollment.enrollmentId, secondDevice.device.id],
+    ]),
+  );
+});
+
+test('legacy enrollment migration never guesses between same-instant devices', async (t) => {
+  const directory = await temporaryDirectory(t, 'hnd-sync-ambiguous-enrollment-link-');
+  const now = Date.parse('2026-09-04T03:04:05.678Z');
+  const initial = await new ControlStore(directory, { clock: () => now }).init();
+  const firstEnrollment = await initial.createEnrollmentKey('ambiguous-link-tenant');
+  const secondEnrollment = await initial.createEnrollmentKey('ambiguous-link-tenant');
+  await initial.consumeEnrollmentKey(firstEnrollment.enrollmentKey, 'ambiguous-first');
+  await initial.consumeEnrollmentKey(secondEnrollment.enrollmentKey, 'ambiguous-second');
+  initial.close();
+
+  const oldSchema = new DatabaseSync(path.join(directory, DEFAULT_DATABASE_FILENAME));
+  oldSchema.exec(`
+    DROP INDEX enrollments_device_id;
+    ALTER TABLE enrollments DROP COLUMN device_id;
+    DELETE FROM schema_metadata WHERE key = 'enrollment_device_backfill_v1';
+  `);
+  oldSchema.close();
+
+  const control = await new ControlStore(directory, { clock: () => now }).init();
+  t.after(() => control.close());
+  const firstStatus = await control.enrollmentStatus(
+    'ambiguous-link-tenant',
+    firstEnrollment.enrollmentId,
+  );
+  const secondStatus = await control.enrollmentStatus(
+    'ambiguous-link-tenant',
+    secondEnrollment.enrollmentId,
+  );
+  assert.equal(firstStatus.consumed, true);
+  assert.equal(secondStatus.consumed, true);
+  assert.equal(firstStatus.device, null);
+  assert.equal(secondStatus.device, null);
+  assert.deepEqual(inspectServerDatabase(directory, (database) => database.prepare(`
+    SELECT device_id FROM enrollments
+    WHERE id IN (?, ?)
+  `).all(firstEnrollment.enrollmentId, secondEnrollment.enrollmentId)
+    .map((row) => ({ ...row }))), [
+    { device_id: null },
+    { device_id: null },
+  ]);
+});
+
+test('legacy invitation timestamps are canonicalized before indexed expiration pruning', async (t) => {
+  const directory = await temporaryDirectory(t, 'hnd-sync-invitation-timezone-');
+  const tenantId = 'legacy-invitation-timezone-tenant';
+  const invitationId = randomUUID();
+  let now = Date.parse('2026-09-04T05:00:00.000Z');
+  await writeFile(path.join(directory, 'control.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    enrollments: [],
+    invitations: [{
+      id: invitationId,
+      tenantId,
+      tokenHash: 'a'.repeat(64),
+      wrappedVaultKey: Buffer.from('legacy-wrapped-key').toString('base64'),
+      createdAt: '2026-09-03T23:00:00-10:00',
+      expiresAt: '2026-09-04T01:00:00-10:00',
+      usedAt: null,
+    }],
+    devices: [],
+  })}\n`);
+
+  const control = await new ControlStore(directory, { clock: () => now }).init();
+  t.after(() => control.close());
+  assert.deepEqual(inspectServerDatabase(directory, (database) => ({ ...database.prepare(`
+    SELECT created_at, expires_at FROM invitations WHERE id = ?
+  `).get(invitationId) })), {
+    created_at: '2026-09-04T09:00:00.000Z',
+    expires_at: '2026-09-04T11:00:00.000Z',
+  });
+  await control.listDevices(tenantId);
+  assert.equal(inspectServerDatabase(directory, (database) => Number(database.prepare(`
+    SELECT count(*) AS count FROM invitations WHERE id = ?
+  `).get(invitationId).count)), 1);
+
+  now = Date.parse('2026-09-04T12:00:00.000Z');
+  await control.listDevices(tenantId);
+  assert.equal(inspectServerDatabase(directory, (database) => Number(database.prepare(`
+    SELECT count(*) AS count FROM invitations WHERE id = ?
+  `).get(invitationId).count)), 0);
+});
+
 test('snapshot ETag compare-and-swap is serialized across server instances', async (t) => {
   const directory = await temporaryDirectory(t, 'hnd-sync-snapshot-lock-');
   const first = new SnapshotStore(directory, { maxBlobBytes: 64 * 1024 });

@@ -139,6 +139,17 @@ function recordForOrigin(state, origin, values) {
   };
 }
 
+function sameRuntimePointer(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.schemaVersion === right.schemaVersion
+    && left.sequence === right.sequence
+    && left.version === right.version
+    && left.sha256 === right.sha256
+  );
+}
+
 export async function checkConnectorUpdate({
   env = process.env,
   launcherVersion,
@@ -283,8 +294,14 @@ export async function connectorUpdateStatus(env = process.env) {
   };
 }
 
-export async function rollbackConnectorUpdate(env = process.env) {
+export async function rollbackConnectorUpdate(env = process.env, { expectedCurrent } = {}) {
   return withFileLock(runtimePaths(env).lock, async () => {
+    if (expectedCurrent !== undefined) {
+      const active = await readRuntimePointer('current', env);
+      if (!sameRuntimePointer(active, expectedCurrent)) {
+        return { current: active, rolledBack: null, skipped: 'current_changed' };
+      }
+    }
     const rolled = await rollbackRuntime(env);
     const remote = await readEnrolledRemote(env);
     if (remote && rolled.rolledBack) {

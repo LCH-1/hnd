@@ -123,3 +123,67 @@ test('CSRF recovery is bounded to one replay', async (t) => {
   );
   assert.equal(calls, 3);
 });
+
+test('request timeout covers response bodies and preserves the timeout reason', async (t) => {
+  const originalDocument = globalThis.document;
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+
+  globalThis.document = { querySelector: () => null };
+  globalThis.window = {
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+  };
+  globalThis.fetch = async (_url, options) => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Type': 'application/json' }),
+    json: () => new Promise((_resolve, reject) => {
+      const rejectOnAbort = () => reject(options.signal.reason);
+      if (options.signal.aborted) rejectOnAbort();
+      else options.signal.addEventListener('abort', rejectOnAbort, { once: true });
+    }),
+  });
+
+  await assert.rejects(
+    request('/slow-response', { timeout: 5 }),
+    (error) => error?.code === 'timeout' && error.retryable === true,
+  );
+});
+
+test('an already-aborted caller signal is reported as cancellation', async (t) => {
+  const originalDocument = globalThis.document;
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+
+  globalThis.document = { querySelector: () => null };
+  globalThis.window = {
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+  };
+  globalThis.fetch = async (_url, options) => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    throw options.signal.reason;
+  };
+  const controller = new AbortController();
+  controller.abort(new Error('caller cancelled'));
+
+  await assert.rejects(
+    request('/cancelled', { signal: controller.signal, timeout: 5 }),
+    (error) => error?.code === 'cancelled' && error.retryable === false,
+  );
+});

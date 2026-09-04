@@ -202,13 +202,26 @@ export function serializeJsonDocument(value, format) {
   return `${format.bom}${body}`;
 }
 
-export async function readIfPresent(filePath, readFile = fs.readFile) {
+export async function readIfPresent(filePath, {
+  agent,
+  readFile = fs.readFile,
+  lstat = fs.lstat,
+} = {}) {
+  let metadata;
   try {
-    return await readFile(filePath, 'utf8');
+    metadata = await lstat(filePath);
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined;
     throw error;
   }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new AdapterConflictError(
+      agent ?? 'hnd',
+      filePath,
+      'refusing to manage a symbolic link or non-regular path',
+    );
+  }
+  return readFile(filePath, 'utf8');
 }
 
 export function makeWriteOperation({

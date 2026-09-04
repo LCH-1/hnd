@@ -687,6 +687,8 @@ const EN = Object.freeze({
   "서버 응답을 읽을 수 없습니다.": "The server response could not be read.",
   "서버 응답이 늦습니다. 연결을 확인하고 다시 시도하세요.": "The server response timed out. Check the connection and try again.",
   "서버에 연결할 수 없습니다. 네트워크 상태를 확인해 주세요.": "The server is unreachable. Check the network connection.",
+  "요청을 취소했습니다.": "The request was cancelled.",
+  "로그아웃 상태를 안전하게 반영하지 못했습니다. 페이지를 새로고침해 다시 시도해 주세요.": "The signed-out state could not be applied safely. Reload the page and try again.",
   "리소스 ID가 필요합니다.": "A resource ID is required.",
   "이 브라우저는 안전한 로컬 보관함 저장을 지원하지 않습니다.": "This browser does not support secure local vault storage.",
   "작업 공간 ID 형식이 올바르지 않습니다.": "The workspace ID format is invalid.",
@@ -727,6 +729,7 @@ const EN = Object.freeze({
   "암호화 저장본을 먼저 열어 주세요.": "Open the encrypted snapshot first.",
   "동기화할 저장본을 선택해 주세요.": "Choose the copy to sync.",
   "서버로 보내지 못한 로컬 변경이 없습니다.": "There are no unsent local changes.",
+  "다른 탭에서 브라우저 룰을 먼저 바꿨습니다. 현재 입력을 덮어쓰지 않았으니 새로고침 후 다시 저장해 주세요.": "Another tab changed the browser rule first. Your current input was not overwritten; reload the page and save again.",
   "이 브라우저 룰은 이미 있습니다. 기존 룰을 수정해 주세요.": "A browser-only rule already exists. Edit the existing rule.",
   "같은 범위의 룰이 이미 있습니다.": "A rule already exists for this scope.",
   "수정 중에는 룰 범위를 바꿀 수 없습니다. 새 범위에 룰을 추가해 주세요.": "A rule's scope cannot be changed while editing. Add a rule in the new scope.",
@@ -794,8 +797,24 @@ const EN = Object.freeze({
 });
 
 const KO_BY_EN = new Map(Object.entries(EN).map(([ko, en]) => [en, ko]));
-const browserStorage = globalThis.localStorage;
-let preference = normalizePreference(browserStorage?.getItem?.(STORAGE_KEY)) || "auto";
+
+function storedPreference() {
+  try {
+    return globalThis.localStorage?.getItem?.(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistPreference(value) {
+  try {
+    globalThis.localStorage?.setItem?.(STORAGE_KEY, value);
+  } catch {
+    // Language selection remains usable when browser storage is unavailable.
+  }
+}
+
+let preference = normalizePreference(storedPreference()) || "auto";
 let language = resolveLanguage(preference);
 let observer = null;
 
@@ -875,7 +894,7 @@ export function setLanguagePreference(value, { persist = true } = {}) {
   if (!normalized) throw new TypeError("Language must be auto, ko, or en.");
   preference = normalized;
   language = resolveLanguage(preference);
-  if (persist) browserStorage?.setItem?.(STORAGE_KEY, preference);
+  if (persist) persistPreference(preference);
   translateDocument();
   globalThis.window?.dispatchEvent?.(new CustomEvent("hnd:language", { detail: { preference, language } }));
   return { preference, language };

@@ -7,8 +7,13 @@ import {
   createAccountConnection,
   hasLocalVault,
   initializeBrowserVault,
+  listLocalVaultIds,
   unlockManagedBrowserVault,
 } from "./vault.js";
+import {
+  listOfflineWorkspaceIds,
+  logoutAfterRevokingOfflineAccess,
+} from "./snapshot-data.js";
 import {
   $,
   $$,
@@ -51,6 +56,21 @@ function configureExitControl() {
   $("#setup-exit").textContent = state.session?.authenticated
     ? "로그아웃"
     : "나가기";
+}
+
+function webSessionId() {
+  const id = state.session?.session?.id;
+  return typeof id === "string" && id ? id : null;
+}
+
+async function localTenantIds() {
+  const [vaultIds, grantIds] = await Promise.all([
+    listLocalVaultIds(),
+    listOfflineWorkspaceIds(),
+  ]);
+  const ids = [...vaultIds, ...grantIds];
+  if (state.tenantId) ids.push(state.tenantId);
+  return [...new Set(ids)];
 }
 
 async function reauthenticate({ signal } = {}) {
@@ -830,7 +850,12 @@ $("#setup-exit").addEventListener("click", async (event) => {
   control.textContent = "로그아웃 중…";
   showNotice(globalError);
   try {
-    await api.logout();
+    const localVaults = await localTenantIds();
+    await logoutAfterRevokingOfflineAccess(
+      localVaults,
+      () => api.logout(),
+      { sessionId: webSessionId() },
+    );
     window.location.replace("/");
   } catch (error) {
     showNotice(globalError, error.message, "error");

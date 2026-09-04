@@ -18,7 +18,7 @@ import {
   runtimeDirectory,
   runtimeReady,
 } from './update/state.mjs';
-import { refreshManagedSkills } from './update/integration.mjs';
+import { refreshManagedSkillsAfterUpdate } from './update/integration.mjs';
 import './update/worker.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -75,8 +75,8 @@ function withoutSignature(release) {
   return safe;
 }
 
-async function importedRuntime(pointer, env) {
-  if (!pointer || !await runtimeReady(pointer, env)) return null;
+async function importedRuntime(pointer, env, { verified = false } = {}) {
+  if (!pointer || (!verified && !await runtimeReady(pointer, env))) return null;
   const entrypoint = path.join(runtimeDirectory(pointer, env), 'src', 'cli.mjs');
   const module = await import(`${pathToFileURL(entrypoint).href}?release=${pointer.sha256}`);
   if (typeof module.main !== 'function') throw new Error('Connector runtime has no CLI entrypoint');
@@ -89,16 +89,27 @@ async function selectRuntime(env) {
     readRuntimePointer('previous', env).catch(() => null),
   ]);
   if (current) {
-    const ready = await runtimeReady(current, env).catch(() => false);
+    let ready = null;
+    try {
+      ready = await runtimeReady(current, env);
+    } catch {
+      // A transient filesystem error is not proof that the active runtime is
+      // corrupt. Fall back for this invocation without changing pointers.
+    }
     if (ready) {
       try {
-        const selected = await importedRuntime(current, env);
+        const selected = await importedRuntime(current, env, { verified: true });
         if (selected) return selected;
       } catch {
         // A runtime that cannot even import is not a user-command failure. It
         // is safe to quarantine it and use a previous verified runtime.
-        await rollbackConnectorUpdate(env).catch(() => {});
+        await rollbackConnectorUpdate(env, { expectedCurrent: current }).catch(() => {});
       }
+    } else if (ready === false) {
+      // A deterministic marker/hash failure should not be rechecked on every
+      // command. Atomically switch to the verified previous runtime when one
+      // exists, preserving the same quarantine behavior as an import failure.
+      await rollbackConnectorUpdate(env, { expectedCurrent: current }).catch(() => {});
     }
   }
   if (previous) {
@@ -184,9 +195,7 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     result = await applyConnectorUpdate(updateOptions(env, { fetchImpl }));
     result = {
       ...result,
-      refreshedSkills: result.directory
-        ? await refreshManagedSkills(result.directory, env)
-        : [],
+      refreshedSkills: await refreshManagedSkillsAfterUpdate(result, env),
     };
   }
   else result = await rollbackConnectorUpdate(env);
@@ -269,7 +278,7 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   }
 }
 
-async function scheduleAutomaticUpdate(env, {
+export async function scheduleAutomaticUpdate(env, {
   spawnImpl = spawn,
   execPath = process.execPath,
 } = {}) {
@@ -280,6 +289,10 @@ async function scheduleAutomaticUpdate(env, {
     windowsHide: true,
     env,
   });
+  // ChildProcess reports spawn failures asynchronously. Without a listener an
+  // unavailable executable or exhausted process table becomes an uncaught
+  // exception in the foreground hnd command.
+  child.once('error', () => {});
   child.unref?.();
   return true;
 }

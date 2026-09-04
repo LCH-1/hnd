@@ -15,7 +15,9 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(html, /id="app-error-gate"/u);
   assert.match(app, /serviceWorker\.register\("\/sw\.js"/u);
   assert.match(app, /listLocalVaultIds/u);
+  assert.match(app, /listOfflineWorkspaceIds/u);
   assert.match(app, /offlineWorkspaceEnabled/u);
+  assert.match(app, /logoutAfterRevokingOfflineAccess/u);
   assert.match(snapshotData, /sealBrowserValue[\s\S]*?offline-access:/u);
   assert.doesNotMatch(snapshotData, /rememberedAt|WORKSPACE_HINT_KEY/u);
   assert.match(worker, /request\.mode === "navigate"[\s\S]*?\/app/u);
@@ -183,8 +185,12 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(app, /BroadcastChannel\("hnd:vault-reset"\)/u);
   assert.match(app, /serviceWorker\?\.controller\?\.postMessage\(message\)/u);
   assert.equal(
-    app.match(/enableOfflineWorkspace\(state\.tenantId\)\.catch/g)?.length,
-    4,
+    app.match(/enableCurrentOfflineWorkspace\(\)\.catch/g)?.length,
+    5,
+  );
+  assert.match(
+    app,
+    /enableOfflineWorkspace\(state\.tenantId, \{[\s\S]*?expectedAccessEpoch: state\.offlineAccessEpoch,[\s\S]*?sessionId/u,
   );
   assert.match(
     app,
@@ -194,6 +200,30 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.doesNotMatch(html, /이 브라우저에서만 복호화|브라우저에서만 열 수/u);
   assert.match(app, /resolveConflict\(strategy\)/u);
   assert.doesNotMatch(app, /api\.vaultStatus\(\)\.catch\(\(\) => null\)/u);
+  const unauthenticatedSession = app.slice(
+    app.indexOf('if (!session?.authenticated) {'),
+    app.indexOf('if (session.requiresPasskey)', app.indexOf('if (!session?.authenticated) {')),
+  );
+  assert.doesNotMatch(
+    unauthenticatedSession,
+    /listLocalVaultIds\(\)\.catch|disableOfflineWorkspace\(id\)\.catch/u,
+  );
+  const logoutHandler = app.slice(
+    app.indexOf('$("#logout-button").addEventListener'),
+    app.indexOf('document.addEventListener("click"'),
+  );
+  assert.match(
+    logoutHandler,
+    /localTenantIds\(\)[\s\S]*?logoutAfterRevokingOfflineAccess\([\s\S]*?localVaults[\s\S]*?\(\) => api\.logout\(\)[\s\S]*?sessionId: webSessionId\(\)[\s\S]*?window\.location\.replace/u,
+  );
+  const onlineHandler = app.slice(
+    app.indexOf('window.addEventListener("online"'),
+    app.indexOf('$("#sidebar-open").addEventListener'),
+  );
+  assert.match(
+    onlineHandler,
+    /unauthenticatedSession = true;[\s\S]*?localTenantIds\(\)[\s\S]*?disableOfflineWorkspace\(id, \{ sessionId: webSessionId\(\) \}\)[\s\S]*?if \(unauthenticatedSession\)[\s\S]*?새로고침해 다시 시도/u,
+  );
   assert.match(html, /href="#projects"[\s\S]*?data-view-link="projects"/u);
   assert.doesNotMatch(html, /workspace-avatar/u);
   assert.doesNotMatch(styles, /\.workspace-avatar/u);
@@ -208,6 +238,10 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(html, /id="project-guide-title"[\s\S]*?hnd env set dev/u);
   assert.match(html, /id="project-dialog"[\s\S]*?id="project-form"/u);
   assert.match(app, /async function loadProjects/u);
+  assert.match(
+    app,
+    /function currentProjectId\(\)[\s\S]*?try \{[\s\S]*?decodeURIComponent\(id\)[\s\S]*?catch \{[\s\S]*?return null/u,
+  );
   assert.match(app, /state\.dataStore\.project\(repository\.id\)/u);
   assert.match(app, /state\.dataStore\.updateProject\(values\.id, values\)/u);
   assert.match(styles, /\.search-field svg ~ input\s*\{[\s\S]*?padding-left:\s*39px/u);

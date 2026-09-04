@@ -7,6 +7,7 @@ import {
   encryptSnapshot as encryptCanonicalSnapshot,
   importBrowserVault,
   loadBrowserVault,
+  SNAPSHOT_AUTHENTICATION_ERROR_CODE,
 } from "../browser/index.mjs";
 
 import { ApiError, api } from "./api.js";
@@ -444,12 +445,18 @@ export async function loadEncryptedSnapshot(tenantId, options = {}) {
       etag: response.etag || null,
     };
   } catch (error) {
-    const mismatch = new Error(
+    const unreadable = new Error(
       "저장본의 암호를 풀 수 없습니다. 올바른 보관함이 있는지 확인해 주세요.",
       { cause: error },
     );
-    mismatch.code = "vault_key_mismatch";
-    throw mismatch;
+    // Only an authenticated-encryption failure is evidence that the local key
+    // and the current server ciphertext do not match. Malformed envelopes or
+    // authenticated non-JSON payloads cannot be repaired by replacing the key,
+    // and must not expose the destructive managed-vault reconnect action.
+    if (error?.code === SNAPSHOT_AUTHENTICATION_ERROR_CODE) {
+      unreadable.code = "vault_key_mismatch";
+    }
+    throw unreadable;
   } finally {
     clearBytes(key);
   }
