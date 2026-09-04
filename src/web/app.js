@@ -537,6 +537,33 @@ async function loadOverview() {
   }
 }
 
+const KNOWLEDGE_TYPE_LABELS = {
+  note: "메모",
+  decision: "결정",
+  solution: "해결법",
+  failure: "실패",
+  caution: "주의사항",
+  command: "명령",
+  architecture: "설계",
+  runbook: "런북",
+};
+
+const ACTIVITY_ACTION_LABELS = {
+  created: "추가",
+  updated: "수정",
+  closed: "완료",
+  approved: "승인",
+  rejected: "거절",
+};
+
+const ACTIVITY_ACTION_TONES = {
+  created: "progress",
+  updated: "progress",
+  closed: "active",
+  approved: "active",
+  rejected: "attention",
+};
+
 function renderCompactList(container, values, emptyCopy, type) {
   clearChildren(container);
   const items = Array.isArray(values) ? values.slice(0, 4) : [];
@@ -557,12 +584,17 @@ function renderCompactList(container, values, emptyCopy, type) {
         element("strong", {
           text: value.title || value.name || value.goal || "이름 없는 기록",
         }),
-        element("span", {
-          text: type === "activity"
-            ? t({ created: "추가", updated: "수정", closed: "완료", approved: "승인", rejected: "거절" }[value.action] || value.action)
-            : truncate(value.next || value.current || value.goal, 90),
-        }),
       );
+      if (type !== "activity") {
+        copy.append(
+          element("span", {
+            text: truncate(value.next || value.current || value.goal, 90),
+          }),
+        );
+      }
+      const tone = type === "activity"
+        ? ACTIVITY_ACTION_TONES[value.action] || "progress"
+        : "progress";
       item.append(
         element("time", {
           className: "activity-time",
@@ -570,17 +602,36 @@ function renderCompactList(container, values, emptyCopy, type) {
           attrs: timestamp ? { datetime: timestamp } : {},
         }),
         copy,
+      );
+      if (type === "activity") {
+        item.append(
+          element("span", {
+            className: "tag activity-kind",
+            text: t({ work: "작업", knowledge: "지식", rule: "룰" }[value.kind] || "기록"),
+          }),
+        );
+      }
+      item.append(
         element("span", {
-          className: "status-badge active activity-status",
+          className: `status-badge ${tone} activity-status`,
           text: type === "activity"
-            ? t({ work: "작업", knowledge: "지식", rule: "룰" }[value.kind] || "기록")
+            ? t(ACTIVITY_ACTION_LABELS[value.action] || value.action)
             : t("진행 중"),
         }),
       );
     } else {
-      item.append(
+      const copy = element("div", { className: "knowledge-item-copy" });
+      copy.append(
         element("strong", { text: value.title || "제목 없는 지식" }),
         element("span", { text: truncate(value.content, 90) }),
+      );
+      item.append(
+        element("span", {
+          className: "knowledge-item-ic",
+          attrs: { "aria-hidden": "true" },
+          text: t(KNOWLEDGE_TYPE_LABELS[value.type] || "메모").slice(0, 2),
+        }),
+        copy,
       );
     }
     container.append(item);
@@ -1104,16 +1155,7 @@ async function loadKnowledge(values = {}) {
         ? `${t("프로젝트")} · ${note.repositoryName || t("프로젝트")}`
         : t("공통");
     tags.append(element("span", { className: "tag tag-scope", text: scope }));
-    const typeLabel = {
-      note: "메모",
-      decision: "결정",
-      solution: "해결법",
-      failure: "실패",
-      caution: "주의사항",
-      command: "명령",
-      architecture: "설계",
-      runbook: "런북",
-    }[note.type] || "메모";
+    const typeLabel = KNOWLEDGE_TYPE_LABELS[note.type] || "메모";
     tags.append(element("span", { className: "tag", text: t(typeLabel) }));
     if (note.pinned)
       tags.append(element("span", { className: "tag tag-pinned", text: t("고정") }));

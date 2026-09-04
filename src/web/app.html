@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <meta name="theme-color" content="#003049" />
+    <meta name="theme-color" content="#3763ce" />
     <meta name="hnd-api-base" content="/api/web" />
     <meta name="description" content="HND 작업 공간" />
     <meta property="og:type" content="website" />
@@ -479,21 +479,98 @@
               </div>
               <div class="metric-cards" id="home-metrics" aria-live="polite">
                 <article>
-                  <span>마지막 서버 저장</span
-                  ><strong id="metric-last-save">확인 중</strong
-                  ><small>암호문을 받은 시각</small>
+                  <div class="metric-head">
+                    <span class="metric-ic" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <circle
+                          cx="12"
+                          cy="12"
+                          r="8.5"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                        />
+                        <path
+                          d="M12 7v5l3.5 2"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                          stroke-linecap="round"
+                        />
+                      </svg>
+                    </span>
+                    <span>마지막 서버 저장</span>
+                  </div>
+                  <strong id="metric-last-save">확인 중</strong>
+                  <small>암호문을 받은 시각</small>
                 </article>
                 <article>
-                  <span>연결된 기기</span><strong id="metric-devices">확인 중</strong
-                  ><small>폐기되지 않은 기기</small>
+                  <div class="metric-head">
+                    <span class="metric-ic" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <rect
+                          x="4"
+                          y="3"
+                          width="16"
+                          height="18"
+                          rx="2"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                        />
+                        <path
+                          d="M10 18h4"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                          stroke-linecap="round"
+                        />
+                      </svg>
+                    </span>
+                    <span>연결된 기기</span>
+                  </div>
+                  <strong id="metric-devices">확인 중</strong>
+                  <small>폐기되지 않은 기기</small>
                 </article>
                 <article>
-                  <span>보관본</span><strong id="metric-revisions">확인 중</strong
-                  ><small>암호화된 저장 기록</small>
+                  <div class="metric-head">
+                    <span class="metric-ic" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path
+                          d="M4 6.5C4 5.1 7.6 4 12 4s8 1.1 8 2.5v11C20 18.9 16.4 20 12 20s-8-1.1-8-2.5v-11Z"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                        />
+                        <path
+                          d="M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                        />
+                      </svg>
+                    </span>
+                    <span>보관본</span>
+                  </div>
+                  <strong id="metric-revisions">확인 중</strong>
+                  <small>암호화된 저장 기록</small>
                 </article>
                 <article>
-                  <span>저장 용량</span><strong id="metric-storage">확인 중</strong
-                  ><small>현재 암호문 크기</small>
+                  <div class="metric-head">
+                    <span class="metric-ic" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path
+                          d="M12 3 5 6v5c0 4.6 2.9 8.1 7 10 4.1-1.9 7-5.4 7-10V6l-7-3Z"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.9"
+                          stroke-linejoin="round"
+                        />
+                      </svg>
+                    </span>
+                    <span>저장 용량</span>
+                  </div>
+                  <strong id="metric-storage">확인 중</strong>
+                  <small>현재 암호문 크기</small>
                 </article>
               </div>
               <section class="attention-ledger" aria-labelledby="attention-title">

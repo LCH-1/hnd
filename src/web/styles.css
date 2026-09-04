@@ -1,33 +1,57 @@
 :root {
-  --forest: #003049;
-  --forest-2: #001e2e;
-  --teal: #669bbc;
-  --teal-dark: #003049;
-  --mint: #e8f1f5;
-  --cloud: #faf8f3;
-  --white: #fffdf8;
-  --ink: #003049;
-  --muted: #425d69;
-  --muted-soft: #536b75;
-  --border: #ded8ce;
-  --border-strong: #778c96;
-  --surface-subtle: #f8f1e5;
-  --surface-hover: #f3e9d9;
-  --cream: #fdf0d5;
-  --selection: #669bbc;
-  --selection-soft: #e8f1f5;
-  --warning: #8a4b08;
-  --warning-bg: #fff4df;
-  --attention: #780000;
-  --attention-bg: #fdf0d5;
-  --danger: #c1121f;
-  --danger-hover: #9f0f19;
-  --danger-bg: #fcebec;
-  --success: #2f6f57;
-  --success-bg: #eaf4ef;
-  --shadow: 0 12px 32px rgba(16, 24, 40, 0.12);
-  --shadow-soft: 0 1px 2px rgba(16, 24, 40, 0.035);
+  /* Muted Cobalt (M1) — 잉크는 중립 먹, 강조는 채도를 낮춘 코발트 하나.
+     상태색 다섯 개를 모두 유지하되 형광기를 걷어냈다. */
+  --forest: #0f172a;
+  --forest-2: #0b1220;
+  --teal: #3763ce;
+  --teal-dark: #2b4c9e;
+  --mint: #eaf0fb;
+  --cloud: #f8fafc;
+  --white: #ffffff;
+  --ink: #0f172a;
+  --muted: #475569;
+  --muted-soft: #7c899c;
+  --border: #dfe5ec;
+  --border-strong: #c3ccd8;
+  --surface-subtle: #f1f5f9;
+  --surface-hover: #e9eef5;
+  --cream: #ffffff;
+  --selection: #3763ce;
+  --selection-soft: #eaf0fb;
+  --warning: #a15a18;
+  --warning-bg: #f8f0e4;
+  --attention: #c4323d;
+  --attention-bg: #fbecec;
+  --danger: #c4323d;
+  --danger-hover: #a82a34;
+  --danger-bg: #fbecec;
+  --success: #197d5f;
+  --success-bg: #e9f4ef;
+  --shadow: 0 12px 30px -14px rgba(15, 23, 42, 0.3);
+  --shadow-soft: 0 1px 2px rgba(15, 23, 42, 0.05);
   --sidebar: 236px;
+
+  /* 강조 — 주 동작, 현재 위치, 링크, focus */
+  --accent: #3763ce;
+  --accent-strong: #2b4c9e;
+  --accent-pressed: #243f83;
+  --accent-soft: #eaf0fb;
+  --accent-ink: #2b4c9e;
+  --accent-on: #ffffff;
+
+  /* 진행 중 — 다섯 번째 상태색 */
+  --info: #7150c4;
+  --info-bg: #f0ecfa;
+
+  /* 중립 칩과 분류 태그. 상태가 아닌 것에는 색을 쓰지 않는다 */
+  --chip: #f1f5f9;
+  --tag-bg: #eef1f5;
+  --tag-ink: #52607a;
+
+  /* 모서리 — 카드 8, 컨트롤 6, 배지 5 */
+  --r-card: 8px;
+  --r-ctl: 6px;
+  --r-pill: 5px;
 }
 
 * {
@@ -4852,4 +4876,481 @@ dialog::backdrop {
     width: 100%;
     min-width: 0;
   }
+}
+
+/* ============================================================
+   Muted Cobalt (M1) — 시각 개편 레이어
+   기하: 카드 8px, 컨트롤 6px, 배지 5px, 그림자는 0 1px 2px 하나.
+   색: 강조는 채도를 낮춘 코발트 하나, 상태색 다섯 개는 유지하되
+       형광기를 뺀다. 분류(저장소 태그)에는 색을 쓰지 않는다.
+   ============================================================ */
+
+/* --- 기하 --- */
+
+input,
+textarea,
+select {
+  border-radius: var(--r-ctl);
+}
+
+.button,
+.icon-button,
+.copy-button,
+.text-button,
+.segmented,
+.filter-select,
+.search-field {
+  border-radius: var(--r-ctl);
+}
+
+.segmented button {
+  border-radius: calc(var(--r-ctl) - 2px);
+}
+
+.panel,
+.metric-cards,
+.home-grid,
+.settings-grid,
+.auth-card,
+.setup-card,
+.resource-card,
+.knowledge-card,
+.table-wrap,
+.notice,
+.info-callout,
+.warning-note,
+.inline-note,
+.empty-state,
+.code-block,
+.sync-actions,
+.attention-ledger,
+.encryption-banner,
+.project-briefing,
+.security-summary,
+.danger-zone,
+.vault-gate {
+  border-radius: var(--r-card);
+}
+
+dialog,
+.form-dialog,
+.confirm-dialog {
+  border-radius: var(--r-card);
+}
+
+.tag,
+.status-badge,
+.tag-pinned {
+  border-radius: var(--r-pill);
+}
+
+/* 정지 상태의 표면은 평평하게 둔다. 그림자는 실제로 떠 있는 층에만. */
+.panel,
+.metric-cards,
+.home-grid,
+.settings-grid,
+.resource-card,
+.knowledge-card,
+.auth-card,
+.setup-card {
+  box-shadow: var(--shadow-soft);
+}
+
+dialog,
+.form-dialog,
+.confirm-dialog,
+.toast {
+  box-shadow: var(--shadow);
+}
+
+/* --- 강조 --- */
+
+a,
+.quiet-link,
+.panel-head a,
+.text-button {
+  color: var(--accent-ink);
+}
+
+.button-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.button-primary:hover:not(:disabled) {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.button-primary:active:not(:disabled) {
+  border-color: var(--accent-pressed);
+  background: var(--accent-pressed);
+}
+
+.button-secondary {
+  color: var(--ink);
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(55, 99, 206, 0.16);
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.spinner {
+  border-top-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- 셸 --- */
+
+.app-sidebar,
+.setup-sidebar {
+  background: var(--white);
+  color: var(--ink);
+}
+
+.app-header {
+  background: var(--white);
+}
+
+.app-nav a {
+  border-radius: var(--r-ctl);
+  color: var(--muted);
+}
+
+.app-nav a:hover {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+.app-nav a[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+.account-avatar {
+  border-radius: var(--r-ctl);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* --- 지표 카드 --- */
+
+.metric-cards {
+  gap: 14px;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.metric-cards article {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  min-height: 0;
+  padding: 15px 16px;
+  border: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--white);
+  box-shadow: var(--shadow-soft);
+}
+
+.metric-cards article:last-child {
+  border-right: 1px solid var(--border);
+}
+
+.metric-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.metric-cards .metric-ic {
+  display: grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-ctl);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.metric-cards .metric-ic svg {
+  width: 16px;
+  height: 16px;
+}
+
+.metric-cards span {
+  color: var(--muted-soft);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.metric-cards strong {
+  margin-top: 11px;
+  color: var(--ink);
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.metric-cards small {
+  justify-self: start;
+  margin-top: 8px;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* --- 홈 그리드 --- */
+
+.home-grid,
+.settings-grid {
+  gap: 14px;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.home-grid .panel,
+.settings-grid .panel {
+  padding: 16px 17px;
+  border: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--white);
+  box-shadow: var(--shadow-soft);
+}
+
+.home-grid .panel:last-child,
+.settings-grid .panel:last-child {
+  border-right: 1px solid var(--border);
+}
+
+/* --- 원장 행 --- */
+
+.compact-item {
+  gap: 11px;
+  padding: 11px 0;
+  border-color: var(--border);
+}
+
+.compact-item strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.compact-item span {
+  color: var(--muted-soft);
+}
+
+.knowledge-item-ic {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-ctl);
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* --- 상태 표기 ---
+   색만으로 상태를 전달하지 않는다. 모든 배지는 점 + 텍스트를 함께 쓴다. */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.status-badge::before {
+  display: block;
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.status-badge.active {
+  border-color: transparent;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.status-badge.attention {
+  border-color: transparent;
+  background: var(--attention-bg);
+  color: var(--attention);
+}
+
+.status-badge.revoked {
+  border-color: transparent;
+  background: var(--chip);
+  color: var(--muted-soft);
+}
+
+.status-badge.progress {
+  border-color: transparent;
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.status-badge.waiting {
+  border-color: transparent;
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.status-ok {
+  color: var(--success);
+}
+
+.status-error {
+  color: var(--danger);
+}
+
+.status-warning {
+  color: var(--warning);
+}
+
+/* --- 분류 태그는 무채색 --- */
+
+.tag,
+.tag.tag-scope {
+  border-color: transparent;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.tag-pinned {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* --- 표 --- */
+
+th {
+  background: var(--cloud);
+  color: var(--muted-soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.075em;
+}
+
+td {
+  border-color: var(--border);
+}
+
+/* --- 주의 원장 --- */
+
+.attention-values a {
+  border-radius: var(--r-pill);
+  background: var(--attention-bg);
+  color: var(--attention);
+  font-weight: 650;
+}
+
+.attention-values a:hover {
+  background: var(--attention-bg);
+  color: var(--danger-hover);
+}
+
+/* --- 홈 원장 행 구조 --- */
+
+.compact-item:not(.activity-item) {
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+}
+
+.knowledge-item-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.knowledge-item-copy strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-item-copy span {
+  color: var(--muted-soft);
+  font-size: 11px;
+}
+
+.activity-item {
+  grid-template-columns: 64px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.activity-kind {
+  align-self: center;
+  white-space: nowrap;
+}
+
+.activity-status {
+  align-self: center;
+}
+
+/* 확인할 항목 — 개수 링크는 상태가 아니라 이동이다. 빨강을 쓰지 않는다. */
+.attention-values a {
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.attention-values a:hover {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
