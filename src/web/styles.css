@@ -5062,6 +5062,9 @@ summary:focus-visible {
 
 .metric-cards {
   gap: 14px;
+  /* .attention-ledger 에는 margin-top 이 없다. 지표 줄이 아래 카드와
+     붙지 않도록 여기서 간격을 만든다. */
+  margin-bottom: 16px;
   overflow: visible;
   border: 0;
   background: transparent;
