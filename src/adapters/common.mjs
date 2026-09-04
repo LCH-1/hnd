@@ -128,12 +128,14 @@ export function createHookCommands(agent, {
   const prompt = make('prompt');
   const stop = make('stop');
   const end = make('end');
+  const precompact = make('precompact');
   return Object.freeze({
     ...start,
     start,
     prompt,
     stop,
     end,
+    precompact,
   });
 }
 
@@ -141,7 +143,7 @@ export function isHndHookCommand(command, agent, phase) {
   if (typeof command !== 'string' || !['claude', 'codex', 'cursor'].includes(agent)) {
     return false;
   }
-  const phases = phase === undefined ? ['start', 'prompt', 'stop', 'end'] : [phase];
+  const phases = phase === undefined ? ['start', 'prompt', 'stop', 'precompact', 'end'] : [phase];
   const suffixes = phases.flatMap((value) => {
     if (value === 'start') return [`'hook' '${agent}'`, `"hook" "${agent}"`];
     return [

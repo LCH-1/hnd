@@ -22,6 +22,7 @@ const GLOBAL_POLICY_PATH = 'policies/global.md';
 const REPOSITORY_INDEX_PATH = 'repositories.json';
 const REPOSITORIES_PREFIX = 'repositories/';
 const KNOWLEDGE_PREFIX = 'knowledge/';
+const RULES_PREFIX = 'rules/';
 const SNAPSHOT_KEYS = new Set(['schemaVersion', 'files']);
 const SNAPSHOT_FILE_KEYS = new Set(['path', 'encoding', 'bytes', 'sha256', 'content']);
 
@@ -109,6 +110,7 @@ function normalizeRelativePath(value) {
     && normalized !== REPOSITORY_INDEX_PATH
     && !normalized.startsWith(REPOSITORIES_PREFIX)
     && !normalized.startsWith(KNOWLEDGE_PREFIX)
+    && !normalized.startsWith(RULES_PREFIX)
   ) {
     throw new Error(`Snapshot path is outside the sync allowlist: ${normalized}`);
   }
@@ -227,6 +229,13 @@ export async function captureSyncSnapshot(homeDirectory, options = {}) {
     limits,
     files,
     'knowledge',
+  );
+  await walkManagedDirectory(
+    safeJoin(home, 'rules'),
+    'rules',
+    limits,
+    files,
+    'rules',
   );
 
   assertNoPortablePathCollisions(files.map((file) => file.path));

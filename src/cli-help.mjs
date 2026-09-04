@@ -105,6 +105,15 @@ const RULE_HELP = `hnd rule — 에이전트가 따라야 할 룰
   hnd rule remove <all|repo|env|pc> [--cwd DIR] [--environment LABEL]
   hnd rule test <start|show|stop>            실제 AI 세션 전달 검증
 
+여러 개·조건부 룰:
+  hnd rule add TITLE --text TEXT [--scope all|repo|env]
+      [--path 'backend/**']... [--file-pattern '**/*.sql']... [--draft] [--manual]
+  hnd rule modules                           이름 있는 룰 목록
+  hnd rule activate ID | hnd rule draft ID  초안과 사용 중 전환
+  hnd rule invoke ID | hnd rule clear ID    이 PC에서 수동 룰 켜기·끄기
+  hnd rule import PATH... [--apply]          미리보기 또는 초안 가져오기
+  hnd rule applied                           세션별 적용 룰 기록
+
 예:
   hnd rule set all --text "항상 테스트를 실행한다."
   hnd rule set repo --file ./AGENT_RULES.md
@@ -116,14 +125,19 @@ const RULE_HELP = `hnd rule — 에이전트가 따라야 할 룰
 const WORK_HELP = `hnd work — 에이전트 사이 작업 인계
 
 사용법:
-  hnd work new TASK --goal TEXT [--cwd DIR]
+  hnd work new TASK --goal TEXT [--priority urgent|high|normal|low]
+      [--status todo|in_progress|blocked] [--depends ID]... [--parent ID]
   hnd work save [TASK] [--id ID] [--goal TEXT] [--current TEXT]
       [--decision TEXT]... [--rejected TEXT]... [--changed-file PATH]...
       [--check TEXT]... [--next TEXT]... [--question TEXT]... [--note TEXT]...
   hnd work show [TASK] [--id ID] [--cwd DIR] [--json]
-  hnd work list [--all] [--cwd DIR] [--json]
+  hnd work list [--all] [--ready] [--cwd DIR] [--json]
   hnd work use [TASK] [--id ID] [--cwd DIR]
   hnd work done [TASK] [--id ID] [--cwd DIR]
+  hnd work claim [TASK] --as SESSION [--hours 2]
+  hnd work release [TASK]
+  hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
+  hnd work unblock [TASK]
 
 Git 진행 상태는 자동 저장됩니다. work는 결정, 다음 단계, 열린 질문처럼
 사람이 보강해야 할 인계 내용을 남길 때 사용합니다.
@@ -138,17 +152,26 @@ const KNOW_HELP = `hnd know — 오래 남길 지식
 
 사용법:
   hnd know add TITLE [--text TEXT | --file PATH | --stdin] [--tag TAG]...
-      [--scope all|repo|env] [--environment LABEL]
-  hnd know find QUERY [--tag TAG] [--scope all|repo|env] [--environment LABEL] [--json]
-  hnd know list [--tag TAG] [--scope all|repo|env] [--environment LABEL] [--json]
+      [--scope all|repo|env] [--type TYPE] [--state STATE] [--pinned]
+  hnd know find QUERY [--scope all|repo|env] [--limit N] [--json]
+  hnd know list [--type TYPE] [--state STATE] [--approval STATUS] [--json]
   hnd know show ID [--json]
   hnd know edit ID [--title TITLE] [--text TEXT | --file PATH | --stdin]
       [--tag TAG]... [--clear-tags] [--scope all|repo|env] [--environment LABEL]
   hnd know remove ID
+  hnd know review ID <approve|reject>         제안함 검토
+  hnd know feedback ID <helpful|wrong|irrelevant>
+  hnd know suggest <status|on|off>            세션 종료 제안 (기본 꺼짐)
+  hnd know import PATH... [--apply]           문서·기존 내보내기 가져오기
+  hnd know import-session PATH... [--apply]   과거 세션 후보 만들기
+  hnd know export [--format json|markdown|okf] [--output FILE]
+  hnd know duplicates [--threshold 0.65]
+  hnd know merge TARGET_ID SOURCE_ID
 
 repo와 env는 현재 Git 프로젝트를 사용합니다. env는 --environment를 생략하면
 현재 체크아웃에서 선택한 환경을 사용합니다.
-대화 전문은 자동 저장하지 않습니다. 다시 검색할 가치가 있는 내용만 직접 저장합니다.
+승인된 관련 지식 3~5개와 고정 지식만 현재 질문에 맞춰 자동으로 전달됩니다.
+대화 전문은 수집하지 않습니다. 세션 제안도 직접 켜야 하며 승인 전에는 전달되지 않습니다.
 `;
 
 const SYNC_HELP = `hnd sync — 서버 동기화와 복구
@@ -260,6 +283,15 @@ Usage:
   hnd rule remove <all|repo|env|pc> [--cwd DIR] [--environment LABEL]
   hnd rule test <start|show|stop>            Verify delivery in a real AI session
 
+Named and conditional rules:
+  hnd rule add TITLE --text TEXT [--scope all|repo|env]
+      [--path 'backend/**']... [--file-pattern '**/*.sql']... [--draft] [--manual]
+  hnd rule modules                           List named rules
+  hnd rule activate ID | hnd rule draft ID  Change draft status
+  hnd rule invoke ID | hnd rule clear ID    Toggle a manual rule on this PC
+  hnd rule import PATH... [--apply]          Preview or import files as drafts
+  hnd rule applied                           Show rules delivered to sessions
+
 Examples:
   hnd rule set all --text "Always run tests."
   hnd rule set repo --file ./AGENT_RULES.md
@@ -270,14 +302,19 @@ Examples:
   work: `hnd work — hand work to another agent
 
 Usage:
-  hnd work new TASK --goal TEXT [--cwd DIR]
+  hnd work new TASK --goal TEXT [--priority urgent|high|normal|low]
+      [--status todo|in_progress|blocked] [--depends ID]... [--parent ID]
   hnd work save [TASK] [--id ID] [--goal TEXT] [--current TEXT]
       [--decision TEXT]... [--rejected TEXT]... [--changed-file PATH]...
       [--check TEXT]... [--next TEXT]... [--question TEXT]... [--note TEXT]...
   hnd work show [TASK] [--id ID] [--cwd DIR] [--json]
-  hnd work list [--all] [--cwd DIR] [--json]
+  hnd work list [--all] [--ready] [--cwd DIR] [--json]
   hnd work use [TASK] [--id ID] [--cwd DIR]
   hnd work done [TASK] [--id ID] [--cwd DIR]
+  hnd work claim [TASK] --as SESSION [--hours 2]
+  hnd work release [TASK]
+  hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
+  hnd work unblock [TASK]
 
 Git progress is captured automatically. Use work for decisions, next steps, open questions,
 and other context that needs a human explanation.
@@ -286,17 +323,26 @@ and other context that needs a human explanation.
 
 Usage:
   hnd know add TITLE [--text TEXT | --file PATH | --stdin] [--tag TAG]...
-      [--scope all|repo|env] [--environment LABEL]
-  hnd know find QUERY [--tag TAG] [--scope all|repo|env] [--environment LABEL] [--json]
-  hnd know list [--tag TAG] [--scope all|repo|env] [--environment LABEL] [--json]
+      [--scope all|repo|env] [--type TYPE] [--state STATE] [--pinned]
+  hnd know find QUERY [--scope all|repo|env] [--limit N] [--json]
+  hnd know list [--type TYPE] [--state STATE] [--approval STATUS] [--json]
   hnd know show ID [--json]
   hnd know edit ID [--title TITLE] [--text TEXT | --file PATH | --stdin]
       [--tag TAG]... [--clear-tags] [--scope all|repo|env] [--environment LABEL]
   hnd know remove ID
+  hnd know review ID <approve|reject>         Review a suggestion
+  hnd know feedback ID <helpful|wrong|irrelevant>
+  hnd know suggest <status|on|off>            End-of-session suggestions (off by default)
+  hnd know import PATH... [--apply]           Import documents or prior exports
+  hnd know import-session PATH... [--apply]   Build candidates from old sessions
+  hnd know export [--format json|markdown|okf] [--output FILE]
+  hnd know duplicates [--threshold 0.65]
+  hnd know merge TARGET_ID SOURCE_ID
 
 Scope defaults to all. Repo and env scopes use the current Git repository; env also uses
 the checkout's selected environment unless --environment is provided.
-HND does not collect conversation transcripts. Save only knowledge worth finding again.
+Only approved relevant records (normally 3–5) and pinned knowledge are selected for a prompt.
+HND does not collect transcripts. Session suggestions are opt-in and stay out of context until approved.
 `,
   sync: `hnd sync — server sync and recovery
 

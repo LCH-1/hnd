@@ -15,6 +15,7 @@ export const CLAUDE_MATCHER = 'startup|resume|clear|compact|fork';
 export const CLAUDE_PROMPT_EVENT = 'UserPromptSubmit';
 export const CLAUDE_STOP_EVENT = 'Stop';
 export const CLAUDE_END_EVENT = 'SessionEnd';
+export const CLAUDE_PRECOMPACT_EVENT = 'PreCompact';
 
 export function createClaudeHook(commands) {
   return {
@@ -35,7 +36,7 @@ export function createClaudePromptHook(commands) {
 }
 
 export function createClaudeCheckpointHook(commands, phase) {
-  if (!['stop', 'end'].includes(phase)) throw new TypeError(`Unsupported hook phase: ${phase}`);
+  if (!['stop', 'end', 'precompact'].includes(phase)) throw new TypeError(`Unsupported hook phase: ${phase}`);
   return {
     type: 'command',
     command: commands[phase].host,
@@ -97,6 +98,12 @@ export function installClaudeHook(config, { commands, filePath = '<memory>' }) {
     eventName: CLAUDE_STOP_EVENT,
     phase: 'stop',
   });
+  output = installEvent(output, {
+    commands,
+    filePath,
+    eventName: CLAUDE_PRECOMPACT_EVENT,
+    phase: 'precompact',
+  });
   return installEvent(output, {
     commands,
     filePath,
@@ -111,6 +118,7 @@ export function uninstallClaudeHook(config, { commands, filePath = '<memory>' })
     [CLAUDE_EVENT, 'start'],
     [CLAUDE_PROMPT_EVENT, 'prompt'],
     [CLAUDE_STOP_EVENT, 'stop'],
+    [CLAUDE_PRECOMPACT_EVENT, 'precompact'],
     [CLAUDE_END_EVENT, 'end'],
   ]) {
     output = stripNestedHandler(output, {
@@ -169,6 +177,7 @@ export function inspectClaudeHook(config, { commands }) {
     }),
     inspectEvent(config, { commands, eventName: CLAUDE_PROMPT_EVENT, phase: 'prompt' }),
     inspectEvent(config, { commands, eventName: CLAUDE_STOP_EVENT, phase: 'stop' }),
+    inspectEvent(config, { commands, eventName: CLAUDE_PRECOMPACT_EVENT, phase: 'precompact' }),
     inspectEvent(config, { commands, eventName: CLAUDE_END_EVENT, phase: 'end' }),
   ];
   const failed = checks.find((check) => check.status !== 'ok');
@@ -205,6 +214,7 @@ export const claudeAdapter = Object.freeze({
     CLAUDE_EVENT,
     CLAUDE_PROMPT_EVENT,
     CLAUDE_STOP_EVENT,
+    CLAUDE_PRECOMPACT_EVENT,
     CLAUDE_END_EVENT,
   ]),
   installHook: installClaudeHook,

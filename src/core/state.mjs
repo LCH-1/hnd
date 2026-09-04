@@ -93,6 +93,10 @@ export function validateConfig(value) {
     (value.activeEnvironment === null || typeof value.activeEnvironment === 'string') &&
     (value.autoSave === undefined || typeof value.autoSave === 'boolean') &&
     (value.autoSync === undefined || typeof value.autoSync === 'boolean') &&
+    (value.knowledgeSuggestions === undefined || typeof value.knowledgeSuggestions === 'boolean') &&
+    (value.manualRules === undefined || (
+      Array.isArray(value.manualRules) && value.manualRules.every(isUuid)
+    )) &&
     (value.language === undefined || ['auto', 'ko', 'en'].includes(value.language)) &&
     (
       value.ruleTest === undefined
@@ -189,6 +193,7 @@ export async function initializeState({ env = process.env, clock = Date } = {}) 
     // New managed collections must also be created for state initialized by an
     // earlier HND release. The trusted-root check rejects a prepared symlink.
     await ensureDirectory(paths.knowledge, undefined, { trustedRoot: paths.home });
+    await ensureDirectory(paths.rules, undefined, { trustedRoot: paths.home });
     return paths;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
@@ -202,6 +207,7 @@ export async function initializeState({ env = process.env, clock = Date } = {}) 
     ensureDirectory(path.dirname(paths.globalPolicy), undefined, { trustedRoot: paths.home }),
     ensureDirectory(paths.repositories, undefined, { trustedRoot: paths.home }),
     ensureDirectory(paths.knowledge, undefined, { trustedRoot: paths.home }),
+    ensureDirectory(paths.rules, undefined, { trustedRoot: paths.home }),
     ensureDirectory(paths.blobs, undefined, { trustedRoot: paths.home }),
     ensureDirectory(paths.secrets, undefined, { trustedRoot: paths.home }),
     ensureDirectory(paths.cache, undefined, { trustedRoot: paths.home }),
@@ -217,6 +223,8 @@ export async function initializeState({ env = process.env, clock = Date } = {}) 
         activeEnvironment: null,
         autoSave: true,
         autoSync: true,
+        knowledgeSuggestions: false,
+        manualRules: [],
         language: 'auto',
         ruleTest: null,
         staleHours: DEFAULT_STALE_HOURS,
@@ -264,6 +272,7 @@ export async function initializeRepositoryDirectory(repoId, env = process.env) {
     ensureDirectory(paths.handoffs, undefined, { trustedRoot: state.home }),
     ensureDirectory(paths.archive, undefined, { trustedRoot: state.home }),
     ensureDirectory(paths.checkpoints, undefined, { trustedRoot: state.home }),
+    ensureDirectory(paths.rules, undefined, { trustedRoot: state.home }),
   ]);
   return paths;
 }

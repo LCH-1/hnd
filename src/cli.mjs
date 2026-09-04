@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFile, writeFile } from 'node:fs/promises';
 
 import { UsageError, optionBoolean, optionList, optionString, parseArgs } from './args.mjs';
 import { HELP, HELP_TOPIC_NAMES, helpFor } from './cli-help.mjs';
@@ -19,6 +20,13 @@ import {
 } from './constants.mjs';
 import { createCore } from './core/index.mjs';
 import {
+  automaticSessionCandidate,
+  documentCandidate,
+  exportKnowledge,
+  importKnowledgeFile,
+  sessionCandidate,
+} from './core/knowledge-transfer.mjs';
+import {
   buildAdapterOperations,
   hookOutputObject,
   inspectAdapters,
@@ -26,6 +34,7 @@ import {
 } from './adapters/index.mjs';
 import {
   CURSOR_LIVE_CONTEXT_SESSION_ENV,
+  listLiveContextDeliveries,
   recordLiveContextDelivery,
   renderLiveContextSnapshot,
 } from './core/live-context.mjs';
@@ -257,7 +266,108 @@ async function handlePolicy({
   stdout,
   env,
   jsonOutput,
+  cwd,
 }) {
+  if (subcommand === 'applied') {
+    assertOptions(options, []);
+    ensureNoExtra(rest, 'hnd rule applied');
+    const result = await listLiveContextDeliveries({ env });
+    writeJson(result, stdout);
+    return;
+  }
+  if (subcommand === 'modules') {
+    assertOptions(options, ['environment']);
+    ensureNoExtra(rest, 'hnd rule modules');
+    const result = await core.ruleRecord.list({ environment: optionString(options, 'environment') });
+    writeJson(result, stdout);
+    return;
+  }
+  if (subcommand === 'add') {
+    assertOptions(options, [
+      'text', 'file', 'stdin', 'scope', 'environment', 'path', 'file_pattern',
+      'draft', 'manual',
+    ]);
+    const title = requireValue(rest.shift(), 'Rule title');
+    ensureNoExtra(rest, 'hnd rule add TITLE --text TEXT [--scope all|repo|env]');
+    const scope = resolveAlias(optionString(options, 'scope', 'repo'), policyScopeAliases);
+    if (!['global', 'repo', 'env'].includes(scope)) throw new UsageError('Named rule scope must be all, repo, or env.');
+    const content = await readTextInput(options, { stream: stdin });
+    const result = await core.ruleRecord.add({
+      title,
+      content,
+      scope,
+      environment: optionString(options, 'environment'),
+      status: optionBoolean(options, 'draft') ? 'draft' : 'active',
+      activation: optionBoolean(options, 'manual') ? 'manual' : 'always',
+      paths: listStrings(options, 'path'),
+      files: listStrings(options, 'file_pattern'),
+    });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `Added ${result.status} rule ${result.title} (${result.id}).`);
+    return;
+  }
+  if (['activate', 'draft'].includes(subcommand)) {
+    assertOptions(options, []);
+    const id = requireValue(rest.shift(), 'Rule ID');
+    ensureNoExtra(rest, `hnd rule ${subcommand} ID`);
+    const result = await core.ruleRecord.update({ id, patch: { status: subcommand === 'activate' ? 'active' : 'draft' } });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `${subcommand === 'activate' ? 'Activated' : 'Drafted'} ${result.title}.`);
+    return;
+  }
+  if (['invoke', 'clear'].includes(subcommand)) {
+    assertOptions(options, []);
+    const id = requireValue(rest.shift(), 'Rule ID');
+    ensureNoExtra(rest, `hnd rule ${subcommand} ID`);
+    const result = await core.ruleRecord.invoke(id, subcommand === 'invoke');
+    await refreshCursor({ force: true });
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `${result.enabled ? 'Enabled' : 'Disabled'} manual rule ${id} on this PC.`);
+    return;
+  }
+  if (subcommand === 'delete') {
+    assertOptions(options, []);
+    const id = requireValue(rest.shift(), 'Rule ID');
+    ensureNoExtra(rest, 'hnd rule delete ID');
+    const result = await core.ruleRecord.remove({ id });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, result.removed ? `Deleted ${id}.` : `Rule not found: ${id}`);
+    return;
+  }
+  if (subcommand === 'import') {
+    assertOptions(options, ['apply', 'scope', 'environment']);
+    if (rest.length === 0) throw new UsageError('Usage: hnd rule import PATH... [--apply]');
+    const scope = resolveAlias(optionString(options, 'scope', 'repo'), policyScopeAliases);
+    const candidates = [];
+    for (const source of rest) {
+      const absolute = path.resolve(cwd, source);
+      candidates.push({
+        title: path.basename(source),
+        content: await readFile(absolute, 'utf8'),
+        source: absolute,
+        scope,
+        status: 'draft',
+      });
+    }
+    if (!optionBoolean(options, 'apply')) {
+      writeJson({ preview: true, candidates }, stdout);
+      return;
+    }
+    const saved = [];
+    for (const candidate of candidates) {
+      saved.push(await core.ruleRecord.add({
+        ...candidate,
+        environment: optionString(options, 'environment'),
+      }));
+    }
+    await refreshCursor();
+    if (jsonOutput) writeJson(saved, stdout);
+    else writeText(stdout, `${saved.length} rule draft(s) imported. Review and activate them before use.`);
+    return;
+  }
   if (subcommand === 'list') {
     assertOptions(options, ['environment']);
     ensureNoExtra(rest, 'hnd rule list [--environment LABEL]');
@@ -436,12 +546,20 @@ function handoffFields(options) {
     nextSteps: listStrings(options, 'next'),
     openQuestions: listStrings(options, 'question'),
     notes: listStrings(options, 'note'),
+    priority: optionString(options, 'priority'),
+    workflowStatus: optionString(options, 'status'),
+    dependencies: listStrings(options, 'depends'),
+    parentId: optionString(options, 'parent'),
+    claimedBy: optionString(options, 'claim'),
+    blockedReason: optionString(options, 'blocked_reason'),
+    unblockCriteria: optionString(options, 'unblock_when'),
   };
 }
 
 const handoffWriteOptions = [
   'goal', 'current', 'decision', 'rejected', 'changed_file', 'check', 'next', 'question',
-  'note', 'stale_hours',
+  'note', 'stale_hours', 'priority', 'status', 'depends', 'parent', 'claim',
+  'claim_hours', 'blocked_reason', 'unblock_when',
 ];
 
 function staleHoursOption(options) {
@@ -467,6 +585,7 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
       objective: requireValue(objective, '--goal'),
       ...fields,
       staleHours: staleHoursOption(options),
+      claimHours: Number(optionString(options, 'claim_hours', 2)),
     });
     await refreshCursor();
     if (jsonOutput) writeJson(result, stdout);
@@ -483,10 +602,20 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     const objective = optionString(options, 'goal');
     if (objective !== undefined) patch.objective = objective;
     if (fields.currentState !== undefined) patch.currentState = fields.currentState;
+    for (const key of [
+      'priority', 'workflowStatus', 'parentId', 'claimedBy',
+      'blockedReason', 'unblockCriteria',
+    ]) {
+      if (fields[key] !== undefined) patch[key] = fields[key];
+    }
+    if (options.depends !== undefined) patch.dependencies = fields.dependencies;
     const staleHours = staleHoursOption(options);
     if (staleHours !== undefined) patch.staleHours = staleHours;
     const append = Object.fromEntries(
-      Object.entries(fields).filter(([key, value]) => key !== 'currentState' && value.length > 0),
+      Object.entries(fields).filter(([key, value]) => (
+        ['decisions', 'failedApproaches', 'changedFiles', 'validation', 'nextSteps', 'openQuestions', 'notes'].includes(key)
+        && value.length > 0
+      )),
     );
     if (Object.keys(patch).length === 0 && Object.keys(append).length === 0) {
       throw new UsageError('Provide at least one handoff field to save.');
@@ -514,10 +643,11 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
   }
 
   if (subcommand === 'list') {
-    assertOptions(options, ['all']);
+    assertOptions(options, ['all', 'ready']);
     ensureNoExtra(rest, 'hnd work list [--all]');
     const status = optionBoolean(options, 'all') ? undefined : 'active';
-    const result = await core.handoff.list({ status });
+    let result = await core.handoff.list({ status });
+    if (optionBoolean(options, 'ready')) result = result.filter((item) => item.ready);
     if (jsonOutput) writeJson(result, stdout);
     else if (result.length === 0) writeText(stdout, 'No handoffs found.');
     else writeText(stdout, result.map((item) => `${item.status.padEnd(7)} ${item.task.padEnd(24)} ${item.id}`).join('\n'));
@@ -546,7 +676,36 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     else writeText(stdout, `Selected ${result.task} (${result.id}) for this checkout and branch.`);
     return;
   }
-  throw new UsageError('Work command must be new, save, show, list, use, or done.');
+  if (['claim', 'release', 'block', 'unblock'].includes(subcommand)) {
+    assertOptions(options, ['id', 'as', 'hours', 'reason', 'unblock_when']);
+    const task = rest.shift();
+    ensureNoExtra(rest, `hnd work ${subcommand} [TASK] [--id ID]`);
+    const patch = {};
+    if (subcommand === 'claim') {
+      patch.claimedBy = requireValue(optionString(options, 'as'), '--as');
+      const hours = Number(optionString(options, 'hours', 2));
+      if (!Number.isFinite(hours) || hours <= 0) throw new UsageError('--hours must be positive.');
+      patch.claimExpiresAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+      patch.workflowStatus = 'in_progress';
+    } else if (subcommand === 'release') {
+      patch.claimedBy = null;
+      patch.claimExpiresAt = null;
+    } else if (subcommand === 'block') {
+      patch.workflowStatus = 'blocked';
+      patch.blockedReason = requireValue(optionString(options, 'reason'), '--reason');
+      patch.unblockCriteria = optionString(options, 'unblock_when', '');
+    } else {
+      patch.workflowStatus = 'in_progress';
+      patch.blockedReason = '';
+      patch.unblockCriteria = '';
+    }
+    const result = await core.handoff.update({ id: optionString(options, 'id'), task, patch });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `${subcommand} ${result.task} (${result.id}).`);
+    return;
+  }
+  throw new UsageError('Work command must be new, save, show, list, use, done, claim, release, block, or unblock.');
 }
 
 function hasTextInput(options) {
@@ -569,9 +728,12 @@ function knowledgeLocation(entry) {
   return 'all';
 }
 
-async function handleKnowledge({ subcommand, rest, options, core, refreshCursor, stdin, stdout, jsonOutput }) {
+async function handleKnowledge({ subcommand, rest, options, core, refreshCursor, stdin, stdout, jsonOutput, cwd }) {
   if (subcommand === 'add') {
-    assertOptions(options, ['text', 'file', 'stdin', 'tag', 'scope', 'repo_id', 'environment']);
+    assertOptions(options, [
+      'text', 'file', 'stdin', 'tag', 'scope', 'repo_id', 'environment',
+      'type', 'state', 'pinned',
+    ]);
     const title = requireValue(rest.shift(), 'Title');
     ensureNoExtra(rest, 'hnd know add TITLE [--scope all|repo|env] [--environment LABEL]');
     const body = hasTextInput(options) ? await readTextInput(options, { stream: stdin }) : '';
@@ -582,6 +744,9 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
+      type: optionString(options, 'type'),
+      state: optionString(options, 'state'),
+      pinned: options.pinned === undefined ? undefined : optionBoolean(options, 'pinned'),
     });
     await refreshCursor();
     if (jsonOutput) writeJson(result, stdout);
@@ -589,7 +754,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     return;
   }
   if (subcommand === 'find') {
-    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment']);
+    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment', 'limit']);
     const query = requireValue(rest.shift(), 'Search query');
     ensureNoExtra(rest, 'hnd know find QUERY [--scope all|repo|env] [--environment LABEL]');
     const result = await core.knowledge.search({
@@ -598,6 +763,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
+      limit: Number(optionString(options, 'limit', 100)),
     });
     if (jsonOutput) writeJson(result, stdout);
     else if (result.length === 0) writeText(stdout, 'No knowledge found.');
@@ -605,13 +771,17 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     return;
   }
   if (subcommand === 'list') {
-    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment']);
+    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment', 'type', 'state', 'approval', 'pinned']);
     ensureNoExtra(rest, 'hnd know list [--scope all|repo|env] [--environment LABEL]');
     const result = await core.knowledge.list({
       tag: optionString(options, 'tag'),
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
+      type: optionString(options, 'type'),
+      state: optionString(options, 'state'),
+      approval: optionString(options, 'approval'),
+      pinned: options.pinned === undefined ? undefined : optionBoolean(options, 'pinned'),
     });
     if (jsonOutput) writeJson(result, stdout);
     else if (result.length === 0) writeText(stdout, 'No knowledge saved.');
@@ -631,6 +801,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     assertOptions(options, [
       'title', 'text', 'file', 'stdin', 'tag', 'clear_tags',
       'scope', 'repo_id', 'environment',
+      'type', 'state', 'pinned', 'approval',
     ]);
     const id = requireValue(rest.shift(), 'Knowledge ID');
     ensureNoExtra(rest, 'hnd know edit ID [--title TITLE] [--text TEXT | --file PATH | --stdin] [--tag TAG]');
@@ -647,6 +818,10 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
+      type: optionString(options, 'type'),
+      state: optionString(options, 'state'),
+      pinned: options.pinned === undefined ? undefined : optionBoolean(options, 'pinned'),
+      approval: optionString(options, 'approval'),
     };
     const result = await core.knowledge.update(patch);
     await refreshCursor();
@@ -664,7 +839,115 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     else writeText(stdout, result.removed ? `Removed ${id}.` : `Knowledge entry not found: ${id}`);
     return;
   }
-  throw new UsageError('Know command must be add, find, list, show, edit, or remove.');
+  if (subcommand === 'feedback') {
+    assertOptions(options, []);
+    const id = requireValue(rest.shift(), 'Knowledge ID');
+    const feedbackKind = requireValue(rest.shift(), 'Feedback');
+    ensureNoExtra(rest, 'hnd know feedback ID <helpful|wrong|irrelevant>');
+    const result = await core.knowledge.update({ id, feedbackKind });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `Feedback saved for ${result.title}.`);
+    return;
+  }
+  if (subcommand === 'duplicates') {
+    assertOptions(options, ['threshold']);
+    ensureNoExtra(rest, 'hnd know duplicates [--threshold 0.65]');
+    const result = await core.knowledge.duplicates({
+      threshold: Number(optionString(options, 'threshold', 0.65)),
+    });
+    writeJson(result, stdout);
+    return;
+  }
+  if (subcommand === 'merge') {
+    assertOptions(options, []);
+    const targetId = requireValue(rest.shift(), 'Target knowledge ID');
+    const sourceId = requireValue(rest.shift(), 'Source knowledge ID');
+    ensureNoExtra(rest, 'hnd know merge TARGET_ID SOURCE_ID');
+    const result = await core.knowledge.merge({ targetId, sourceId });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `Merged knowledge into ${result.title} (${result.id}).`);
+    return;
+  }
+  if (subcommand === 'review') {
+    assertOptions(options, []);
+    const id = requireValue(rest.shift(), 'Knowledge ID');
+    const action = requireValue(rest.shift(), 'Review action');
+    ensureNoExtra(rest, 'hnd know review ID <approve|reject>');
+    if (!['approve', 'reject'].includes(action)) throw new UsageError('Review action must be approve or reject.');
+    const result = await core.knowledge.update({
+      id,
+      approval: action === 'approve' ? 'approved' : 'rejected',
+      state: action === 'approve' ? 'verified' : 'retired',
+    });
+    await refreshCursor();
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `${action === 'approve' ? 'Approved' : 'Rejected'} ${result.title}.`);
+    return;
+  }
+  if (subcommand === 'suggest') {
+    assertOptions(options, []);
+    const action = rest.shift() ?? 'status';
+    ensureNoExtra(rest, 'hnd know suggest [status|on|off]');
+    if (!['status', 'on', 'off'].includes(action)) throw new UsageError('Suggest must be status, on, or off.');
+    const config = action === 'status'
+      ? await core.config.get()
+      : await core.config.update({ knowledgeSuggestions: action === 'on' });
+    const enabled = config.knowledgeSuggestions === true;
+    if (jsonOutput) writeJson({ enabled }, stdout);
+    else writeText(stdout, `Knowledge suggestions: ${enabled ? 'on' : 'off'}`);
+    return;
+  }
+  if (subcommand === 'import' || subcommand === 'import-session') {
+    assertOptions(options, ['apply', 'scope', 'environment']);
+    if (rest.length === 0) throw new UsageError(`Usage: hnd know ${subcommand} PATH... [--apply]`);
+    const candidates = [];
+    for (const source of rest) {
+      const absolute = path.resolve(cwd, source);
+      const content = await readFile(absolute, 'utf8');
+      const create = subcommand === 'import-session' ? sessionCandidate : documentCandidate;
+      const relative = path.relative(cwd, absolute);
+      const sourceRef = relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+        ? relative.replaceAll('\\', '/')
+        : absolute;
+      const requestedScope = knowledgeScopeOption(options);
+      candidates.push(...(subcommand === 'import-session'
+        ? [create(absolute, content, { scope: requestedScope ?? 'repo', sourceRef })]
+        : importKnowledgeFile(absolute, content, { scope: requestedScope, sourceRef })));
+    }
+    if (!optionBoolean(options, 'apply')) {
+      writeJson({ preview: true, candidates }, stdout);
+      return;
+    }
+    const saved = [];
+    for (const candidate of candidates) {
+      saved.push(await core.knowledge.add({ ...candidate, environment: optionString(options, 'environment') }));
+    }
+    await refreshCursor();
+    if (jsonOutput) writeJson(saved, stdout);
+    else writeText(stdout, `${saved.length} knowledge candidate(s) added to the review inbox.`);
+    return;
+  }
+  if (subcommand === 'export') {
+    assertOptions(options, ['format', 'output', 'scope', 'repo_id', 'environment']);
+    ensureNoExtra(rest, 'hnd know export [--format json|markdown|okf] [--output FILE]');
+    const entries = await core.knowledge.list({
+      scope: knowledgeScopeOption(options),
+      repoId: optionString(options, 'repo_id'),
+      environment: optionString(options, 'environment'),
+    });
+    const rendered = exportKnowledge(entries, { format: optionString(options, 'format', 'json') });
+    const output = optionString(options, 'output');
+    if (output) {
+      const absoluteOutput = path.resolve(cwd, output);
+      await writeFile(absoluteOutput, rendered, { encoding: 'utf8', mode: 0o600 });
+      if (jsonOutput) writeJson({ output: absoluteOutput, entries: entries.length }, stdout);
+      else writeText(stdout, `Exported ${entries.length} knowledge entries to ${absoluteOutput}.`);
+    } else stdout.write(rendered);
+    return;
+  }
+  throw new UsageError('Know command must be add, find, list, show, edit, remove, review, import, export, feedback, duplicates, merge, or suggest.');
 }
 
 async function handleAdapters({
@@ -751,6 +1034,39 @@ async function runHookAutomaticSync({ core, agent, phase, payload, env, stderr }
       );
     }
     return Object.freeze({ status: 'deferred', synced: false, pending: true });
+  }
+}
+
+function hookKnowledgeQuery(payload) {
+  for (const value of [payload?.prompt, payload?.user_prompt, payload?.userPrompt, payload?.message]) {
+    if (typeof value === 'string' && value.trim()) return value.slice(0, 2_000);
+    if (value && typeof value === 'object' && typeof value.content === 'string') {
+      return value.content.slice(0, 2_000);
+    }
+  }
+  return '';
+}
+
+async function suggestKnowledgeFromSession({ core, agent, phase, payload, cwd, env, stderr }) {
+  if (!['end', 'precompact'].includes(phase)) return null;
+  const config = await core.config.get();
+  if (config.knowledgeSuggestions !== true) return null;
+  const sessionId = [payload?.session_id, payload?.sessionId, payload?.conversation_id]
+    .find((value) => typeof value === 'string' && value.trim());
+  const candidate = automaticSessionCandidate(payload, { agent, sessionId });
+  if (!candidate) return null;
+  try {
+    const hookCore = createCore({ env, cwd });
+    const pending = await hookCore.knowledge.list({ scope: 'repo', approval: 'pending' });
+    if (pending.some((entry) => entry.body === candidate.body)) return null;
+    const saved = await hookCore.knowledge.add(candidate);
+    writeText(stderr, `hnd: saved a knowledge candidate for review (${saved.id}).`);
+    return saved;
+  } catch (error) {
+    if (!optionalMaterializationErrors.has(error?.code)) {
+      writeText(stderr, `hnd: knowledge suggestion unavailable (${error.code || error.name || 'ERROR'}).`);
+    }
+    return null;
   }
 }
 
@@ -1055,6 +1371,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       stdout,
       env: runtimeEnv,
       jsonOutput,
+      cwd: invocationCwd,
     });
   }
 
@@ -1068,6 +1385,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       refreshCursor,
       stdout,
       jsonOutput,
+      cwd: invocationCwd,
     });
   }
 
@@ -1082,6 +1400,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       stdin,
       stdout,
       jsonOutput,
+      cwd: invocationCwd,
     });
   }
 
@@ -1162,10 +1481,13 @@ async function mainImpl(argv = process.argv.slice(2), {
     assertOptions(options, ['state_home']);
     const agent = requireValue(positionals.shift(), 'Agent');
     const phase = positionals.shift() ?? 'start';
-    ensureNoExtra(positionals, 'hnd hook <claude|codex|cursor> [start|prompt|stop|end]');
+    ensureNoExtra(positionals, 'hnd hook <claude|codex|cursor> [start|prompt|stop|precompact|end]');
     if (!AGENTS.includes(agent)) throw new UsageError(`Unknown agent: ${agent}`);
-    if (!['start', 'prompt', 'stop', 'end'].includes(phase)) {
+    if (!['start', 'prompt', 'stop', 'precompact', 'end'].includes(phase)) {
       throw new UsageError(`Unknown hook phase: ${phase}`);
+    }
+    if (phase === 'precompact' && agent !== 'claude') {
+      throw new UsageError('PreCompact is currently supported by the Claude adapter only.');
     }
     const payload = await parseHookInput(stdin);
     const hookCwds = findHookCwds(
@@ -1196,6 +1518,15 @@ async function mainImpl(argv = process.argv.slice(2), {
           `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
         );
       }
+      await suggestKnowledgeFromSession({
+        core,
+        agent,
+        phase,
+        payload,
+        cwd: hookCwds[0],
+        env: runtimeEnv,
+        stderr,
+      });
       await runHookAutomaticSync({
         core,
         agent,
@@ -1239,6 +1570,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       composition = await hookCore.compose({
         createRepository: false,
         fastRepository: true,
+        knowledgeQuery: phase === 'prompt' ? hookKnowledgeQuery(payload) : '',
       });
       content = composition.content;
       contextAvailable = true;

@@ -222,6 +222,7 @@ test('install plans merge all three hook schemas while preserving user configura
   assert.match(cursor.hooks.sessionEnd[0].command, /'hook' 'cursor' 'end'$/);
 
   assert.match(claude.hooks.Stop[0].hooks[0].command, /'hook' 'claude' 'stop'$/);
+  assert.match(claude.hooks.PreCompact[0].hooks[0].command, /'hook' 'claude' 'precompact'$/);
   assert.match(claude.hooks.SessionEnd[0].hooks[0].command, /'hook' 'claude' 'end'$/);
 
   const formattedClaude = await fs.readFile(fixture.paths.claude.settings, 'utf8');

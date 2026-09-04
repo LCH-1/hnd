@@ -12,9 +12,19 @@ import {
 } from './handoffs.mjs';
 import { getPolicy, listPolicies, removePolicy, setPolicy } from './policies.mjs';
 import {
+  addRuleRecord,
+  listRuleRecords,
+  removeRuleRecord,
+  setManualRule,
+  updateRuleRecord,
+} from './rule-records.mjs';
+import {
   addKnowledge,
   getKnowledge,
   listKnowledge,
+  findKnowledgeDuplicates,
+  mergeKnowledge,
+  relevantKnowledge,
   removeKnowledge,
   searchKnowledge,
   updateKnowledge,
@@ -51,7 +61,11 @@ function mutationOptions(options, defaults) {
   const source = { ...options };
   const patch = { ...(source.patch || {}) };
   const append = { ...(source.append || {}) };
-  for (const field of ['objective', 'currentState', 'staleHours']) {
+  for (const field of [
+    'objective', 'currentState', 'staleHours', 'priority', 'workflowStatus',
+    'dependencies', 'parentId', 'claimedBy', 'claimExpiresAt',
+    'blockedReason', 'unblockCriteria',
+  ]) {
     if (source[field] !== undefined) patch[field] = source[field];
     delete source[field];
   }
@@ -212,13 +226,24 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
           }),
         )),
     }),
+    ruleRecord: Object.freeze({
+      add: (options = {}) => locked(() => addRuleRecord(withDefaults({ actor: 'cli', ...options }, defaults, {
+        cwd: ['repo', 'env'].includes(options.scope) && !options.repoId,
+      }))),
+      list: (options = {}) => locked(() => listRuleRecords(withDefaults(options, defaults, {
+        cwd: options.currentRepository !== false && !options.repoId,
+      }))),
+      update: (options = {}) => locked(() => updateRuleRecord(withDefaults({ actor: 'cli', ...options }, defaults))),
+      remove: (options = {}) => locked(() => removeRuleRecord(withDefaults(options, defaults))),
+      invoke: (id, enabled = true) => locked(() => setManualRule({ id, enabled, env, clock })),
+    }),
     handoff: Object.freeze({
       start: (options = {}) => locked(() => startHandoff({
-        ...withDefaults(options, defaults, { cwd: true }),
+        ...withDefaults({ actor: 'cli', ...options }, defaults, { cwd: true }),
         validate: (candidate) => validateHandoffCandidate(candidate, defaults),
       })),
       update: (options = {}) => locked(() => updateHandoff({
-        ...mutationOptions(options, defaults),
+        ...mutationOptions({ actor: 'cli', ...options }, defaults),
         validate: (candidate) => validateHandoffCandidate(candidate, defaults),
       })),
       show: (options = {}) =>
@@ -226,7 +251,7 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
           withDefaults(options, defaults, { cwd: options.repoId === undefined }),
         )),
       close: (options = {}) => locked(
-        () => closeHandoff(mutationOptions(options, defaults)),
+        () => closeHandoff(mutationOptions({ actor: 'cli', ...options }, defaults)),
       ),
       select: (options = {}) =>
         locked(() => selectHandoff(
@@ -247,7 +272,7 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
     }),
     knowledge: Object.freeze({
       add: (options = {}) => locked(() => addKnowledge(
-        knowledgeOptions(options, defaults, { currentRepository: true }),
+        knowledgeOptions({ actor: 'cli', ...options }, defaults, { currentRepository: true }),
       )),
       get: (options = {}) => locked(() => getKnowledge(withDefaults(options, defaults))),
       list: (options = {}) => locked(() => listKnowledge(
@@ -256,10 +281,15 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
       search: (options = {}) => locked(() => searchKnowledge(
         knowledgeOptions(options, defaults, { currentRepository: true }),
       )),
+      relevant: (options = {}) => locked(() => relevantKnowledge(
+        knowledgeOptions(options, defaults, { currentRepository: false }),
+      )),
       update: (options = {}) => locked(() => updateKnowledge(
-        knowledgeOptions(options, defaults, { currentRepository: true }),
+        knowledgeOptions({ actor: 'cli', ...options }, defaults, { currentRepository: true }),
       )),
       remove: (options = {}) => locked(() => removeKnowledge(withDefaults(options, defaults))),
+      duplicates: (options = {}) => locked(() => findKnowledgeDuplicates(withDefaults(options, defaults))),
+      merge: (options = {}) => locked(() => mergeKnowledge(withDefaults({ actor: 'cli', ...options }, defaults))),
     }),
     compose: (options = {}) =>
       locked(() => composeEffectiveContext(
@@ -323,6 +353,18 @@ export {
   validatePolicyContent,
 } from './policies.mjs';
 export {
+  addRuleRecord,
+  listRuleRecords,
+  removeRuleRecord,
+  ruleRecordApplies,
+  RULE_RECORD_ACTIVATIONS,
+  RULE_RECORD_SCOPES,
+  RULE_RECORD_STATUSES,
+  setManualRule,
+  updateRuleRecord,
+  validateRuleRecord,
+} from './rule-records.mjs';
+export {
   closeHandoff,
   findActiveHandoff,
   HANDOFF_ARRAY_FIELDS,
@@ -337,11 +379,19 @@ export {
   addKnowledge,
   getKnowledge,
   KNOWLEDGE_SCOPES,
+  KNOWLEDGE_TYPES,
+  KNOWLEDGE_STATES,
+  KNOWLEDGE_APPROVALS,
+  KNOWLEDGE_RELATIONS,
   listKnowledge,
+  findKnowledgeDuplicates,
+  mergeKnowledge,
+  relevantKnowledge,
   removeKnowledge,
   searchKnowledge,
   updateKnowledge,
   validateKnowledgeEntry,
+  assessKnowledgeFreshness,
 } from './knowledge.mjs';
 export { composeEffectiveContext, renderHandoffMarkdown } from './compose.mjs';
 export { withStateLock } from './mutation-lock.mjs';

@@ -1,7 +1,7 @@
 export const APP_NAME = 'hnd';
 // Version of the client runtime distributed by the central HND server. It is
 // intentionally independent from the npm launcher package version.
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 export const STATE_SCHEMA_VERSION = 1;
 export const BUNDLE_SCHEMA_VERSION = 1;
 export const DEFAULT_ENVIRONMENT = 'default';

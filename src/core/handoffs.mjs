@@ -40,6 +40,14 @@ const ARRAY_FIELDS = Object.freeze([
   'notes',
 ]);
 const PATCH_FIELDS = Object.freeze(['objective', 'currentState', ...ARRAY_FIELDS, 'staleHours']);
+const HANDOFF_PRIORITIES = Object.freeze(['urgent', 'high', 'normal', 'low']);
+const HANDOFF_WORKFLOW_STATUSES = Object.freeze(['todo', 'in_progress', 'blocked', 'done']);
+const EXTENDED_PATCH_FIELDS = Object.freeze([
+  'priority', 'workflowStatus', 'dependencies', 'parentId', 'claimedBy',
+  'claimExpiresAt', 'blockedReason', 'unblockCriteria',
+]);
+const ALL_PATCH_FIELDS = Object.freeze([...PATCH_FIELDS, ...EXTENDED_PATCH_FIELDS]);
+const MAX_HISTORY = 50;
 const MAX_HANDOFF_TEXT_BYTES = DEFAULT_MAX_CONTEXT_BYTES - (8 * 1024);
 
 function validHandoff(value) {
@@ -59,6 +67,17 @@ function validHandoff(value) {
     typeof value.staleAt === 'string' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
+    (value.priority === undefined || HANDOFF_PRIORITIES.includes(value.priority)) &&
+    (value.workflowStatus === undefined || HANDOFF_WORKFLOW_STATUSES.includes(value.workflowStatus)) &&
+    (value.dependencies === undefined || (
+      Array.isArray(value.dependencies) && value.dependencies.every(isUuid)
+    )) &&
+    (value.parentId === undefined || value.parentId === null || isUuid(value.parentId)) &&
+    (value.claimedBy === undefined || value.claimedBy === null || typeof value.claimedBy === 'string') &&
+    (value.claimExpiresAt === undefined || value.claimExpiresAt === null || typeof value.claimExpiresAt === 'string') &&
+    (value.blockedReason === undefined || typeof value.blockedReason === 'string') &&
+    (value.unblockCriteria === undefined || typeof value.unblockCriteria === 'string') &&
+    (value.history === undefined || (Array.isArray(value.history) && value.history.length <= MAX_HISTORY)) &&
     ARRAY_FIELDS.every(
       (field) => Array.isArray(value[field]) && value[field].every((item) => typeof item === 'string'),
     )
@@ -129,7 +148,52 @@ function decorateHandoff(handoff, clock = Date) {
     handoff.status === 'active' &&
     typeof handoff.staleAt === 'string' &&
     clockTime(clock) >= new Date(handoff.staleAt).getTime();
-  return { ...structuredClone(handoff), stale };
+  return {
+    ...structuredClone(handoff),
+    priority: handoff.priority ?? 'normal',
+    workflowStatus: handoff.status === 'closed' ? 'done' : handoff.workflowStatus ?? 'in_progress',
+    dependencies: handoff.dependencies ?? [],
+    parentId: handoff.parentId ?? null,
+    claimedBy: handoff.claimedBy ?? null,
+    claimExpiresAt: handoff.claimExpiresAt ?? null,
+    blockedReason: handoff.blockedReason ?? '',
+    unblockCriteria: handoff.unblockCriteria ?? '',
+    history: handoff.history ?? [],
+    stale,
+  };
+}
+
+function priorityValue(value = 'normal') {
+  if (!HANDOFF_PRIORITIES.includes(value)) {
+    throw new CoreError('INVALID_HANDOFF', `priority must be ${HANDOFF_PRIORITIES.join(', ')}`);
+  }
+  return value;
+}
+
+function workflowValue(value = 'in_progress') {
+  if (!HANDOFF_WORKFLOW_STATUSES.includes(value)) {
+    throw new CoreError('INVALID_HANDOFF', `workflowStatus must be ${HANDOFF_WORKFLOW_STATUSES.join(', ')}`);
+  }
+  return value;
+}
+
+function idList(value, field = 'dependencies') {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 50 || !value.every(isUuid)) {
+    throw new CoreError('INVALID_HANDOFF', `${field} must be a list of UUIDs`);
+  }
+  return [...new Set(value)];
+}
+
+function auditRecord(action, at, { actor, agent, sessionId, before = null } = {}) {
+  return {
+    at,
+    action,
+    actor: actor ? String(actor).slice(0, 200) : null,
+    agent: agent ? String(agent).slice(0, 80) : null,
+    sessionId: sessionId ? String(sessionId).slice(0, 256) : null,
+    before,
+  };
 }
 
 function summarize(handoff) {
@@ -293,12 +357,20 @@ export async function listHandoffs({
   }
 
   const groups = await Promise.all(
-    repositories.map((repository) => listForRepository(repository.id, status, env)),
+    repositories.map((repository) => listForRepository(repository.id, 'all', env)),
   );
-  return groups
-    .flat()
+  const all = groups.flat();
+  const completed = new Set(all.filter((item) => item.status === 'closed').map((item) => item.id));
+  return all
+    .filter((handoff) => status === 'all' || handoff.status === status)
     .filter((handoff) => task === undefined || handoff.task === task)
-    .map((handoff) => decorateHandoff(handoff, clock))
+    .map((handoff) => {
+      const decorated = decorateHandoff(handoff, clock);
+      decorated.ready = decorated.status === 'active'
+        && decorated.workflowStatus !== 'blocked'
+        && decorated.dependencies.every((id) => completed.has(id));
+      return decorated;
+    })
     .sort(
       (left, right) =>
         right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
@@ -344,7 +416,13 @@ async function selectActiveHandoff({ id, task, repository, git, env, clock, requ
       candidates: candidates.map(summarize),
     });
   }
-  return decorateHandoff(candidates[0], clock);
+  const selected = decorateHandoff(candidates[0], clock);
+  const completed = new Set(
+    (await listForRepository(repository.id, 'closed', env)).map((item) => item.id),
+  );
+  selected.ready = selected.workflowStatus !== 'blocked'
+    && selected.dependencies.every((dependency) => completed.has(dependency));
+  return selected;
 }
 
 export async function startHandoff({
@@ -354,6 +432,17 @@ export async function startHandoff({
   objective,
   currentState = '',
   staleHours,
+  priority = 'normal',
+  workflowStatus = 'in_progress',
+  dependencies = [],
+  parentId = null,
+  claimedBy = null,
+  claimHours = 2,
+  blockedReason = '',
+  unblockCriteria = '',
+  actor,
+  agent,
+  sessionId,
   validate,
   env = process.env,
   clock = Date,
@@ -403,6 +492,14 @@ export async function startHandoff({
         task: taskValue,
         objective: objectiveValue,
         currentState: currentStateValue,
+        priority: priorityValue(priority),
+        workflowStatus: workflowValue(workflowStatus),
+        dependencies: idList(dependencies),
+        parentId: parentId === null ? null : validateHandoffId(parentId),
+        claimedBy: claimedBy ? requireText(claimedBy, 'claimedBy', { max: 200, singleLine: true }) : null,
+        claimExpiresAt: claimedBy ? addHours(now, Number(claimHours) || 2) : null,
+        blockedReason: requireText(blockedReason, 'blockedReason', { allowEmpty: true, max: 4_000 }),
+        unblockCriteria: requireText(unblockCriteria, 'unblockCriteria', { allowEmpty: true, max: 4_000 }),
         ...Object.fromEntries(ARRAY_FIELDS.map((field) => [field, textArray(arrays[field], field)])),
         worktree: resolved.git.worktree,
         branch: resolved.git.branch,
@@ -412,6 +509,7 @@ export async function startHandoff({
         createdAt: now,
         updatedAt: now,
         closedAt: null,
+        history: [auditRecord('created', now, { actor, agent, sessionId })],
       };
       assertHandoffSize(handoff);
       if (validate !== undefined) {
@@ -431,9 +529,9 @@ export async function startHandoff({
   );
 }
 
-function applyPatch(handoff, patch = {}, append = {}, clock = Date) {
+function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) {
   for (const key of Object.keys(patch)) {
-    if (!PATCH_FIELDS.includes(key)) {
+    if (!ALL_PATCH_FIELDS.includes(key)) {
       throw new CoreError('INVALID_HANDOFF_PATCH', `Cannot update handoff field: ${key}`, {
         field: key,
       });
@@ -459,10 +557,43 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date) {
     }
   }
   if (patch.staleHours !== undefined) next.staleHours = validateStaleHours(patch.staleHours);
+  if (patch.priority !== undefined) next.priority = priorityValue(patch.priority);
+  if (patch.workflowStatus !== undefined) next.workflowStatus = workflowValue(patch.workflowStatus);
+  if (patch.dependencies !== undefined) next.dependencies = idList(patch.dependencies);
+  if (patch.parentId !== undefined) next.parentId = patch.parentId === null ? null : validateHandoffId(patch.parentId);
+  if (patch.claimedBy !== undefined) {
+    next.claimedBy = patch.claimedBy === null || patch.claimedBy === ''
+      ? null
+      : requireText(patch.claimedBy, 'claimedBy', { max: 200, singleLine: true });
+  }
+  if (patch.claimExpiresAt !== undefined) {
+    next.claimExpiresAt = patch.claimExpiresAt === null ? null : new Date(patch.claimExpiresAt).toISOString();
+  }
+  for (const field of ['blockedReason', 'unblockCriteria']) {
+    if (patch[field] !== undefined) {
+      next[field] = requireText(patch[field], field, { allowEmpty: true, max: 4_000 });
+    }
+  }
   const now = isoNow(clock);
   next.updatedAt = now;
   next.staleAt = addHours(now, next.staleHours);
   delete next.stale;
+  next.history = [
+    ...(next.history || []),
+    auditRecord('updated', now, {
+      ...audit,
+      before: {
+        priority: handoff.priority ?? 'normal',
+        workflowStatus: handoff.workflowStatus ?? 'in_progress',
+        dependencies: handoff.dependencies ?? [],
+        parentId: handoff.parentId ?? null,
+        claimedBy: handoff.claimedBy ?? null,
+        claimExpiresAt: handoff.claimExpiresAt ?? null,
+        blockedReason: handoff.blockedReason ?? '',
+        unblockCriteria: handoff.unblockCriteria ?? '',
+      },
+    }),
+  ].slice(-MAX_HISTORY);
   return next;
 }
 
@@ -474,6 +605,9 @@ export async function updateHandoff({
   patch = {},
   append = {},
   validate,
+  actor,
+  agent,
+  sessionId,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -490,7 +624,7 @@ export async function updateHandoff({
         env,
         clock,
       });
-      const next = applyPatch(handoff, patch, append, clock);
+      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId });
       assertHandoffSize(next);
       if (validate !== undefined) {
         if (typeof validate !== 'function') throw new TypeError('validate must be a function');
@@ -600,6 +734,9 @@ export async function closeHandoff({
   patch = {},
   append = {},
   validate,
+  actor,
+  agent,
+  sessionId,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -616,9 +753,11 @@ export async function closeHandoff({
         env,
         clock,
       });
-      const next = applyPatch(handoff, patch, append, clock);
+      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId });
       next.status = 'closed';
+      next.workflowStatus = 'done';
       next.closedAt = isoNow(clock);
+      next.history[next.history.length - 1].action = 'closed';
       assertHandoffSize(next);
       if (validate !== undefined) {
         if (typeof validate !== 'function') throw new TypeError('validate must be a function');
@@ -654,4 +793,9 @@ export async function closeHandoff({
   );
 }
 
-export { ARRAY_FIELDS as HANDOFF_ARRAY_FIELDS, PATCH_FIELDS as HANDOFF_PATCH_FIELDS };
+export {
+  ARRAY_FIELDS as HANDOFF_ARRAY_FIELDS,
+  ALL_PATCH_FIELDS as HANDOFF_PATCH_FIELDS,
+  HANDOFF_PRIORITIES,
+  HANDOFF_WORKFLOW_STATUSES,
+};

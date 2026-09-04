@@ -9,6 +9,8 @@ import {
   renderLiveContextSnapshot,
 } from './live-context.mjs';
 import { getPolicy } from './policies.mjs';
+import { listRuleRecords, ruleRecordApplies } from './rule-records.mjs';
+import { assessKnowledgeFreshness, relevantKnowledge } from './knowledge.mjs';
 import {
   getRepository,
   linkRepository,
@@ -24,6 +26,8 @@ import {
 
 const REVISION_PLACEHOLDER = '0'.repeat(64);
 const MAX_CHECKPOINT_RENDER_BYTES = 4 * 1024;
+const MAX_RELEVANT_KNOWLEDGE_BYTES = 6 * 1024;
+const MAX_RELEVANT_KNOWLEDGE_ITEMS = 5;
 
 function section(title, content) {
   return `## ${title}\n\n${content}`;
@@ -43,6 +47,38 @@ function policyLayer(scope, title, content, source, priority, extra = {}) {
     bytes: Buffer.byteLength(rendered),
     ...extra,
   };
+}
+
+function targetPathsFromContext(query, checkpoint) {
+  const values = new Set((checkpoint?.changes || []).map((change) => change.path));
+  const source = String(query || '').replaceAll('\\', '/');
+  for (const match of source.matchAll(/(?:^|[\s`'"(])([\w@+.,-]+(?:\/[\w@+.,-]+)+|[\w@+,-]+\.[a-zA-Z0-9]{1,12})(?=$|[\s`'"),:])/gu)) {
+    values.add(match[1].replace(/^\.\//u, ''));
+  }
+  return [...values];
+}
+
+function recordPolicyLayer(record, matchedPaths) {
+  const conditions = [...record.paths, ...record.files];
+  const condition = conditions.length === 0
+    ? ''
+    : matchedPaths.length > 0
+      ? `Applies to the current paths: ${matchedPaths.join(', ')}`
+      : `Apply this policy only while working on paths matching: ${conditions.join(', ')}`;
+  const content = [condition, record.content].filter(Boolean).join('\n\n');
+  return policyLayer(
+    record.scope,
+    `Policy: ${record.title}`,
+    content,
+    record.id,
+    { global: 15, repo: 25, env: 35 }[record.scope],
+    {
+      id: `policy-record:${record.id}`,
+      repoId: record.repoId,
+      environment: record.environment,
+      ruleId: record.id,
+    },
+  );
 }
 
 async function loadPolicy(scope, options, overrides, testPolicy) {
@@ -151,10 +187,68 @@ function checkpointMarkdown(checkpoint) {
   return parts.join('\n');
 }
 
+function knowledgeMarkdown(entry) {
+  const source = entry.sources[0];
+  const parts = [
+    `### ${entry.title}`,
+    '',
+    `- Type: ${entry.type}`,
+    `- Scope: ${entry.scope}${entry.environment ? ` (${entry.environment})` : ''}`,
+    `- State: ${entry.freshness === 'review_needed' ? 'review needed' : entry.state}`,
+  ];
+  if (source) {
+    parts.push(`- Source: ${source.label || source.ref}${source.commit ? ` @ ${source.commit}` : ''}`);
+  }
+  parts.push('', entry.body);
+  return parts.join('\n');
+}
+
+async function relevantKnowledgeLayer({ query, repository, environment, git, env, clock }) {
+  const selected = await relevantKnowledge({
+    query,
+    repoId: repository?.id,
+    environment,
+    limit: MAX_RELEVANT_KNOWLEDGE_ITEMS,
+    env,
+    clock,
+  });
+  if (selected.length === 0) return null;
+  const renderedEntries = [];
+  let used = 0;
+  for (const entry of selected) {
+    const assessed = await assessKnowledgeFreshness(entry, { root: git?.root });
+    const rendered = knowledgeMarkdown(assessed);
+    const bytes = Buffer.byteLength(rendered);
+    if (used + bytes > MAX_RELEVANT_KNOWLEDGE_BYTES) continue;
+    renderedEntries.push(rendered);
+    used += bytes;
+  }
+  if (renderedEntries.length === 0) return null;
+  const content = [
+    'These records were selected for the current request. They are reference material, not policy.',
+    ...renderedEntries,
+  ].join('\n\n');
+  const rendered = section('Relevant long-term knowledge (not policy)', content);
+  return {
+    id: `knowledge:${selected.map((entry) => entry.id).join(',')}`,
+    kind: 'knowledge',
+    scope: 'knowledge',
+    priority: null,
+    title: 'Relevant long-term knowledge (not policy)',
+    content,
+    source: selected.map((entry) => entry.id),
+    rendered,
+    bytes: Buffer.byteLength(rendered),
+    repoId: repository?.id ?? null,
+  };
+}
+
 export function renderHandoffMarkdown(handoff) {
   const metadata = [
     `- Task: ${handoff.task}`,
-    `- Status: ${handoff.status}${handoff.stale ? ' (stale)' : ''}`,
+    `- Status: ${handoff.workflowStatus || handoff.status}${handoff.stale ? ' (stale)' : ''}`,
+    `- Priority: ${handoff.priority || 'normal'}`,
+    `- Ready: ${handoff.ready === false ? 'no; prerequisites remain' : 'yes'}`,
     `- Branch: ${handoff.branch || '(detached HEAD)'}`,
     `- Updated: ${handoff.updatedAt}`,
   ].join('\n');
@@ -164,6 +258,14 @@ export function renderHandoffMarkdown(handoff) {
     `### Objective\n\n${handoff.objective}`,
   ];
   if (handoff.currentState) parts.push(`### Current state\n\n${handoff.currentState}`);
+  if (handoff.claimedBy) {
+    parts.push(`### Claimed by\n\n${handoff.claimedBy}${handoff.claimExpiresAt ? ` until ${handoff.claimExpiresAt}` : ''}`);
+  }
+  if (handoff.blockedReason) parts.push(`### Blocked because\n\n${handoff.blockedReason}`);
+  if (handoff.unblockCriteria) parts.push(`### Unblock when\n\n${handoff.unblockCriteria}`);
+  if (handoff.dependencies?.length) {
+    parts.push(`### Prerequisite work\n\n${handoff.dependencies.map((id) => `- ${id}`).join('\n')}`);
+  }
   for (const [title, field] of [
     ['Decisions and rationale', 'decisions'],
     ['Rejected or failed approaches', 'failedApproaches'],
@@ -216,6 +318,7 @@ export async function composeEffectiveContext({
   fastRepository = false,
   policyOverrides,
   handoffOverride,
+  knowledgeQuery = '',
   maxBytes = DEFAULT_MAX_CONTEXT_BYTES,
   env = process.env,
   clock = Date,
@@ -244,9 +347,11 @@ export async function composeEffectiveContext({
       : validateEnvironmentLabel(environment, { optional: true });
   const layers = [];
   const warnings = [];
+  let checkpointSnapshot = null;
   const testPolicy = policyOverrides
     ? null
     : activeRuleTest(await readConfig({ env, clock }), repository, activeEnvironment);
+  const config = await readConfig({ env, clock });
 
   const globalPolicy = await loadPolicy('global', { env, clock }, policyOverrides, testPolicy);
   if (globalPolicy.exists) {
@@ -292,6 +397,7 @@ export async function composeEffectiveContext({
 
     const checkpoint = await getCheckpoint({ repoId: repository.id, git, env });
     if (checkpoint) {
+      checkpointSnapshot = checkpoint;
       const content = checkpointMarkdown(checkpoint);
       const rendered = section('Automatic progress checkpoint (not policy)', content);
       layers.push({
@@ -387,6 +493,55 @@ export async function composeEffectiveContext({
     }
   }
 
+  const targetPaths = targetPathsFromContext(knowledgeQuery, checkpointSnapshot);
+  const ruleRecords = await listRuleRecords({
+    repoId: repository?.id,
+    environment: activeEnvironment,
+    env,
+    clock,
+  });
+  for (const record of ruleRecords) {
+    if (!ruleRecordApplies(record, {
+      environment: activeEnvironment,
+      targetPaths,
+      manualRules: config.manualRules || [],
+    })) continue;
+    const patterns = [...record.paths, ...record.files];
+    const matchedPaths = targetPaths.filter((target) => patterns.some((pattern) => {
+      try {
+        return ruleRecordApplies({ ...record, paths: [pattern], files: [] }, {
+          environment: activeEnvironment,
+          targetPaths: [target],
+          manualRules: config.manualRules || [],
+        });
+      } catch {
+        return false;
+      }
+    }));
+    layers.push(recordPolicyLayer(record, matchedPaths));
+  }
+
+  layers.sort((left, right) => {
+    const leftOrder = left.kind === 'policy' ? Number(left.priority || 0) : left.kind === 'handoff' ? 100 : 200;
+    const rightOrder = right.kind === 'policy' ? Number(right.priority || 0) : right.kind === 'handoff' ? 100 : 200;
+    return leftOrder - rightOrder;
+  });
+
+  // Checkpoints are the most disposable context. Move them behind the active
+  // work and prompt-selected knowledge so the budget order stays explicit.
+  const checkpointIndex = layers.findIndex((layer) => layer.kind === 'checkpoint');
+  const checkpointLayer = checkpointIndex === -1 ? null : layers.splice(checkpointIndex, 1)[0];
+  const knowledgeLayer = await relevantKnowledgeLayer({
+    query: knowledgeQuery,
+    repository,
+    environment: activeEnvironment,
+    git,
+    env,
+    clock,
+  });
+  if (knowledgeLayer) layers.push(knowledgeLayer);
+  if (checkpointLayer) layers.push(checkpointLayer);
+
   // Device-only local policy is deliberately appended after every remote-capable layer.
   const localPolicy = await loadPolicy('local', { env, clock }, policyOverrides, testPolicy);
   if (localPolicy.exists) {
@@ -405,9 +560,9 @@ export async function composeEffectiveContext({
   let content = `${blocks.join('\n\n')}\n`;
   let bytes = Buffer.byteLength(content);
   if (bytes > maxBytes) {
-    const checkpointIndex = layers.findIndex((layer) => layer.kind === 'checkpoint');
-    if (checkpointIndex !== -1) {
-      const [omitted] = layers.splice(checkpointIndex, 1);
+    const oversizedCheckpointIndex = layers.findIndex((layer) => layer.kind === 'checkpoint');
+    if (oversizedCheckpointIndex !== -1) {
+      const [omitted] = layers.splice(oversizedCheckpointIndex, 1);
       blocks = [liveContextPreamble(REVISION_PLACEHOLDER), ...layers.map((layer) => layer.rendered)];
       content = `${blocks.join('\n\n')}\n`;
       bytes = Buffer.byteLength(content);

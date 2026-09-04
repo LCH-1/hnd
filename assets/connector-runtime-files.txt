@@ -17,11 +17,14 @@ src/core/fs.mjs
 src/core/git.mjs
 src/core/handoffs.mjs
 src/core/index.mjs
+src/core/knowledge-index.mjs
+src/core/knowledge-transfer.mjs
 src/core/knowledge.mjs
 src/core/live-context.mjs
 src/core/mutation-lock.mjs
 src/core/policies.mjs
 src/core/repositories.mjs
+src/core/rule-records.mjs
 src/core/state.mjs
 src/fs-operations.mjs
 src/input.mjs

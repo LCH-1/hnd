@@ -1,5 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 import { DEFAULT_MAX_CONTEXT_BYTES, STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { statePaths } from '../paths.mjs';
@@ -22,12 +24,27 @@ import {
   validateEnvironmentLabel,
   validatePortableEnvironmentLabel,
 } from './state.mjs';
+import { searchKnowledgeIndex } from './knowledge-index.mjs';
 
 const MAX_TITLE_CHARS = 200;
 const MAX_TAGS = 20;
 const MAX_TAG_CHARS = 48;
 const MAX_BODY_BYTES = DEFAULT_MAX_CONTEXT_BYTES * 8;
 export const KNOWLEDGE_SCOPES = Object.freeze(['global', 'repo', 'env']);
+export const KNOWLEDGE_TYPES = Object.freeze([
+  'note', 'decision', 'solution', 'failure', 'caution', 'command',
+  'architecture', 'runbook',
+]);
+export const KNOWLEDGE_STATES = Object.freeze([
+  'verified', 'review_needed', 'contradicted', 'retired', 'superseded',
+]);
+export const KNOWLEDGE_APPROVALS = Object.freeze(['approved', 'pending', 'rejected']);
+export const KNOWLEDGE_RELATIONS = Object.freeze([
+  'related', 'supersedes', 'contradicts', 'causes', 'resolves',
+]);
+const MAX_SOURCES = 20;
+const MAX_RELATIONSHIPS = 20;
+const MAX_HISTORY = 20;
 
 function requireText(value, field, { maxChars, maxBytes, allowEmpty = false } = {}) {
   if (typeof value !== 'string' || value.includes('\0')) {
@@ -65,6 +82,101 @@ function normalizeTags(value = []) {
   return tags;
 }
 
+function enumValue(value, allowed, field, fallback) {
+  const normalized = value ?? fallback;
+  if (!allowed.includes(normalized)) {
+    throw new CoreError('INVALID_KNOWLEDGE', `${field} must be one of: ${allowed.join(', ')}`);
+  }
+  return normalized;
+}
+
+function normalizeSources(value = []) {
+  if (!Array.isArray(value) || value.length > MAX_SOURCES) {
+    throw new CoreError('INVALID_KNOWLEDGE', `sources must contain at most ${MAX_SOURCES} items`);
+  }
+  return value.map((source, index) => {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      throw new CoreError('INVALID_KNOWLEDGE', `sources[${index}] must be an object`);
+    }
+    const kind = enumValue(
+      source.kind,
+      ['file', 'commit', 'session', 'url', 'person', 'import'],
+      `sources[${index}].kind`,
+      'file',
+    );
+    return {
+      kind,
+      ref: requireText(source.ref, `sources[${index}].ref`, { maxChars: 1000 }),
+      label: source.label === undefined
+        ? null
+        : requireText(source.label, `sources[${index}].label`, { maxChars: 200 }),
+      hash: source.hash === undefined || source.hash === null
+        ? null
+        : requireText(source.hash, `sources[${index}].hash`, { maxChars: 128 }),
+      commit: source.commit === undefined || source.commit === null
+        ? null
+        : requireText(source.commit, `sources[${index}].commit`, { maxChars: 128 }),
+    };
+  });
+}
+
+function normalizeRelationships(value = []) {
+  if (!Array.isArray(value) || value.length > MAX_RELATIONSHIPS) {
+    throw new CoreError(
+      'INVALID_KNOWLEDGE',
+      `relationships must contain at most ${MAX_RELATIONSHIPS} items`,
+    );
+  }
+  return value.map((relationship, index) => {
+    if (!relationship || typeof relationship !== 'object' || Array.isArray(relationship)) {
+      throw new CoreError('INVALID_KNOWLEDGE', `relationships[${index}] must be an object`);
+    }
+    return {
+      type: enumValue(
+        relationship.type,
+        KNOWLEDGE_RELATIONS,
+        `relationships[${index}].type`,
+        'related',
+      ),
+      targetId: isUuid(relationship.targetId)
+        ? relationship.targetId
+        : (() => { throw new CoreError('INVALID_KNOWLEDGE', 'relationship targetId must be a UUID'); })(),
+    };
+  });
+}
+
+function normalizeFeedback(value = {}) {
+  const result = {};
+  for (const key of ['helpful', 'wrong', 'irrelevant']) {
+    const count = value?.[key] ?? 0;
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new CoreError('INVALID_KNOWLEDGE', `feedback.${key} must be a non-negative integer`);
+    }
+    result[key] = count;
+  }
+  return result;
+}
+
+function validSource(source) {
+  return source && typeof source === 'object' && !Array.isArray(source)
+    && ['file', 'commit', 'session', 'url', 'person', 'import'].includes(source.kind)
+    && typeof source.ref === 'string'
+    && (source.label === null || typeof source.label === 'string')
+    && (source.hash === null || typeof source.hash === 'string')
+    && (source.commit === null || typeof source.commit === 'string');
+}
+
+function validHistory(history) {
+  return Array.isArray(history) && history.length <= MAX_HISTORY && history.every((item) => (
+    item && typeof item === 'object' && !Array.isArray(item)
+    && typeof item.at === 'string' && typeof item.action === 'string'
+    && (item.actor === null || typeof item.actor === 'string')
+    && (item.deviceId === null || typeof item.deviceId === 'string')
+    && (item.agent === null || typeof item.agent === 'string')
+    && (item.before === null || (typeof item.before === 'object' && !Array.isArray(item.before)))
+  ));
+}
+
 export function validateKnowledgeEntry(value) {
   const scope = value?.scope ?? 'global';
   const repoId = value?.repoId ?? null;
@@ -75,7 +187,8 @@ export function validateKnowledgeEntry(value) {
     && !Array.isArray(value)
     && Object.keys(value).every((key) => [
       'schemaVersion', 'id', 'title', 'body', 'tags', 'scope', 'repoId',
-      'environment', 'createdAt', 'updatedAt',
+      'environment', 'type', 'state', 'pinned', 'sources', 'relationships',
+      'feedback', 'approval', 'history', 'createdAt', 'updatedAt',
     ].includes(key))
     && value.schemaVersion === STATE_SCHEMA_VERSION
     && isUuid(value.id)
@@ -84,6 +197,22 @@ export function validateKnowledgeEntry(value) {
     && typeof value.body === 'string'
     && Array.isArray(value.tags)
     && value.tags.every((tag) => typeof tag === 'string')
+    && (value.type === undefined || KNOWLEDGE_TYPES.includes(value.type))
+    && (value.state === undefined || KNOWLEDGE_STATES.includes(value.state))
+    && (value.pinned === undefined || typeof value.pinned === 'boolean')
+    && (value.sources === undefined || (Array.isArray(value.sources) && value.sources.every(validSource)))
+    && (value.relationships === undefined || (
+      Array.isArray(value.relationships)
+      && value.relationships.every((item) => (
+        KNOWLEDGE_RELATIONS.includes(item?.type) && isUuid(item?.targetId)
+      ))
+    ))
+    && (value.feedback === undefined || (
+      value.feedback && typeof value.feedback === 'object'
+      && ['helpful', 'wrong', 'irrelevant'].every((key) => Number.isSafeInteger(value.feedback[key]) && value.feedback[key] >= 0)
+    ))
+    && (value.approval === undefined || KNOWLEDGE_APPROVALS.includes(value.approval))
+    && (value.history === undefined || validHistory(value.history))
     && KNOWLEDGE_SCOPES.includes(scope)
     && (
       (scope === 'global' && repoId === null && environment === null)
@@ -131,6 +260,32 @@ function normalizeStoredScope(entry) {
     scope: entry.scope ?? 'global',
     repoId: entry.repoId ?? null,
     environment: entry.environment ?? null,
+    type: entry.type ?? 'note',
+    state: entry.state ?? 'verified',
+    pinned: entry.pinned === true,
+    sources: entry.sources ?? [],
+    relationships: entry.relationships ?? [],
+    feedback: entry.feedback ?? { helpful: 0, wrong: 0, irrelevant: 0 },
+    approval: entry.approval ?? 'approved',
+    history: entry.history ?? [],
+  };
+}
+
+function historySnapshot(entry) {
+  return Object.fromEntries([
+    'title', 'body', 'tags', 'scope', 'repoId', 'environment', 'type', 'state',
+    'pinned', 'sources', 'relationships', 'feedback', 'approval',
+  ].map((key) => [key, structuredClone(entry[key])]));
+}
+
+function historyRecord({ at, action, actor, deviceId, agent, before = null } = {}) {
+  return {
+    at,
+    action,
+    actor: actor ? String(actor).slice(0, 200) : null,
+    deviceId: deviceId ? String(deviceId).slice(0, 200) : null,
+    agent: agent ? String(agent).slice(0, 80) : null,
+    before,
   };
 }
 
@@ -196,6 +351,15 @@ export async function addKnowledge({
   repoId,
   cwd,
   environment,
+  type = 'note',
+  state: knowledgeState = 'verified',
+  pinned = false,
+  sources = [],
+  relationships = [],
+  approval = 'approved',
+  actor,
+  deviceId,
+  agent,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -215,6 +379,14 @@ export async function addKnowledge({
     title: requireText(title, 'title', { maxChars: MAX_TITLE_CHARS }),
     body: requireText(body, 'body', { maxBytes: MAX_BODY_BYTES, allowEmpty: true }),
     tags: normalizeTags(tags),
+    type: enumValue(type, KNOWLEDGE_TYPES, 'type', 'note'),
+    state: enumValue(knowledgeState, KNOWLEDGE_STATES, 'state', 'verified'),
+    pinned: Boolean(pinned),
+    sources: normalizeSources(sources),
+    relationships: normalizeRelationships(relationships),
+    feedback: normalizeFeedback(),
+    approval: enumValue(approval, KNOWLEDGE_APPROVALS, 'approval', 'approved'),
+    history: [historyRecord({ at: now, action: approval === 'pending' ? 'suggested' : 'created', actor, deviceId, agent })],
     ...location,
     createdAt: now,
     updatedAt: now,
@@ -243,6 +415,10 @@ export async function listKnowledge({
   repoId,
   cwd,
   environment,
+  type,
+  state: knowledgeState,
+  approval,
+  pinned,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -263,6 +439,10 @@ export async function listKnowledge({
     .filter((entry) => requestedScope === null || entry.scope === requestedScope)
     .filter((entry) => requestedRepoId === null || entry.repoId === requestedRepoId)
     .filter((entry) => requestedEnvironment === null || entry.environment === requestedEnvironment)
+    .filter((entry) => type === undefined || entry.type === type)
+    .filter((entry) => knowledgeState === undefined || entry.state === knowledgeState)
+    .filter((entry) => approval === undefined || entry.approval === approval)
+    .filter((entry) => pinned === undefined || entry.pinned === Boolean(pinned))
     .filter((entry) => requestedTag === null || entry.tags.some(
       (entryTag) => entryTag.normalize('NFKC').toLocaleLowerCase('und') === requestedTag,
     ))
@@ -283,25 +463,124 @@ export async function searchKnowledge({
   environment,
   env = process.env,
   clock = Date,
+  limit = 100,
 } = {}) {
   const normalizedQuery = requireText(query, 'query', { maxChars: 500 });
-  const terms = searchable(normalizedQuery).split(/\s+/u).filter(Boolean);
   const entries = await listKnowledge({ tag, scope, repoId, cwd, environment, env, clock });
-  return entries
-    .map((entry) => {
+  const allEntries = await readAll(env, clock);
+  const allowed = new Map(entries.map((entry) => [entry.id, entry]));
+  let matches;
+  try {
+    matches = searchKnowledgeIndex({ entries: allEntries, query: normalizedQuery, env, limit: Math.max(limit * 4, 100) });
+  } catch {
+    matches = [];
+  }
+  const ranked = matches
+    .filter((match) => allowed.has(match.id))
+    .map((match) => ({ ...publicEntry(allowed.get(match.id)), score: -Number(match.rank || 0) }));
+  if (ranked.length > 0) return ranked.slice(0, limit);
+
+  // FTS is token based. Keep a portable substring fallback for unsegmented CJK
+  // phrases and for hosts where a damaged derived index had to be ignored.
+  const terms = searchable(normalizedQuery).split(/\s+/u).filter(Boolean);
+  return entries.map((entry) => {
+    const title = searchable(entry.title);
+    const body = searchable(entry.body);
+    const tags = searchable(entry.tags.join(' '));
+    if (!terms.every((term) => title.includes(term) || body.includes(term) || tags.includes(term))) return null;
+    const score = terms.reduce((total, term) => (
+      total + (title.includes(term) ? 8 : 0) + (tags.includes(term) ? 4 : 0) + (body.includes(term) ? 1 : 0)
+    ), 0);
+    return { ...publicEntry(entry), score };
+  }).filter(Boolean).sort((left, right) => right.score - left.score).slice(0, limit);
+}
+
+export async function relevantKnowledge({
+  query = '', repoId, environment, limit = 5, env = process.env, clock = Date,
+} = {}) {
+  const entries = await readAll(env, clock);
+  const applicable = entries.filter((entry) => (
+    entry.approval === 'approved'
+    && !['contradicted', 'retired', 'superseded'].includes(entry.state)
+    && (
+      entry.scope === 'global'
+      || (entry.scope === 'repo' && entry.repoId === repoId)
+      || (entry.scope === 'env' && entry.repoId === repoId && entry.environment === environment)
+    )
+  ));
+  const pinnedEntries = applicable.filter((entry) => entry.pinned);
+  if (!String(query || '').trim()) return pinnedEntries.slice(0, limit).map(publicEntry);
+  let matches = [];
+  try {
+    const indexed = searchKnowledgeIndex({
+      entries,
+      query,
+      env,
+      limit: Math.max(limit * 8, 80),
+      // A user prompt contains context words that no one knowledge record is
+      // expected to contain in full. Rank any matching terms here; explicit
+      // `hnd know find` keeps its stricter all-term semantics.
+      match: 'any',
+    });
+    const allowed = new Map(applicable.map((entry) => [entry.id, entry]));
+    matches = indexed.filter((item) => allowed.has(item.id)).map((item) => ({
+      ...allowed.get(item.id),
+      score:
+        -Number(item.rank || 0)
+        + (allowed.get(item.id).feedback.helpful * 0.25)
+        - (allowed.get(item.id).feedback.wrong * 2)
+        - allowed.get(item.id).feedback.irrelevant,
+    })).sort((left, right) => right.score - left.score);
+  } catch {
+    matches = [];
+  }
+  if (matches.length === 0) {
+    const terms = searchable(String(query)).split(/\s+/u).filter((term) => term.length >= 2);
+    matches = applicable.map((entry) => {
       const title = searchable(entry.title);
       const body = searchable(entry.body);
       const tags = searchable(entry.tags.join(' '));
-      if (!terms.every((term) => title.includes(term) || body.includes(term) || tags.includes(term))) {
-        return null;
-      }
       const score = terms.reduce((total, term) => (
-        total + (title.includes(term) ? 8 : 0) + (tags.includes(term) ? 4 : 0) + (body.includes(term) ? 1 : 0)
-      ), 0);
-      return { ...publicEntry(entry), score };
-    })
-    .filter(Boolean)
-    .sort((left, right) => right.score - left.score || right.updatedAt.localeCompare(left.updatedAt));
+        total
+        + (title.includes(term) ? 8 : 0)
+        + (tags.includes(term) ? 4 : 0)
+        + (body.includes(term) ? 1 : 0)
+      ), 0) + (entry.feedback.helpful * 0.25)
+        - (entry.feedback.wrong * 2)
+        - entry.feedback.irrelevant;
+      return score > 0 ? { ...entry, score } : null;
+    }).filter(Boolean).sort((left, right) => right.score - left.score);
+  }
+  const selected = new Map();
+  for (const entry of [...pinnedEntries, ...matches]) {
+    if (!selected.has(entry.id)) selected.set(entry.id, publicEntry(entry));
+    if (selected.size >= limit) break;
+  }
+  return [...selected.values()];
+}
+
+export async function assessKnowledgeFreshness(entry, { root } = {}) {
+  const result = publicEntry(entry);
+  const fileSources = result.sources.filter((source) => source.kind === 'file' && source.hash);
+  if (!root || fileSources.length === 0) return { ...result, freshness: 'unknown' };
+  const repositoryRoot = path.resolve(root);
+  for (const source of fileSources) {
+    const absolute = path.resolve(repositoryRoot, source.ref);
+    const relative = path.relative(repositoryRoot, absolute);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      return { ...result, freshness: 'review_needed', staleSource: source.ref };
+    }
+    try {
+      const contents = await readFile(absolute);
+      const actual = createHash('sha256').update(contents).digest('hex');
+      if (actual !== source.hash) {
+        return { ...result, freshness: 'review_needed', staleSource: source.ref };
+      }
+    } catch {
+      return { ...result, freshness: 'review_needed', staleSource: source.ref };
+    }
+  }
+  return { ...result, freshness: 'current' };
 }
 
 export async function updateKnowledge({
@@ -313,6 +592,17 @@ export async function updateKnowledge({
   repoId,
   cwd,
   environment,
+  type,
+  state: knowledgeState,
+  pinned,
+  sources,
+  relationships,
+  approval,
+  feedback,
+  feedbackKind,
+  actor,
+  deviceId,
+  agent,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -326,6 +616,14 @@ export async function updateKnowledge({
       && scope === undefined
       && repoId === undefined
       && environment === undefined
+      && type === undefined
+      && knowledgeState === undefined
+      && pinned === undefined
+      && sources === undefined
+      && relationships === undefined
+      && approval === undefined
+      && feedback === undefined
+      && feedbackKind === undefined
     ) {
       throw new CoreError('INVALID_KNOWLEDGE', 'Provide content or scope fields to update');
     }
@@ -348,9 +646,37 @@ export async function updateKnowledge({
       title: title === undefined ? current.title : requireText(title, 'title', { maxChars: MAX_TITLE_CHARS }),
       body: body === undefined ? current.body : requireText(body, 'body', { maxBytes: MAX_BODY_BYTES, allowEmpty: true }),
       tags: tags === undefined ? current.tags : normalizeTags(tags),
+      type: type === undefined ? current.type : enumValue(type, KNOWLEDGE_TYPES, 'type', 'note'),
+      state: knowledgeState === undefined
+        ? current.state
+        : enumValue(knowledgeState, KNOWLEDGE_STATES, 'state', 'verified'),
+      pinned: pinned === undefined ? current.pinned : Boolean(pinned),
+      sources: sources === undefined ? current.sources : normalizeSources(sources),
+      relationships: relationships === undefined
+        ? current.relationships
+        : normalizeRelationships(relationships),
+      approval: approval === undefined
+        ? current.approval
+        : enumValue(approval, KNOWLEDGE_APPROVALS, 'approval', 'approved'),
+      feedback: feedback === undefined ? current.feedback : normalizeFeedback(feedback),
       ...location,
       updatedAt: isoNow(clock),
     };
+    if (feedbackKind !== undefined) {
+      const key = enumValue(feedbackKind, ['helpful', 'wrong', 'irrelevant'], 'feedbackKind');
+      entry.feedback = { ...entry.feedback, [key]: entry.feedback[key] + 1 };
+    }
+    entry.history = [
+      ...current.history,
+      historyRecord({
+        at: entry.updatedAt,
+        action: feedbackKind ? `feedback:${feedbackKind}` : approval && approval !== current.approval ? approval : 'updated',
+        actor,
+        deviceId,
+        agent,
+        before: historySnapshot(current),
+      }),
+    ].slice(-MAX_HISTORY);
     await writeJsonAtomic(notePath(state.knowledge, id), entry);
     return publicEntry(entry);
   });
@@ -362,4 +688,80 @@ export async function removeKnowledge({ id, env = process.env, clock = Date } = 
     id,
     removed: await removeFile(notePath(state.knowledge, id)),
   }));
+}
+
+function similarityTokens(entry) {
+  const normalized = searchable(`${entry.title} ${entry.body} ${entry.tags.join(' ')}`)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  const words = normalized.split(/\s+/u).filter(Boolean);
+  if (words.length >= 5) return new Set(words);
+  const compact = normalized.replaceAll(' ', '');
+  const grams = [];
+  for (let index = 0; index < compact.length - 1; index += 1) grams.push(compact.slice(index, index + 2));
+  return new Set(grams);
+}
+
+export async function findKnowledgeDuplicates({
+  threshold = 0.65, env = process.env, clock = Date,
+} = {}) {
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+    throw new CoreError('INVALID_KNOWLEDGE', 'threshold must be between 0 and 1');
+  }
+  const entries = (await readAll(env, clock)).filter((entry) => (
+    entry.approval === 'approved' && !['retired', 'superseded'].includes(entry.state)
+  ));
+  const sets = new Map(entries.map((entry) => [entry.id, similarityTokens(entry)]));
+  const matches = [];
+  for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
+      const left = sets.get(entries[leftIndex].id);
+      const right = sets.get(entries[rightIndex].id);
+      const intersection = [...left].filter((token) => right.has(token)).length;
+      const union = new Set([...left, ...right]).size || 1;
+      const score = intersection / union;
+      if (score >= threshold) matches.push({
+        score,
+        left: publicEntry(entries[leftIndex]),
+        right: publicEntry(entries[rightIndex]),
+      });
+    }
+  }
+  return matches.sort((a, b) => b.score - a.score).slice(0, 100);
+}
+
+export async function mergeKnowledge({
+  targetId, sourceId, env = process.env, clock = Date, actor,
+} = {}) {
+  if (targetId === sourceId) throw new CoreError('INVALID_KNOWLEDGE', 'Choose two different entries');
+  const [target, source] = await Promise.all([
+    getKnowledge({ id: targetId, env, clock }),
+    getKnowledge({ id: sourceId, env, clock }),
+  ]);
+  const mergedBody = target.body.includes(source.body)
+    ? target.body
+    : [target.body, source.body].filter(Boolean).join('\n\n---\n\n');
+  const updated = await updateKnowledge({
+    id: target.id,
+    body: mergedBody,
+    tags: [...target.tags, ...source.tags],
+    sources: [...target.sources, ...source.sources].slice(0, MAX_SOURCES),
+    relationships: [
+      ...target.relationships,
+      { type: 'supersedes', targetId: source.id },
+    ].slice(0, MAX_RELATIONSHIPS),
+    actor,
+    env,
+    clock,
+  });
+  await updateKnowledge({
+    id: source.id,
+    state: 'superseded',
+    relationships: [...source.relationships, { type: 'related', targetId: target.id }]
+      .slice(0, MAX_RELATIONSHIPS),
+    actor,
+    env,
+    clock,
+  });
+  return updated;
 }

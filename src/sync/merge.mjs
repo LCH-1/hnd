@@ -7,6 +7,7 @@ import {
 const REPOSITORY_INDEX_PATH = 'repositories.json';
 const REPOSITORY_METADATA_PATTERN = /^repositories\/[^/]+\/repository\.json$/;
 const KNOWLEDGE_ENTRY_PATTERN = /^knowledge\/[0-9a-f-]{36}\.json$/i;
+const RULE_ENTRY_PATTERN = /^(?:rules|repositories\/[^/]+\/rules)\/[0-9a-f-]{36}\.json$/i;
 const MISSING = Symbol('missing JSON member');
 const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
@@ -101,7 +102,8 @@ function parseJsonObject(contents) {
 function isMergeableJsonPath(relativePath) {
   return relativePath === REPOSITORY_INDEX_PATH
     || REPOSITORY_METADATA_PATTERN.test(relativePath)
-    || KNOWLEDGE_ENTRY_PATTERN.test(relativePath);
+    || KNOWLEDGE_ENTRY_PATTERN.test(relativePath)
+    || RULE_ENTRY_PATTERN.test(relativePath);
 }
 
 function tryMergeJson(relativePath, base, local, remote) {

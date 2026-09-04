@@ -27,6 +27,7 @@ export function statePaths(env = process.env) {
     bindings: path.join(home, 'bindings.json'),
     handoffSelections: path.join(home, 'handoff-selections.json'),
     knowledge: path.join(home, 'knowledge'),
+    rules: path.join(home, 'rules'),
     ledger: path.join(home, 'managed.json'),
     blobs: path.join(home, 'blobs'),
     secrets: path.join(home, 'secrets'),
@@ -75,6 +76,7 @@ export function repositoryPaths(repoId, env = process.env) {
     handoffs: path.join(root, 'handoffs'),
     archive: path.join(root, 'archive'),
     checkpoints: path.join(root, 'checkpoints'),
+    rules: path.join(root, 'rules'),
   });
 }
 
