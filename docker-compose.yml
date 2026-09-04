@@ -1,0 +1,44 @@
+services:
+  hnd-server:
+    container_name: "hnd-server"
+    build:
+      context: .
+    image: "${HND_IMAGE:-hnd-server:local}"
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${HND_BIND_ADDRESS:-127.0.0.1}:${HND_PORT:-8787}:8787"
+    volumes:
+      - hnd-data:/data
+    environment:
+      HND_SERVER_MAX_REVISIONS: "${HND_SERVER_MAX_REVISIONS:-50}"
+      HND_SERVER_WEB: /app/src/web
+      HND_SERVER_CONNECTOR_DIR: /app/dist/connector-release
+      HND_PUBLIC_ORIGIN: "${HND_PUBLIC_ORIGIN:-https://hnd.chlee.cf}"
+      HND_WEBAUTHN_RP_ID: "${HND_WEBAUTHN_RP_ID:-hnd.chlee.cf}"
+      HND_SIGNUP_MODE: "${HND_SIGNUP_MODE:-open}"
+      # Host nginx is the only public ingress; this enables per-client rate limits.
+      HND_TRUST_PROXY: "${HND_TRUST_PROXY:-true}"
+    read_only: true
+    mem_limit: 512m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  hnd-data:
+
+networks:
+  default:
+    name: main
+    external: true

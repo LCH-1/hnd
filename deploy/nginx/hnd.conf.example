@@ -1,0 +1,41 @@
+# Replace hnd.example.com and the certificate paths before enabling this file.
+# Docker Compose exposes hnd only on 127.0.0.1:8787; do not publish that port.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name hnd.example.com;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name hnd.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/hnd.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hnd.example.com/privkey.pem;
+
+    # hnd currently accepts encrypted snapshots up to 8 MiB.
+    client_max_body_size 10m;
+
+    add_header X-Content-Type-Options nosniff always;
+
+    # Preserve application and API paths behind the same HTTPS origin.
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+}

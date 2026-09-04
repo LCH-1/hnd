@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#003049" />
+    <meta name="hnd-api-base" content="/api/web" />
+    <meta name="description" content="HND 단계별 초기 설정" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="HND 설정" />
+    <meta property="og:description" content="HND 계정과 개발 PC를 연결합니다." />
+    <meta property="og:image" content="/web/hnd-icon.png" />
+    <meta property="og:image:width" content="1254" />
+    <meta property="og:image:height" content="1254" />
+    <meta property="og:image:alt" content="HND 로고" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="HND 설정" />
+    <meta name="twitter:image" content="/web/hnd-icon.png" />
+    <meta name="twitter:image:alt" content="HND 로고" />
+    <title>HND 설정</title>
+    <link rel="icon" type="image/png" href="/web/hnd-icon.png" />
+    <link rel="apple-touch-icon" href="/web/hnd-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body class="setup-page">
+    <!--
+      DIRECTION CONTRACT
+      THESIS: 설치된 개인 서버의 상태와 다음 행동만 또렷하게 보여 주는 조용한 출입구다.
+      OWN-WORLD: 따뜻한 종이색 바탕과 네이비 원장 문법으로 로그인, 설정, 작업 기록이 한 제품처럼 이어진다. 빨강은 작은 충돌 표시와 복구 불가능한 동작에만 남긴다.
+      STORY: 서버 상태 확인, 패스키 로그인 또는 최초 설정, 작업 공간 진입 순서로 한 가지 결정만 요청한다.
+      FIRST VIEWPORT: 제품 홍보 없이 서버 문맥과 단일 인증 과업이 먼저 보인다.
+      FORM: Activity Ledger
+      SEED: a01d76f4
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+    -->
+    <a class="skip-link" href="#setup-main">설정 내용으로 건너뛰기</a>
+    <header class="setup-header">
+      <a class="wordmark" href="/" aria-label="HND 홈">
+        <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
+        <span>HND</span>
+      </a>
+      <span class="setup-header-label">처음 설정</span>
+      <a id="setup-exit" class="quiet-link" href="/">나가기</a>
+    </header>
+
+    <div class="setup-layout">
+      <aside class="setup-sidebar" aria-label="설정 진행 단계">
+        <div>
+          <h1>HND 준비</h1>
+          <p>각 단계를 확인하면 바로 작업을 시작할 수 있습니다.</p>
+        </div>
+        <ol class="stepper" id="setup-stepper">
+          <li data-step-indicator="0" aria-current="step">
+            <span>1</span>
+            <div>
+              <strong>코드 확인</strong><small>시작 또는 초대 코드</small>
+            </div>
+          </li>
+          <li data-step-indicator="1">
+            <span>2</span>
+            <div><strong>계정</strong><small>사용자 정보</small></div>
+          </li>
+          <li data-step-indicator="2">
+            <span>3</span>
+            <div><strong>패스키</strong><small>로그인 보호</small></div>
+          </li>
+          <li data-step-indicator="3">
+            <span>4</span>
+            <div><strong>복구</strong><small>복구 코드 보관</small></div>
+          </li>
+          <li data-step-indicator="4">
+            <span>5</span>
+            <div>
+              <strong>브라우저 보관함</strong><small>이 브라우저 연결</small>
+            </div>
+          </li>
+          <li data-step-indicator="5">
+            <span>6</span>
+            <div><strong>PC 연결</strong><small>계정 코드로 연결</small></div>
+          </li>
+          <li data-step-indicator="6">
+            <span>7</span>
+            <div><strong>완료</strong><small>작업 시작</small></div>
+          </li>
+        </ol>
+        <div class="setup-security-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 3 5 6v5c0 4.6 2.9 8.1 7 10 4.1-1.9 7-5.4 7-10V6l-7-3Z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+            />
+            <path
+              d="m9 12 2 2 4-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span>패스키와 데이터 암호화 키는 서로 분리해 보관합니다.</span>
+        </div>
+      </aside>
+
+      <main id="setup-main" class="setup-main">
+        <div
+          id="setup-loading"
+          class="setup-card loading-panel"
+          aria-live="polite"
+        >
+          <span class="spinner" aria-hidden="true"></span>
+          <p>서버 설정을 확인하고 있습니다.</p>
+        </div>
+
+        <section
+          class="setup-card setup-step"
+          data-step="0"
+          hidden
+          aria-labelledby="step-code-title"
+        >
+          <div class="step-count" aria-label="1 / 7, 코드 확인">
+            <span><b>1 / 7</b><strong>코드 확인</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <h2 id="step-code-title">시작 코드를 확인합니다</h2>
+          <p id="code-help" class="card-lead">
+            기존 작업 공간이 여러 개인 서버에서만 선택 코드가 필요합니다.
+          </p>
+          <div id="bootstrap-command" class="inline-note setup-command-note">
+            <strong>연결할 작업 공간의 선택 코드 만들기</strong>
+            <code
+              >docker exec hnd-server node /app/bin/hnd-server.mjs account
+              bootstrap --tenant TENANT_ID</code
+            >
+            <span
+              >TENANT_ID를 연결할 기존 작업 공간 ID로 바꾼 뒤, 표시된 코드를
+              아래에 입력하세요.</span
+            >
+          </div>
+          <form id="code-form" class="setup-form">
+            <label for="setup-code">시작 코드</label>
+            <input
+              id="setup-code"
+              name="code"
+              type="text"
+              autocomplete="one-time-code"
+              spellcheck="false"
+              inputmode="text"
+              required
+              autofocus
+            />
+            <p class="field-help">
+              코드는 URL이나 브라우저 저장소에 남기지 않으며 계정을 만들 때 한
+              번만 사용합니다.
+            </p>
+            <div class="form-actions">
+              <button class="button button-primary" type="submit">계속</button>
+            </div>
+          </form>
+        </section>
+
+        <section
+          class="setup-card setup-step"
+          data-step="1"
+          hidden
+          aria-labelledby="step-account-title"
+        >
+          <div class="step-count" aria-label="2 / 7, 계정">
+            <span><b>2 / 7</b><strong>계정</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <h2 id="step-account-title">계정 이름을 정하세요</h2>
+          <p class="card-lead">
+            이메일과 비밀번호는 필요하지 않습니다. 로그인은 다음 단계에서 만드는
+            패스키로 보호합니다.
+          </p>
+          <form id="account-form" class="setup-form">
+            <div class="field-grid">
+              <div>
+                <label for="username">사용자 이름</label
+                ><input
+                  id="username"
+                  name="username"
+                  type="text"
+                  autocomplete="username"
+                  minlength="3"
+                  maxlength="32"
+                  pattern="[A-Za-z0-9._-]+"
+                  required
+                />
+                <p class="field-help">
+                  영문, 숫자, 점, 밑줄, 빼기 기호를 사용할 수 있습니다.
+                </p>
+              </div>
+              <div>
+                <label for="display-name">표시 이름</label
+                ><input
+                  id="display-name"
+                  name="displayName"
+                  type="text"
+                  autocomplete="name"
+                  minlength="1"
+                  maxlength="80"
+                  required
+                />
+                <p class="field-help">앱 화면과 기기 기록에 표시됩니다.</p>
+              </div>
+            </div>
+            <div id="owner-account-note" class="inline-note">
+              <strong>소유자 계정</strong
+              ><span
+                >이 계정이 사용자 초대와 서버 가입 정책을 관리합니다. 생성이
+                끝나면 공개 초기 가입은 자동으로 닫힙니다.</span
+              >
+            </div>
+            <div class="form-actions">
+              <button class="button button-secondary" type="button" data-back>
+                이전</button
+              ><button class="button button-primary" type="submit">
+                계정 준비
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section
+          class="setup-card setup-step"
+          data-step="2"
+          hidden
+          aria-labelledby="step-passkey-title"
+        >
+          <div class="step-count" aria-label="3 / 7, 패스키">
+            <span><b>3 / 7</b><strong>패스키</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <div class="step-symbol" aria-hidden="true">
+            <svg viewBox="0 0 32 32">
+              <circle
+                cx="11"
+                cy="20"
+                r="6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+              />
+              <path
+                d="m16 15 11-11m-4 4 4 4m-9 0 3 3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </div>
+          <h2 id="step-passkey-title">패스키로 계정을 보호하세요</h2>
+          <p class="card-lead">
+            기기의 화면 잠금, 지문·얼굴 인식, PIN 또는 보안 키를 사용합니다.
+            생체정보는 HND 서버로 전송되지 않습니다.
+          </p>
+          <ul class="check-list">
+            <li>현재 서버 주소에만 묶여 피싱을 막습니다.</li>
+            <li>서버에는 로그인 공개키만 저장합니다.</li>
+            <li>나중에 보안 화면에서 두 번째 패스키를 추가할 수 있습니다.</li>
+          </ul>
+          <div id="passkey-notice" class="notice" role="alert" hidden></div>
+          <div class="form-actions">
+            <button class="button button-secondary" type="button" data-back>
+              이전</button
+            ><button
+              id="create-passkey"
+              class="button button-primary"
+              type="button"
+            >
+              패스키 만들기
+            </button>
+          </div>
+        </section>
+
+        <section
+          class="setup-card setup-step"
+          data-step="3"
+          hidden
+          aria-labelledby="step-recovery-title"
+        >
+          <div class="step-count" aria-label="4 / 7, 복구">
+            <span><b>4 / 7</b><strong>복구</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <h2 id="step-recovery-title">복구 코드를 보관하세요</h2>
+          <p class="card-lead">
+            패스키를 모두 잃었을 때 계정에 다시 들어오기 위한 코드입니다. 지금
+            한 번만 표시됩니다.
+          </p>
+          <div id="recovery-loading" class="inline-loading">
+            <span class="spinner spinner-small" aria-hidden="true"></span>복구
+            코드를 만들고 있습니다.
+          </div>
+          <div id="recovery-content" hidden>
+            <pre
+              id="recovery-codes"
+              class="recovery-codes"
+              tabindex="0"
+              aria-label="복구 코드"
+            ></pre>
+            <div class="button-row">
+              <button
+                id="download-recovery"
+                class="button button-secondary"
+                type="button"
+              >
+                파일로 저장</button
+              ><button
+                class="button button-secondary"
+                type="button"
+                data-copy-target="recovery-codes"
+              >
+                복사
+              </button>
+            </div>
+            <label class="confirm-check"
+              ><input id="recovery-confirmed" type="checkbox" /><span
+                >복구 코드를 안전한 곳에 저장했습니다.</span
+              ></label
+            >
+            <div class="warning-note">
+              <strong>중요</strong
+              ><span
+                >복구 코드는 계정 접근을 되찾는 용도입니다. 서버 데이터 복구에는
+                데이터베이스와 서버 보관함 키를 한 쌍으로 백업해야 합니다.</span
+              >
+            </div>
+          </div>
+          <div id="recovery-notice" class="notice" role="alert" hidden></div>
+          <div class="form-actions">
+            <button
+              id="recovery-retry"
+              class="button button-secondary"
+              type="button"
+              hidden
+            >
+              복구 코드 다시 만들기
+            </button>
+            <button
+              id="recovery-next"
+              class="button button-primary"
+              type="button"
+              disabled
+            >
+              다음
+            </button>
+          </div>
+        </section>
+
+        <section
+          class="setup-card setup-step"
+          data-step="4"
+          hidden
+          aria-labelledby="step-vault-title"
+        >
+          <div class="step-count" aria-label="5 / 7, 브라우저 보관함">
+            <span><b>5 / 7</b><strong>브라우저 보관함</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <div class="step-symbol" aria-hidden="true">
+            <svg viewBox="0 0 32 32">
+              <rect
+                x="5"
+                y="10"
+                width="22"
+                height="17"
+                rx="4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+              />
+              <path
+                d="M10 10V8a6 6 0 0 1 12 0v2M16 17v4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+              />
+            </svg>
+          </div>
+          <h2 id="step-vault-title">계정 보관함을 준비합니다</h2>
+          <p class="card-lead">
+            계정이 암호화 키를 관리하고, 이 브라우저에는 서버 장애 때 사용할
+            오프라인 사본을 안전하게 보관합니다.
+          </p>
+          <div class="vault-explain">
+            <div><strong>웹 계정</strong><span>패스키로 본인 확인</span></div>
+            <span aria-hidden="true">+</span>
+            <div>
+              <strong>계정 보관함</strong><span>모든 PC에서 같은 내용 열기</span>
+            </div>
+          </div>
+          <div id="vault-create-panel" hidden>
+            <div class="inline-note">
+              <strong>이 계정의 첫 보관함을 만듭니다</strong
+              ><span
+                >서버는 계정의 키를 별도 서버 키로 보호해 보관합니다. 이
+                브라우저에도 오프라인 작업용 사본을 안전하게 저장합니다.</span
+              >
+            </div>
+            <div class="form-actions">
+              <button
+                id="initialize-vault"
+                class="button button-primary"
+                type="button"
+              >
+                계정 보관함 만들기
+              </button>
+            </div>
+          </div>
+          <div id="vault-pair-panel" hidden>
+            <div class="inline-note">
+              <strong>계정 기준으로 전환합니다</strong
+              ><span
+                >기존 PC의 초대는 필요하지 않습니다. 계정에 관리 키가 있으면
+                패스키로 바로 열고, 이 브라우저에 이전 로컬 키가 있으면 한 번만
+                서버 계정으로 전환합니다.</span
+              >
+            </div>
+            <div class="form-actions">
+              <a class="button button-secondary" href="/app#home">복구 선택 보기</a>
+              <button
+                id="setup-account-vault"
+                class="button button-primary"
+                type="button"
+              >
+                계정으로 보관함 열기
+              </button>
+            </div>
+          </div>
+          <div id="vault-notice" class="notice" role="alert" hidden></div>
+        </section>
+
+        <section
+          class="setup-card setup-step setup-card-wide"
+          data-step="5"
+          hidden
+          aria-labelledby="step-pc-title"
+        >
+          <div class="step-count" aria-label="6 / 7, PC 연결">
+            <span><b>6 / 7</b><strong>PC 연결</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <h2 id="step-pc-title">이 계정에 PC를 연결하세요</h2>
+          <p class="card-lead">
+            웹에서 일회용 코드를 만들고 연결할 PC에서 한 번 사용합니다.
+          </p>
+
+          <div class="connector-explainer">
+            <strong>웹에서만 쓴다면 설치하지 않아도 됩니다.</strong>
+            <p>
+              연결 도구는 이 PC의 Git과 Claude Code·Codex·Cursor를 이어 룰을
+              자동으로 불러오고, 진행 상태를 저장하고, 오프라인 변경을 다시
+              동기화할 때 필요합니다.
+            </p>
+          </div>
+
+          <div class="pc-steps">
+            <article>
+              <span class="pc-step-number">1</span>
+              <div class="pc-step-body">
+                <h3>실행할 PC 선택</h3>
+                <div class="platform-select">
+                  <span id="install-platform-label">운영체제</span>
+                  <div
+                    class="segmented platform-picker"
+                    role="group"
+                    aria-labelledby="install-platform-label"
+                  >
+                    <button
+                      type="button"
+                      data-install-platform="linux"
+                      aria-pressed="false"
+                    >
+                      Linux
+                    </button>
+                    <button
+                      type="button"
+                      data-install-platform="windows"
+                      aria-pressed="false"
+                    >
+                      Windows
+                    </button>
+                    <button
+                      type="button"
+                      data-install-platform="macos"
+                      aria-pressed="false"
+                    >
+                      macOS
+                    </button>
+                  </div>
+                </div>
+                <div class="platform-select">
+                  <span id="install-mode-label">설치 상태</span>
+                  <div
+                    class="segmented platform-picker"
+                    role="group"
+                    aria-labelledby="install-mode-label"
+                  >
+                    <button
+                      type="button"
+                      data-install-mode="install"
+                      aria-pressed="false"
+                    >
+                      처음 설치
+                    </button>
+                    <button
+                      type="button"
+                      data-install-mode="existing"
+                      aria-pressed="false"
+                    >
+                      이미 설치됨
+                    </button>
+                  </div>
+                </div>
+                <p id="install-platform-help">
+                  명령을 실행할 PC의 운영체제와 설치 상태를 선택하세요.
+                </p>
+                <p class="field-help">
+                  브라우저가 아니라 실제 터미널을 연 PC를 기준으로 선택합니다.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span class="pc-step-number">2</span>
+              <div class="pc-step-body">
+                <h3>PC 연결 명령 만들기</h3>
+                <p>
+                  PC 이름을 정한 뒤 패스키로 확인하면, 15분 동안 유효한 실행 명령을 만듭니다.
+                </p>
+                <div class="device-name-row">
+                  <label for="first-device-name"
+                    >PC 이름<input
+                      id="first-device-name"
+                      type="text"
+                      value="내 노트북"
+                      maxlength="80"
+                    />
+                  </label>
+                  <button
+                    id="create-device-invitation"
+                    class="button button-primary"
+                    type="button"
+                  >
+                    연결 명령 만들기
+                  </button>
+                  <button
+                    id="cancel-device-auth"
+                    class="button button-secondary"
+                    type="button"
+                    hidden
+                  >
+                    패스키 인증 취소
+                  </button>
+                </div>
+                <p class="field-help">
+                  패스키 창을 닫아도 다시 누르면 됩니다. 응답이 멈출 때만 인증을 취소하세요.
+                </p>
+                <div id="device-invitation-wrap" class="secret-box connection-code-secret" hidden>
+                  <code id="device-invitation"></code
+                  ><button type="button" data-copy-target="device-invitation">
+                    복사</button
+                  ><span id="device-invitation-expiry"></span>
+                </div>
+              </div>
+            </article>
+            <article>
+              <span class="pc-step-number">3</span>
+              <div class="pc-step-body">
+                <h3>새 PC 터미널에서 실행</h3>
+                <p>
+                  위에서 연결 명령을 만든 뒤 블록 전체를 한 번 복사해 실행하세요. 프로젝트는 이후 Git 저장소에서 AI 세션을 열 때 자동으로 등록됩니다.
+                </p>
+                <strong class="command-label">한 번에 실행</strong>
+                <p class="command-help">
+                  어느 폴더에서 실행해도 됩니다. 위 선택에 맞는 짧은 명령만 표시합니다.
+                </p>
+                <div class="code-block" data-copy-region>
+                  <pre id="connect-command"><code></code></pre>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    data-copy-target="connect-command"
+                    disabled
+                  >
+                    복사</button
+                  ><span role="status" hidden></span>
+                </div>
+                <p class="field-help">
+                  연결 코드가 포함되므로 명령을 공유하지 마세요. 이후 Git 저장소에서 Claude Code·Codex·Cursor를 시작하면 프로젝트와 기본 환경을 자동 등록합니다.
+                </p>
+              </div>
+            </article>
+          </div>
+          <div id="pc-waiting" class="connection-status" hidden>
+            <span class="spinner spinner-small" aria-hidden="true"></span>
+            <div>
+              <strong>PC 연결을 기다리는 중</strong
+              ><span>명령이 완료되면 자동으로 확인합니다.</span>
+            </div>
+          </div>
+          <div class="inline-note">
+            <strong>로그인한 계정이 모든 PC의 연결 기준입니다</strong
+            ><span
+              >서버가 계정의 암호화 키를 보호해 관리하므로 첫 PC나 기존 PC의
+              승인이 필요하지 않습니다. 서버가 잠시 꺼지면 각 PC는 마지막 로컬
+              사본으로 계속 작업하고 연결이 복구되면 자동 동기화합니다.</span
+            >
+          </div>
+          <div id="pc-notice" class="notice" role="alert" hidden></div>
+          <div class="form-actions">
+            <button
+              id="skip-device"
+              class="button button-secondary"
+              type="button"
+            >
+              나중에 연결</button
+            >
+            <button
+              id="check-device"
+              class="button button-secondary"
+              type="button"
+            >
+              연결 확인</button
+            ><button
+              id="pc-next"
+              class="button button-primary"
+              type="button"
+              disabled
+            >
+              다음
+            </button>
+          </div>
+        </section>
+
+        <section
+          class="setup-card setup-step setup-complete"
+          data-step="6"
+          hidden
+          aria-labelledby="step-complete-title"
+        >
+          <div class="complete-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40">
+              <path
+                d="m10 21 7 7 14-16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="3.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </div>
+          <div class="step-count" aria-label="7 / 7, 완료">
+            <span><b>7 / 7</b><strong>완료</strong></span>
+            <span class="step-progress" aria-hidden="true"><i></i></span>
+          </div>
+          <h2 id="step-complete-title">준비가 끝났습니다</h2>
+          <p class="card-lead">
+            이제 Claude Code, Codex, Cursor에서 평소처럼 작업하세요. 진행 저장과
+            동기화는 기본으로 자동 실행됩니다.
+          </p>
+          <div class="completion-grid">
+            <div><strong>패스키</strong><span>로그인 보호 완료</span></div>
+            <div>
+              <strong>브라우저 보관함</strong><span>로컬 연결 완료</span>
+            </div>
+            <div>
+              <strong>PC 연결</strong
+              ><span id="complete-device-status">자동 동기화 준비</span>
+            </div>
+          </div>
+          <a class="button button-primary button-wide" href="/app">HND 열기</a>
+        </section>
+
+        <div
+          id="setup-global-error"
+          class="notice setup-global-error"
+          role="alert"
+          hidden
+        ></div>
+      </main>
+    </div>
+    <div
+      id="toast-region"
+      class="toast-region"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+    <script type="module" src="/web/setup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "HND",
+  "short_name": "HND",
+  "description": "에이전트를 바꿔도 작업 맥락은 이어집니다.",
+  "lang": "ko",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fdf0d5",
+  "theme_color": "#003049",
+  "icons": [
+    {
+      "src": "/web/hnd-icon.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

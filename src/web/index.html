@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#003049" />
+    <meta name="hnd-api-base" content="/api/web" />
+    <meta name="description" content="HND 로그인 및 서버 초기 설정" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="HND" />
+    <meta property="og:description" content="에이전트를 바꿔도 작업 맥락은 이어집니다." />
+    <meta property="og:image" content="/web/hnd-icon.png" />
+    <meta property="og:image:width" content="1254" />
+    <meta property="og:image:height" content="1254" />
+    <meta property="og:image:alt" content="HND 로고" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="HND" />
+    <meta name="twitter:description" content="에이전트를 바꿔도 작업 맥락은 이어집니다." />
+    <meta name="twitter:image" content="/web/hnd-icon.png" />
+    <meta name="twitter:image:alt" content="HND 로고" />
+    <title>HND</title>
+    <link rel="icon" type="image/png" href="/web/hnd-icon.png" />
+    <link rel="apple-touch-icon" href="/web/hnd-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body class="entry-page">
+    <!--
+      DIRECTION CONTRACT
+      THESIS: 설치된 개인 서버의 상태와 다음 행동만 또렷하게 보여 주는 조용한 출입구다.
+      OWN-WORLD: 따뜻한 종이색 바탕과 네이비 원장 문법으로 로그인, 설정, 작업 기록이 한 제품처럼 이어진다. 빨강은 작은 충돌 표시와 복구 불가능한 동작에만 남긴다.
+      STORY: 서버 상태 확인, 패스키 로그인 또는 최초 설정, 작업 공간 진입 순서로 한 가지 결정만 요청한다.
+      FIRST VIEWPORT: 제품 홍보 없이 서버 문맥과 단일 인증 과업이 먼저 보인다.
+      FORM: Activity Ledger
+      SEED: a01d76f4
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+    -->
+    <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+    <header class="entry-header">
+      <a class="wordmark" href="/" aria-label="HND 홈">
+        <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
+        <span>HND</span>
+      </a>
+      <div class="server-chip" id="server-chip" aria-live="polite">
+        <span class="status-dot status-pending" aria-hidden="true"></span>
+        <span id="server-status">서버 확인 중</span>
+      </div>
+    </header>
+
+    <main id="main" class="entry-main">
+      <section class="auth-card" aria-labelledby="auth-title">
+        <div class="entry-brand">
+          <div class="entry-mark" aria-hidden="true">H</div>
+          <div>
+            <h1>HND</h1>
+            <p id="server-origin-card"></p>
+          </div>
+        </div>
+        <div id="auth-loading" class="loading-panel" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <p>로그인 상태를 확인하고 있습니다.</p>
+        </div>
+
+        <div id="login-panel" hidden>
+          <h2 id="auth-title">HND에 로그인</h2>
+          <div class="auth-actions">
+            <button
+              id="passkey-login"
+              class="button button-primary button-wide"
+              type="button"
+            >
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle
+                  cx="8"
+                  cy="15"
+                  r="4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                />
+                <path
+                  d="M10.8 12.2 19 4 M16 7l3 3 M13 10l2 2"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              패스키로 로그인
+            </button>
+            <div id="signup-action" class="auth-secondary" hidden>
+              <span id="signup-copy" class="sr-only">계정이 없으신가요?</span>
+              <a
+                id="signup-link"
+                class="button button-secondary button-wide"
+                href="/setup"
+                >새 계정 만들기</a
+              >
+            </div>
+          </div>
+          <p class="microcopy">
+            버튼을 누르면 기기의 화면 잠금, PIN 또는 보안 키를 확인합니다.
+          </p>
+
+          <details class="recovery-box">
+            <summary>패스키를 사용할 수 없나요?</summary>
+            <form id="recovery-login-form" class="stack-form">
+              <label for="recovery-code">복구 코드</label>
+              <input
+                id="recovery-code"
+                name="code"
+                type="text"
+                autocomplete="one-time-code"
+                spellcheck="false"
+                required
+              />
+              <button class="button button-secondary" type="submit">
+                복구 코드 확인
+              </button>
+              <p class="field-help">
+                복구 후에는 기존 웹 세션이 종료되고 새 패스키를 만들어야 합니다.
+              </p>
+            </form>
+          </details>
+
+        </div>
+
+        <div id="owner-setup-panel" hidden>
+          <h2 id="owner-title">이 서버를 설정하세요</h2>
+          <p class="card-lead">
+            첫 소유자 계정을 웹에서 바로 만듭니다. 서버 터미널이나 별도 시작
+            코드는 필요하지 않습니다.
+          </p>
+          <div class="inline-note">
+            <strong>첫 계정이 이 서버의 소유자가 됩니다.</strong>
+            <span
+              >이후 방문자도 초대 코드 없이 자신의 계정과 작업 공간을 만들 수
+              있습니다. 가입 방식은 설정에서 바꿀 수 있습니다.</span
+            >
+          </div>
+          <div class="form-actions entry-setup-action">
+            <a class="button button-primary button-wide" href="/setup"
+              >소유자 계정 만들기</a
+            >
+          </div>
+        </div>
+
+        <div id="entry-error" class="notice" role="alert" hidden></div>
+        <button
+          id="entry-retry"
+          class="button button-secondary button-wide"
+          type="button"
+          hidden
+        >
+          다시 확인
+        </button>
+      </section>
+    </main>
+
+    <footer class="entry-footer">
+      <a href="/healthz">서버 상태</a>
+      <a href="https://www.npmjs.com/package/@lch-1/hnd">npm 패키지</a>
+    </footer>
+    <div
+      id="toast-region"
+      class="toast-region"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+    <script type="module" src="/web/entry.js"></script>
+  </body>
+</html>

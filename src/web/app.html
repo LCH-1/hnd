@@ -1,0 +1,1856 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#003049" />
+    <meta name="hnd-api-base" content="/api/web" />
+    <meta name="description" content="HND 작업 공간" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="HND 작업 공간" />
+    <meta property="og:description" content="프로젝트 규칙, 작업 맥락, 인수인계와 지식을 한곳에서 관리합니다." />
+    <meta property="og:image" content="/web/hnd-icon.png" />
+    <meta property="og:image:width" content="1254" />
+    <meta property="og:image:height" content="1254" />
+    <meta property="og:image:alt" content="HND 로고" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="HND 작업 공간" />
+    <meta name="twitter:image" content="/web/hnd-icon.png" />
+    <meta name="twitter:image:alt" content="HND 로고" />
+    <title>HND 작업 공간</title>
+    <link rel="icon" type="image/png" href="/web/hnd-icon.png" />
+    <link rel="apple-touch-icon" href="/web/hnd-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body class="app-page">
+    <!--
+      DIRECTION CONTRACT
+      THESIS: 설치된 개인 서버의 상태와 다음 행동만 또렷하게 보여 주는 조용한 출입구다.
+      OWN-WORLD: 따뜻한 종이색 바탕과 네이비 원장 문법으로 로그인, 설정, 작업 기록이 한 제품처럼 이어진다. 빨강은 작은 충돌 표시와 복구 불가능한 동작에만 남긴다.
+      STORY: 서버 상태 확인, 패스키 로그인 또는 최초 설정, 작업 공간 진입 순서로 한 가지 결정만 요청한다.
+      FIRST VIEWPORT: 제품 홍보 없이 서버 문맥과 단일 인증 과업이 먼저 보인다.
+      FORM: Activity Ledger
+      SEED: a01d76f4
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+    -->
+    <a class="skip-link" href="#app-main">본문으로 건너뛰기</a>
+    <div id="app-loading" class="app-boot" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <p>작업 공간을 여는 중입니다.</p>
+    </div>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <aside id="app-sidebar" class="app-sidebar" aria-label="HND 메뉴">
+        <div class="sidebar-head">
+          <a class="wordmark wordmark-light" href="/app" aria-label="HND 홈">
+            <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
+            <span>HND</span>
+          </a>
+          <button
+            id="sidebar-close"
+            class="icon-button sidebar-close"
+            type="button"
+            aria-label="메뉴 닫기"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m6 6 12 12M18 6 6 18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+        <nav class="app-nav" aria-label="작업 공간">
+          <a href="#home" data-view-link="home" aria-current="page"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1v-9Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linejoin="round"
+              /></svg
+            ><span>홈</span></a
+          >
+          <a href="#projects" data-view-link="projects"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 5.5h6l2 2h8v11H4zM8 12h8M8 15h5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg
+            ><span>프로젝트</span></a
+          >
+          <a href="#rules" data-view-link="rules"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg
+            ><span>룰</span></a
+          >
+          <a href="#work" data-view-link="work"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 7h16v13H4zM9 7V4h6v3M4 12h16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linejoin="round"
+              /></svg
+            ><span>작업</span></a
+          >
+          <a href="#knowledge" data-view-link="knowledge"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4Zm3 12h11M9 8h6M9 11h5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg
+            ><span>지식</span></a
+          >
+          <div class="nav-separator" role="separator"></div>
+          <a href="#devices" data-view-link="devices"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect
+                x="4"
+                y="3"
+                width="16"
+                height="18"
+                rx="2"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+              />
+              <path
+                d="M9 18h6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              /></svg
+            ><span>기기</span></a
+          >
+          <a href="#revisions" data-view-link="revisions"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 7h16M6 3h12a2 2 0 0 1 2 2v15H4V5a2 2 0 0 1 2-2Zm3 8h6M9 15h4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg
+            ><span>저장 기록</span></a
+          >
+          <a href="#security" data-view-link="security"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 3 5 6v5c0 4.6 2.9 8.1 7 10 4.1-1.9 7-5.4 7-10V6l-7-3Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+              />
+              <path
+                d="m9 12 2 2 4-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              /></svg
+            ><span>보안</span></a
+          >
+          <a href="#settings" data-view-link="settings"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle
+                cx="12"
+                cy="12"
+                r="3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+              />
+              <path
+                d="M19 13.5v-3l-2-.7-.7-1.6.9-2-2.1-2.1-2 .9-1.6-.7-.7-2h-3l-.7 2-1.6.7-2-.9-2.1 2.1.9 2-.7 1.6-2 .7v3l2 .7.7 1.6-.9 2 2.1 2.1 2-.9 1.6.7.7 2h3l.7-2 1.6-.7 2 .9 2.1-2.1-.9-2 .7-1.6 2-.7Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linejoin="round"
+              /></svg
+            ><span>설정</span></a
+          >
+        </nav>
+        <div class="sidebar-account">
+          <span id="account-avatar" class="account-avatar" aria-hidden="true"
+            >사</span
+          >
+          <div>
+            <strong id="account-name">사용자</strong
+            ><span id="account-role">HND 계정</span>
+          </div>
+          <button
+            id="logout-button"
+            class="icon-button icon-button-dark"
+            type="button"
+            aria-label="로그아웃"
+            title="로그아웃"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M10 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5m5-4 4-4-4-4m4 4H9"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </aside>
+      <button
+        id="sidebar-scrim"
+        class="sidebar-scrim"
+        type="button"
+        aria-label="메뉴 닫기"
+        tabindex="-1"
+      ></button>
+
+      <div class="app-workspace">
+        <header class="app-header">
+          <button
+            id="sidebar-open"
+            class="icon-button mobile-nav-button"
+            type="button"
+            aria-label="메뉴 열기"
+            aria-controls="app-sidebar"
+            aria-expanded="false"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 7h16M4 12h16M4 17h16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <div class="app-title sr-only">
+            <h1 id="page-title">홈</h1>
+            <p id="page-kicker" class="page-kicker">내 작업 공간</p>
+          </div>
+          <a class="app-mobile-brand" href="#home" aria-label="HND 홈">
+            <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
+            <span>HND</span>
+          </a>
+          <div class="app-header-actions">
+            <a id="sync-chip" class="server-chip" href="#home">
+              <span class="status-dot status-pending" aria-hidden="true"></span
+              ><span>상태 확인 중</span>
+            </a>
+            <button
+              id="global-add"
+              class="button button-primary button-compact"
+              type="button"
+              hidden
+            >
+              새로 만들기
+            </button>
+          </div>
+        </header>
+
+        <main id="app-main" class="app-main">
+          <section
+            id="vault-gate"
+            class="vault-gate"
+            hidden
+            aria-labelledby="vault-gate-title"
+          >
+            <div class="gate-icon" aria-hidden="true">
+              <svg viewBox="0 0 32 32">
+                <rect
+                  x="5"
+                  y="11"
+                  width="22"
+                  height="16"
+                  rx="4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.3"
+                />
+                <path
+                  d="M10 11V8a6 6 0 0 1 12 0v3M16 18v3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.3"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </div>
+            <h2 id="vault-gate-title">이 브라우저를 보관함에 연결하세요</h2>
+            <p class="vault-gate-lead">
+              로그인은 완료됐습니다. 암호화된 내용을 열 키만 이 브라우저에
+              없습니다.
+            </p>
+            <div class="vault-gate-paths">
+              <section class="vault-gate-path" aria-labelledby="vault-pair-title">
+                <h3 id="vault-pair-title">계정으로 열기</h3>
+                <p>
+                  기존 PC는 필요하지 않습니다. 패스키로 계정을 확인하면 서버가
+                  관리하는 보관함 키를 이 브라우저의 보호 저장소에 보관합니다.
+                </p>
+                <button
+                  id="vault-account-unlock"
+                  class="button button-primary"
+                  type="button"
+                >
+                  패스키로 보관함 열기
+                </button>
+                <p class="field-help">
+                  이후에는 서버가 잠시 꺼져도 이 브라우저의 마지막 로컬 사본으로
+                  작업할 수 있습니다.
+                </p>
+              </section>
+              <section class="vault-gate-path" aria-labelledby="vault-account-title">
+                <h3 id="vault-account-title">계정은 계속 관리할 수 있습니다</h3>
+                <p>보관함 키 없이도 연결 현황과 로그인 보안을 확인할 수 있습니다.</p>
+                <nav class="vault-account-links" aria-label="계정 관리 바로가기">
+                  <a href="#devices">기기</a>
+                  <a href="#security">보안</a>
+                  <a href="#settings">설정</a>
+                </nav>
+              </section>
+              <section
+                id="vault-reset-option"
+                class="vault-gate-path vault-reset-option"
+                aria-labelledby="vault-reset-option-title"
+                hidden
+              >
+                <h3 id="vault-reset-option-title">기존 키가 없다면</h3>
+                <p>
+                  이전 방식 보관함의 로컬 키가 어디에도 없다면 소유자는 기존
+                  암호문을 삭제하고 계정이 관리하는 빈 보관함으로 다시 시작할 수
+                  있습니다.
+                </p>
+                <button
+                  id="open-vault-reset"
+                  class="button button-danger"
+                  type="button"
+                >
+                  새 보관함으로 시작
+                </button>
+              </section>
+            </div>
+            <div
+              id="vault-pair-notice"
+              class="notice"
+              role="alert"
+              hidden
+            ></div>
+          </section>
+
+          <section
+            id="app-error-gate"
+            class="vault-gate"
+            hidden
+            aria-labelledby="app-error-title"
+          >
+            <div class="gate-icon" aria-hidden="true">
+              <svg viewBox="0 0 32 32">
+                <circle
+                  cx="16"
+                  cy="16"
+                  r="11"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.3"
+                />
+                <path
+                  d="M16 10v7m0 5h.01"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.3"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </div>
+            <h2 id="app-error-title">작업 공간을 열 수 없습니다</h2>
+            <p id="app-error-copy">
+              서버 연결과 이 브라우저의 로컬 사본을 확인해 주세요.
+            </p>
+            <div class="form-actions">
+              <button id="app-retry" class="button button-primary" type="button">
+                다시 시도
+              </button>
+              <a class="button button-secondary" href="/">로그인 화면</a>
+            </div>
+          </section>
+
+          <div id="view-container">
+            <section
+              class="app-view"
+              data-view="home"
+              aria-labelledby="home-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="home-title">활동 원장</h2>
+                  <p>최근 작업, 오래 남길 지식, 서버 연결 상태를 한곳에서 확인합니다.</p>
+                </div>
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  data-action="refresh"
+                  data-target="home"
+                >
+                  새로고침
+                </button>
+              </div>
+              <div id="home-error" class="notice" role="alert" hidden></div>
+              <div id="sync-actions" class="sync-actions" data-state="ok">
+                <span class="sync-state-mark" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path
+                      d="M20 11a8 8 0 1 1-2.34-5.66M20 4v7h-7"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </span>
+                <div class="sync-state-copy">
+                  <strong id="sync-actions-title">변경 사항이 모두 저장되었습니다</strong>
+                  <p id="sync-actions-copy">
+                    연결이 끊겨도 로컬 사본으로 계속 작업하고 복구 뒤 자동 전송합니다.
+                  </p>
+                </div>
+                <div class="button-row">
+                  <button
+                    id="sync-retry"
+                    class="button button-secondary button-compact"
+                    type="button"
+                    hidden
+                  >
+                    다시 동기화
+                  </button>
+                  <button
+                    id="sync-reconnect-vault"
+                    class="button button-primary button-compact"
+                    type="button"
+                    hidden
+                  >
+                    계정 보관함 다시 연결
+                  </button>
+                  <button
+                    id="sync-use-server"
+                    class="button button-secondary button-compact"
+                    type="button"
+                    hidden
+                  >
+                    서버 변경 사용
+                  </button>
+                  <button
+                    id="sync-keep-local"
+                    class="button button-primary button-compact"
+                    type="button"
+                    hidden
+                  >
+                    내 변경 사용
+                  </button>
+                </div>
+              </div>
+              <div class="metric-cards" id="home-metrics" aria-live="polite">
+                <article>
+                  <span>마지막 서버 저장</span
+                  ><strong id="metric-last-save">확인 중</strong
+                  ><small>암호문을 받은 시각</small>
+                </article>
+                <article>
+                  <span>연결된 기기</span><strong id="metric-devices">확인 중</strong
+                  ><small>폐기되지 않은 기기</small>
+                </article>
+                <article>
+                  <span>보관본</span><strong id="metric-revisions">확인 중</strong
+                  ><small>암호화된 저장 기록</small>
+                </article>
+                <article>
+                  <span>저장 용량</span><strong id="metric-storage">확인 중</strong
+                  ><small>현재 암호문 크기</small>
+                </article>
+              </div>
+              <div class="home-grid">
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>현재 활동</h3>
+                      <p>최근 변경 순</p>
+                    </div>
+                    <a href="#work">전체 보기</a>
+                  </div>
+                  <div
+                    id="home-work-list"
+                    class="compact-list loading-list"
+                    aria-live="polite"
+                  >
+                    <span
+                      class="spinner spinner-small"
+                      aria-hidden="true"
+                    ></span
+                    >불러오는 중
+                  </div>
+                </article>
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>최근 지식</h3>
+                      <p>다시 꺼내 쓰기 위해 남긴 내용</p>
+                    </div>
+                    <a href="#knowledge">전체 보기</a>
+                  </div>
+                  <div
+                    id="home-knowledge-list"
+                    class="compact-list loading-list"
+                    aria-live="polite"
+                  >
+                    <span
+                      class="spinner spinner-small"
+                      aria-hidden="true"
+                    ></span
+                    >불러오는 중
+                  </div>
+                </article>
+              </div>
+              <div class="encryption-banner">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 3 5 6v5c0 4.6 2.9 8.1 7 10 4.1-1.9 7-5.4 7-10V6l-7-3Z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    d="m9 12 2 2 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                </svg>
+                <div>
+                  <strong>계정 보관함 키로 암호화됩니다</strong
+                  ><span
+                    >서버는 계정 키를 별도 서버 키로 보호해 관리하고, 이
+                    브라우저에는 오프라인 작업용 암호화 사본을 보관합니다.</span
+                  >
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="projects"
+              hidden
+              aria-labelledby="projects-title"
+            >
+              <div id="projects-index">
+                <div class="view-heading">
+                  <div>
+                    <h2 id="projects-title">프로젝트</h2>
+                    <p>Git 저장소별 룰, 환경과 진행 작업을 한곳에서 관리합니다.</p>
+                  </div>
+                </div>
+                <form id="project-filter" class="filter-bar project-filter">
+                  <label class="search-field search-grow"
+                    ><svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle
+                        cx="10.5"
+                        cy="10.5"
+                        r="6.5"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.8"
+                      />
+                      <path
+                        d="m16 16 4 4"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.8"
+                        stroke-linecap="round"
+                      /></svg
+                    ><span class="sr-only">프로젝트 검색</span
+                    ><input
+                      name="q"
+                      type="search"
+                      placeholder="이름, 설명, Git 원격 주소 검색" /></label
+                  ><button
+                    class="button button-secondary button-compact"
+                    type="submit"
+                  >
+                    검색
+                  </button>
+                </form>
+                <div id="projects-error" class="notice" role="alert" hidden></div>
+                <div
+                  id="projects-list"
+                  class="project-ledger"
+                  aria-live="polite"
+                ></div>
+              </div>
+
+              <div id="project-detail" hidden>
+                <button
+                  class="project-back"
+                  type="button"
+                  data-action="back-projects"
+                >
+                  프로젝트 목록
+                </button>
+                <div class="project-detail-heading">
+                  <div>
+                    <div class="project-title-line">
+                      <span class="project-mark" aria-hidden="true"></span>
+                      <h2 id="project-detail-name">프로젝트</h2>
+                    </div>
+                    <p id="project-detail-description">프로젝트 설명이 없습니다.</p>
+                  </div>
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    data-action="edit-project"
+                  >
+                    프로젝트 설정
+                  </button>
+                </div>
+                <div id="project-detail-error" class="notice" role="alert" hidden></div>
+                <dl class="project-facts">
+                  <div><dt>Git 원격</dt><dd id="project-detail-remote">등록되지 않음</dd></div>
+                  <div><dt>최근 확인</dt><dd id="project-detail-updated">기록 없음</dd></div>
+                  <div><dt>프로젝트 ID</dt><dd id="project-detail-id">확인 중</dd></div>
+                </dl>
+                <div class="project-metrics" aria-live="polite">
+                  <div><span>프로젝트 룰</span><strong id="project-rule-count">0</strong></div>
+                  <div><span>환경</span><strong id="project-env-count">0</strong></div>
+                  <div><span>진행 중 작업</span><strong id="project-work-count">0</strong></div>
+                  <div><span>프로젝트 지식</span><strong id="project-knowledge-count">0</strong></div>
+                </div>
+
+                <div class="project-detail-grid">
+                  <section class="project-section" aria-labelledby="project-rules-title">
+                    <div class="project-section-head">
+                      <div>
+                        <h3 id="project-rules-title">프로젝트 룰과 환경</h3>
+                        <p>이 저장소에만 적용되는 지시와 환경별 차이를 확인합니다.</p>
+                      </div>
+                      <button
+                        class="text-button"
+                        type="button"
+                        data-action="new-project-rule"
+                      >
+                        룰 추가
+                      </button>
+                    </div>
+                    <div id="project-rules-list" class="project-data-list"></div>
+                    <a class="project-section-link" href="#rules">모든 룰 관리</a>
+                  </section>
+
+                  <section class="project-section" aria-labelledby="project-work-title">
+                    <div class="project-section-head">
+                      <div>
+                        <h3 id="project-work-title">진행 작업</h3>
+                        <p>다른 에이전트가 이어받을 현재 상태와 다음 행동입니다.</p>
+                      </div>
+                      <button
+                        class="text-button"
+                        type="button"
+                        data-action="new-project-work"
+                      >
+                        작업 추가
+                      </button>
+                    </div>
+                    <div id="project-work-list" class="project-data-list"></div>
+                    <a class="project-section-link" href="#work">모든 작업 관리</a>
+                  </section>
+
+                  <section class="project-section project-knowledge-section" aria-labelledby="project-knowledge-title">
+                    <div class="project-section-head">
+                      <div>
+                        <h3 id="project-knowledge-title">프로젝트 지식</h3>
+                        <p>이 프로젝트와 환경에 연결해 오래 보관한 결정과 배경입니다.</p>
+                      </div>
+                      <button
+                        class="text-button"
+                        type="button"
+                        data-action="new-project-knowledge"
+                      >
+                        지식 추가
+                      </button>
+                    </div>
+                    <div id="project-knowledge-list" class="project-data-list"></div>
+                    <a class="project-section-link" href="#knowledge">모든 지식 관리</a>
+                  </section>
+                </div>
+
+                <section class="project-guide" aria-labelledby="project-guide-title">
+                  <div class="project-guide-intro">
+                    <h3 id="project-guide-title">이 프로젝트에서 HND 사용하기</h3>
+                    <p>별도 프로젝트 등록은 필요하지 않습니다. 실제 Git 저장소에서 에이전트를 시작하면 자동으로 연결됩니다.</p>
+                  </div>
+                  <ol class="setup-ledger">
+                    <li>
+                      <span>1</span>
+                      <div><strong>PC 연결 확인</strong><p><code>hnd status</code>에서 HND 계정 연결이 완료됐는지 확인합니다.</p></div>
+                    </li>
+                    <li>
+                      <span>2</span>
+                      <div><strong>환경 선택</strong><p>같은 프로젝트의 배포·테스트 체크아웃을 나누려면 각 폴더에서 <code>hnd env set dev</code>처럼 설정합니다.</p></div>
+                    </li>
+                    <li>
+                      <span>3</span>
+                      <div><strong>평소처럼 AI 세션 시작</strong><p>Claude Code, Codex 또는 Cursor를 열면 최신 룰과 작업 컨텍스트를 자동으로 받습니다.</p></div>
+                    </li>
+                    <li>
+                      <span>4</span>
+                      <div><strong>웹에서 계속 관리</strong><p>이 화면에서 룰과 작업을 바꾸면 연결된 PC가 다음 훅에서 최신 내용을 가져옵니다.</p></div>
+                    </li>
+                  </ol>
+                </section>
+              </div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="rules"
+              hidden
+              aria-labelledby="rules-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="rules-title">룰</h2>
+                  <p>에이전트가 항상 따라야 할 지시를 범위별로 관리합니다.</p>
+                </div>
+                <button
+                  class="button button-primary"
+                  type="button"
+                  data-open-dialog="rule-dialog"
+                >
+                  룰 추가
+                </button>
+              </div>
+              <form id="rule-filter" class="filter-bar">
+                <label class="search-field"
+                  ><span class="sr-only">룰 검색</span
+                  ><svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle
+                      cx="10.5"
+                      cy="10.5"
+                      r="6.5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                    />
+                    <path
+                      d="m16 16 4 4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                    /></svg
+                  ><input
+                    name="q"
+                    type="search"
+                    placeholder="룰 내용 검색" /></label
+                ><label
+                  ><span class="sr-only">룰 범위</span
+                  ><select name="scope">
+                    <option value="">모든 범위</option>
+                    <option value="all">전체</option>
+                    <option value="repo">저장소</option>
+                    <option value="env">환경</option>
+                  </select></label
+                ><button
+                  class="button button-secondary button-compact"
+                  type="submit"
+                >
+                  검색
+                </button>
+              </form>
+              <div class="scope-guide">
+                <span><b>전체</b> 모든 저장소</span
+                ><span><b>저장소</b> 선택한 Git 저장소</span
+                ><span><b>환경</b> 같은 저장소의 prod·test 구분</span
+                ><span><b>PC 전용</b> 해당 PC에서 <code>hnd rule set pc</code></span>
+              </div>
+              <div id="rules-error" class="notice" role="alert" hidden></div>
+              <div
+                id="rules-list"
+                class="resource-list"
+                aria-live="polite"
+              ></div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="work"
+              hidden
+              aria-labelledby="work-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="work-title">작업</h2>
+                  <p>
+                    결정, 실패한 접근과 다음 할 일을 다음 에이전트에 넘깁니다.
+                  </p>
+                </div>
+                <button
+                  class="button button-primary"
+                  type="button"
+                  data-open-dialog="work-dialog"
+                >
+                  작업 추가
+                </button>
+              </div>
+              <form id="work-filter" class="filter-bar">
+                <div class="segmented" role="group" aria-label="작업 상태">
+                  <button
+                    type="submit"
+                    name="status"
+                    value="active"
+                    aria-pressed="true"
+                  >
+                    진행 중</button
+                  ><button
+                    type="submit"
+                    name="status"
+                    value="done"
+                    aria-pressed="false"
+                  >
+                    완료</button
+                  ><button
+                    type="submit"
+                    name="status"
+                    value="all"
+                    aria-pressed="false"
+                  >
+                    전체
+                  </button>
+                </div>
+                <label class="search-field"
+                  ><span class="sr-only">작업 검색</span
+                  ><input name="q" type="search" placeholder="작업 검색"
+                /></label>
+              </form>
+              <div id="work-error" class="notice" role="alert" hidden></div>
+              <div id="work-list" class="work-board" aria-live="polite"></div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="knowledge"
+              hidden
+              aria-labelledby="knowledge-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="knowledge-title">지식</h2>
+                  <p>오래 남길 결정과 배경을 직접 저장하고 다시 검색합니다.</p>
+                </div>
+                <button
+                  class="button button-primary"
+                  type="button"
+                  data-open-dialog="knowledge-dialog"
+                >
+                  지식 추가
+                </button>
+              </div>
+              <form id="knowledge-filter" class="filter-bar">
+                <label class="filter-select"
+                  ><span class="sr-only">지식 범위</span
+                  ><select name="scope">
+                    <option value="all-scopes">모든 범위</option>
+                    <option value="global">공통</option>
+                    <option value="repo">프로젝트</option>
+                    <option value="env">환경</option>
+                  </select></label
+                ><label class="filter-select" data-knowledge-filter-field="repository" hidden
+                  ><span class="sr-only">프로젝트</span
+                  ><select name="repository" disabled>
+                    <option value="">프로젝트 선택</option>
+                  </select></label
+                ><label class="filter-select" data-knowledge-filter-field="environment" hidden
+                  ><span class="sr-only">환경</span
+                  ><input
+                    name="environment"
+                    type="text"
+                    list="environment-options"
+                    placeholder="환경 이름"
+                    disabled /></label
+                >
+                <label class="search-field search-grow"
+                  ><svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle
+                      cx="10.5"
+                      cy="10.5"
+                      r="6.5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                    />
+                    <path
+                      d="m16 16 4 4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                    /></svg
+                  ><span class="sr-only">지식 검색</span
+                  ><input
+                    name="q"
+                    type="search"
+                    placeholder="제목, 태그, 본문에서 검색" /></label
+                ><button
+                  class="button button-secondary button-compact"
+                  type="submit"
+                >
+                  검색
+                </button>
+              </form>
+              <div class="inline-note inline-note-tight">
+                <strong>자동으로 대화를 수집하지 않습니다</strong
+                ><span
+                  >오래 남길 가치가 있는 내용만 사용자가 명시적으로
+                  저장합니다.</span
+                >
+              </div>
+              <div
+                id="knowledge-error"
+                class="notice"
+                role="alert"
+                hidden
+              ></div>
+              <div
+                id="knowledge-list"
+                class="knowledge-grid"
+                aria-live="polite"
+              ></div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="devices"
+              hidden
+              aria-labelledby="devices-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="devices-title">기기</h2>
+                  <p>이 계정으로 서버에 연결한 PC를 관리합니다.</p>
+                </div>
+                <button
+                  id="connect-device"
+                  class="button button-primary"
+                  type="button"
+                  aria-describedby="connect-device-help"
+                  disabled
+                >
+                  기기 확인 중…
+                </button>
+              </div>
+              <p
+                id="connect-device-help"
+                class="device-connect-help"
+                role="status"
+                hidden
+              >
+                이 브라우저에 보관함 키가 없어 연결 코드를 만들 수 없습니다.
+                먼저 보관함을 연결하세요.
+              </p>
+              <div class="info-callout">
+                <strong
+                  >기기 연결을 끊어도 로컬 사본은 지워지지 않습니다.</strong
+                ><span>폐기는 앞으로의 서버 접근만 막습니다.</span>
+              </div>
+              <div id="devices-error" class="notice" role="alert" hidden></div>
+              <button
+                id="devices-retry"
+                class="button button-secondary"
+                type="button"
+                hidden
+              >
+                기기 다시 확인
+              </button>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>이름</th>
+                      <th>종류</th>
+                      <th>등록</th>
+                      <th>마지막 요청</th>
+                      <th>상태</th>
+                      <th><span class="sr-only">동작</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="devices-table"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="revisions"
+              hidden
+              aria-labelledby="revisions-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="revisions-title">저장 기록</h2>
+                  <p>
+                    서버가 보관하는 암호화 저장 기록입니다. 인증된 계정이 같은
+                    보관함 키로 내용과 변경점을 엽니다.
+                  </p>
+                </div>
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  data-action="refresh"
+                  data-target="revisions"
+                >
+                  새로고침
+                </button>
+              </div>
+              <div
+                id="revisions-error"
+                class="notice"
+                role="alert"
+                hidden
+              ></div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>저장 시각</th>
+                      <th>크기</th>
+                      <th>기록 ID</th>
+                      <th>상태</th>
+                      <th>복구</th>
+                    </tr>
+                  </thead>
+                  <tbody id="revisions-table"></tbody>
+                </table>
+              </div>
+              <div class="inline-note">
+                <strong>복구는 연결된 PC에서 실행합니다</strong
+                ><span
+                  >클라이언트가 암호를 풀고 무결성을 확인한 뒤 기존 로컬 상태를
+                  백업합니다.</span
+                >
+              </div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="security"
+              hidden
+              aria-labelledby="security-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="security-title">보안</h2>
+                  <p>
+                    계정 로그인과 데이터 암호화는 서로 다른 보호 계층입니다.
+                  </p>
+                </div>
+              </div>
+              <div class="security-summary">
+                <div><strong>웹 계정</strong><span>패스키로 보호됨</span></div>
+                <span aria-hidden="true">+</span>
+                <div>
+                  <strong>HND 데이터</strong><span>보관함 키로 암호화</span>
+                </div>
+              </div>
+              <div class="settings-grid">
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>패스키</h3>
+                      <p>두 개 이상 등록하는 것을 권장합니다.</p>
+                    </div>
+                    <button
+                      id="add-passkey"
+                      class="button button-secondary button-compact"
+                      type="button"
+                    >
+                      추가
+                    </button>
+                  </div>
+                  <div id="passkeys-list" class="settings-list"></div>
+                </article>
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>웹 세션</h3>
+                      <p>로그인된 브라우저를 확인하고 종료합니다.</p>
+                    </div>
+                  </div>
+                  <div id="sessions-list" class="settings-list"></div>
+                </article>
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>복구 코드</h3>
+                      <p>재발급하면 기존 코드는 즉시 무효가 됩니다.</p>
+                    </div>
+                    <button
+                      id="renew-recovery"
+                      class="button button-secondary button-compact"
+                      type="button"
+                    >
+                      재발급
+                    </button>
+                  </div>
+                  <p class="panel-copy">
+                    복구 후에는 모든 웹 세션을 종료하고 새 패스키 등록을
+                    요구합니다.
+                  </p>
+                </article>
+                <article class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>브라우저 보관함</h3>
+                      <p>현재 브라우저의 로컬 키 상태입니다.</p>
+                    </div>
+                  </div>
+                  <div id="browser-vault-status" class="key-status">
+                    <span class="status-dot status-ok"></span
+                    ><strong>확인 중</strong>
+                  </div>
+                  <p class="panel-copy">
+                    보관함 키는 서버 계정이 관리합니다. 새 브라우저에서는 패스키로
+                    확인한 뒤 다시 받을 수 있고, 이 브라우저에는 서버 장애 때 사용할
+                    오프라인 사본이 보호되어 저장됩니다.
+                  </p>
+                </article>
+              </div>
+              <div id="security-error" class="notice" role="alert" hidden></div>
+            </section>
+
+            <section
+              class="app-view"
+              data-view="settings"
+              hidden
+              aria-labelledby="settings-title"
+            >
+              <div class="view-heading">
+                <div>
+                  <h2 id="settings-title">설정</h2>
+                  <p>계정과 이 서버의 사용 방식을 관리합니다.</p>
+                </div>
+              </div>
+              <form id="settings-form" class="settings-form panel">
+                <div class="panel-head">
+                  <div>
+                    <h3>계정</h3>
+                    <p>앱에 표시할 이름을 변경합니다.</p>
+                  </div>
+                </div>
+                <div class="field-grid">
+                  <div>
+                    <label for="settings-username">사용자 이름</label
+                    ><input
+                      id="settings-username"
+                      name="username"
+                      type="text"
+                      disabled
+                    />
+                  </div>
+                  <div>
+                    <label for="settings-display-name">표시 이름</label
+                    ><input
+                      id="settings-display-name"
+                      name="displayName"
+                      type="text"
+                      maxlength="80"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label for="settings-language">언어</label>
+                    <select id="settings-language" name="language">
+                      <option value="auto">브라우저 언어 자동</option>
+                      <option value="ko">한국어</option>
+                      <option value="en">English</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-actions">
+                  <button class="button button-primary" type="submit">
+                    저장
+                  </button>
+                </div>
+              </form>
+              <section id="account-management" class="settings-form panel" hidden>
+                <div class="panel-head">
+                  <div>
+                    <h3>사용자 관리</h3>
+                    <p>가입 코드를 만들고 이 작업 공간의 계정을 확인합니다.</p>
+                  </div>
+                </div>
+                <form id="account-invite-form" class="invite-account-form">
+                  <div class="field-grid">
+                    <div>
+                      <label for="account-invite-role">권한</label>
+                      <select id="account-invite-role" name="role">
+                        <option value="member">사용자</option>
+                        <option value="admin">관리자</option>
+                        <option id="account-owner-role" value="owner">소유자</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="account-invite-ttl">유효 시간</label>
+                      <select id="account-invite-ttl" name="ttlSeconds">
+                        <option value="3600">1시간</option>
+                        <option value="86400" selected>24시간</option>
+                        <option value="604800">7일</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="form-actions">
+                    <button class="button button-primary" type="submit">
+                      가입 코드 만들기
+                    </button>
+                  </div>
+                </form>
+                <div id="account-invite-secret" class="secret-box account-invite-secret" hidden>
+                  <code id="account-invite-code"></code>
+                  <button type="button" data-copy-target="account-invite-code">복사</button>
+                  <span id="account-invite-expiry"></span>
+                </div>
+                <p class="field-help account-invite-help">
+                  서버 주소와 코드를 초대할 사람에게 안전한 경로로 전달하세요. 코드는 한 번만 쓸 수 있습니다.
+                </p>
+                <div class="account-management-grid">
+                  <div>
+                    <h4>계정</h4>
+                    <div id="account-members-list" class="settings-list"></div>
+                  </div>
+                  <div>
+                    <h4>가입 코드 기록</h4>
+                    <div id="account-invites-list" class="settings-list"></div>
+                  </div>
+                </div>
+                <div id="account-management-error" class="notice" role="alert" hidden></div>
+              </section>
+              <form
+                id="server-settings-form"
+                class="settings-form panel owner-only"
+                hidden
+              >
+                <div class="panel-head">
+                  <div>
+                    <h3>서버 가입</h3>
+                    <p>새 사용자가 이 서버에 들어오는 방식을 정합니다.</p>
+                  </div>
+                </div>
+                <label for="signup-mode">가입 방식</label
+                ><select id="signup-mode" name="signupMode">
+                  <option value="open">공개 가입</option>
+                  <option value="invite">초대만 허용</option>
+                  <option value="first-user">첫 계정 이후 초대 전용</option>
+                  <option value="disabled">가입 닫기</option>
+                </select>
+                <label for="revision-retention">보관할 저장 기록 수</label
+                ><input
+                  id="revision-retention"
+                  name="revisionRetention"
+                  type="number"
+                  min="1"
+                  max="10000"
+                />
+                <div class="form-actions">
+                  <button class="button button-primary" type="submit">
+                    서버 설정 저장
+                  </button>
+                </div>
+              </form>
+              <div id="settings-error" class="notice" role="alert" hidden></div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="rule-dialog" class="form-dialog">
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="rule-form" class="dialog-form">
+        <input name="id" type="hidden" />
+        <div class="dialog-head">
+          <h2>룰 추가</h2>
+          <p>범위가 좁은 룰일수록 뒤에 적용됩니다.</p>
+        </div>
+        <label
+          >범위<select
+            name="scope"
+            required
+            aria-describedby="rule-scope-help">
+            <option value="all">전체</option>
+            <option value="repo">저장소</option>
+            <option value="env">환경</option>
+          </select>
+          <small id="rule-scope-help" class="field-help" aria-live="polite"
+            >모든 저장소와 환경에 적용됩니다.</small
+          ></label
+        >
+        <div class="field-grid rule-scope-fields" hidden>
+          <label data-rule-field="repository" hidden
+            >저장소<select name="repository" disabled>
+              <option value="">저장소 선택</option>
+            </select>
+            <small class="field-help"
+              >PC에서 연결하고 동기화한 Git 저장소만 표시됩니다.</small
+            ></label
+          ><label data-rule-field="environment" hidden
+            >환경<input
+              name="environment"
+              type="text"
+              list="environment-options"
+              placeholder="prod, test 등"
+              disabled />
+            <small class="field-help"
+              >적용할 서버에서 <code id="rule-environment-command">hnd env set 이름</code>을 한 번 실행합니다.</small
+            ></label>
+        </div>
+        <datalist id="environment-options">
+          <option value="default"></option>
+          <option value="dev"></option>
+          <option value="test"></option>
+          <option value="staging"></option>
+          <option value="prod"></option>
+        </datalist>
+        <label
+          >룰 내용<textarea
+            name="content"
+            rows="9"
+            required
+            placeholder="에이전트가 따라야 할 내용을 적으세요."
+          ></textarea>
+        </label>
+        <div class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            data-close-dialog
+          >
+            취소</button
+          ><button class="button button-primary" type="submit">저장</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="project-dialog" class="form-dialog">
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="project-form" class="dialog-form">
+        <input name="id" type="hidden" />
+        <div class="dialog-head">
+          <h2>프로젝트 설정</h2>
+          <p>웹에 표시할 이름과 설명입니다. Git 원격 식별 정보는 자동으로 유지됩니다.</p>
+        </div>
+        <label
+          >프로젝트 이름<input
+            name="name"
+            type="text"
+            maxlength="100"
+            required /></label
+        ><label
+          >설명<textarea
+            name="description"
+            rows="4"
+            maxlength="500"
+            placeholder="이 프로젝트의 역할과 관리 목적"
+          ></textarea>
+        </label>
+        <div class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            data-close-dialog
+          >
+            취소</button
+          ><button class="button button-primary" type="submit">저장</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="work-dialog" class="form-dialog form-dialog-wide">
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="work-form" class="dialog-form">
+        <input name="id" type="hidden" />
+        <div class="dialog-head">
+          <h2>작업 추가</h2>
+          <p>Git 상태만으로 알 수 없는 판단과 다음 행동을 남깁니다.</p>
+        </div>
+        <label
+          >작업 이름<input
+            name="name"
+            type="text"
+            maxlength="100"
+            required /></label
+        ><label
+          >저장소<select name="repository" required>
+            <option value="">저장소 선택</option>
+          </select></label
+        ><label>목표<textarea name="goal" rows="2" required></textarea></label>
+        <div class="field-grid">
+          <label>현재 상태<textarea name="current" rows="4"></textarea></label
+          ><label>다음 할 일<textarea name="next" rows="4"></textarea></label>
+        </div>
+        <div class="field-grid">
+          <label
+            >결정과 이유<textarea name="decision" rows="4"></textarea></label
+          ><label
+            >실패한 접근<textarea name="rejected" rows="4"></textarea>
+          </label>
+        </div>
+        <div class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            data-close-dialog
+          >
+            취소</button
+          ><button class="button button-primary" type="submit">저장</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="knowledge-dialog" class="form-dialog form-dialog-wide">
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="knowledge-form" class="dialog-form">
+        <input name="id" type="hidden" />
+        <div class="dialog-head">
+          <h2>지식 추가</h2>
+          <p>어디에서 다시 사용할 지식인지 범위를 함께 정합니다.</p>
+        </div>
+        <label
+          >범위<select
+            name="scope"
+            required
+            aria-describedby="knowledge-scope-help">
+            <option value="global">공통</option>
+            <option value="repo">프로젝트</option>
+            <option value="env">환경</option>
+          </select>
+          <small id="knowledge-scope-help" class="field-help" aria-live="polite"
+            >모든 프로젝트에서 함께 찾을 수 있습니다.</small
+          ></label
+        >
+        <div class="field-grid knowledge-scope-fields" hidden>
+          <label data-knowledge-field="repository" hidden
+            >프로젝트<select name="repository" disabled>
+              <option value="">프로젝트 선택</option>
+            </select>
+            <small class="field-help"
+              >PC에서 연결하고 동기화한 프로젝트만 표시됩니다.</small
+            ></label
+          ><label data-knowledge-field="environment" hidden
+            >환경<input
+              name="environment"
+              type="text"
+              list="environment-options"
+              placeholder="prod, test 등"
+              disabled />
+            <small class="field-help"
+              >선택한 프로젝트 안에서 같은 환경에만 연결됩니다.</small
+            ></label>
+        </div>
+        <label
+          >제목<input
+            name="title"
+            type="text"
+            maxlength="160"
+            required /></label
+        ><label
+          >태그<input
+            name="tags"
+            type="text"
+            placeholder="쉼표로 구분: auth, security, decision" /></label
+        ><label
+          >본문<textarea name="content" rows="12" required></textarea>
+        </label>
+        <div class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            data-close-dialog
+          >
+            취소</button
+          ><button class="button button-primary" type="submit">저장</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="device-dialog"
+      class="form-dialog"
+      aria-labelledby="device-dialog-title"
+    >
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <div class="dialog-form">
+        <div class="dialog-head">
+          <h2 id="device-dialog-title">PC 연결</h2>
+          <p>이 계정에서 코드를 만들고 연결할 PC에서 한 번 사용합니다.</p>
+        </div>
+        <div class="numbered-instructions">
+          <div>
+            <span>1</span>
+            <div>
+              <strong>실행할 PC 선택</strong>
+              <div class="platform-select device-platform-select">
+                <span id="device-platform-label">운영체제</span>
+                <div
+                  class="segmented platform-picker"
+                  role="group"
+                  aria-labelledby="device-platform-label"
+                >
+                  <button
+                    type="button"
+                    data-device-platform="linux"
+                    aria-pressed="false"
+                  >
+                    Linux
+                  </button>
+                  <button
+                    type="button"
+                    data-device-platform="windows"
+                    aria-pressed="false"
+                  >
+                    Windows
+                  </button>
+                  <button
+                    type="button"
+                    data-device-platform="macos"
+                    aria-pressed="false"
+                  >
+                    macOS
+                  </button>
+                </div>
+              </div>
+              <div class="platform-select device-platform-select">
+                <span id="device-install-mode-label">설치 상태</span>
+                <div
+                  class="segmented platform-picker"
+                  role="group"
+                  aria-labelledby="device-install-mode-label"
+                >
+                  <button
+                    type="button"
+                    data-device-install-mode="install"
+                    aria-pressed="false"
+                  >
+                    처음 설치
+                  </button>
+                  <button
+                    type="button"
+                    data-device-install-mode="existing"
+                    aria-pressed="false"
+                  >
+                    이미 설치됨
+                  </button>
+                </div>
+              </div>
+              <small id="device-platform-help"
+                >명령을 실행할 PC의 운영체제와 설치 상태를 선택하세요.</small
+              >
+              <small>브라우저가 아니라 실제 터미널을 연 PC를 기준으로 선택합니다.</small>
+            </div>
+          </div>
+          <div>
+            <span>2</span>
+            <div>
+              <strong>PC 연결 명령 만들기</strong>
+              <small
+                >PC 이름을 정한 뒤 패스키로 확인하면, 15분 동안 유효한 실행 명령을 만듭니다.</small
+              >
+              <div class="device-name-row device-name-row-single">
+                <label for="device-name"
+                  >PC 이름<input
+                    id="device-name"
+                    type="text"
+                    value="desktop"
+                    maxlength="80"
+                  />
+                </label>
+                <button
+                  id="create-device-invitation"
+                  class="button button-primary"
+                  type="button"
+                >
+                  연결 명령 만들기
+                </button>
+                <button
+                  id="cancel-device-auth"
+                  class="button button-secondary"
+                  type="button"
+                  hidden
+                >
+                  패스키 인증 취소
+                </button>
+              </div>
+              <small>패스키 창을 닫아도 다시 누르면 됩니다. 응답이 멈출 때만 인증을 취소하세요.</small>
+              <div id="device-invitation-wrap" class="secret-box connection-code-secret" hidden>
+                <code id="device-invitation"></code
+                ><button type="button" data-copy-target="device-invitation">
+                  복사</button
+                ><span id="device-invitation-expiry"></span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <span>3</span>
+            <div>
+              <strong>새 PC 터미널에서 실행</strong>
+              <small
+                >연결 명령을 만든 뒤 아래 블록 전체를 한 번 복사해 실행하세요. 프로젝트는 이후 Git 저장소에서 AI 세션을 열 때 자동 등록됩니다.</small
+              >
+              <div class="code-block compact-code">
+                <pre id="device-join-command"><code></code></pre>
+                <button
+                  class="copy-button"
+                  type="button"
+                  data-copy-target="device-join-command"
+                  disabled
+                >
+                  복사
+                </button>
+              </div>
+            </div>
+          </div>
+          <div>
+            <span>4</span>
+            <div>
+              <strong>서버 연결 확인</strong>
+              <small
+                >명령 실행이 끝나면 새 PC가 기기 목록에 등록됐는지 자동으로 확인합니다.</small
+              >
+              <div
+                id="device-connection-status"
+                class="connection-status device-connection-status"
+                data-state="idle"
+              >
+                <span
+                  id="device-connection-spinner"
+                  class="spinner spinner-small"
+                  aria-hidden="true"
+                  hidden
+                ></span>
+                <svg
+                  id="device-connection-success"
+                  class="device-connection-success"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  hidden
+                >
+                  <path d="m5 12 4 4L19 6"></path>
+                </svg>
+                <div aria-live="polite" aria-atomic="true">
+                  <strong id="device-connection-status-title"
+                    >연결 명령 대기</strong
+                  ><span id="device-connection-status-copy"
+                    >연결 명령을 만들면 서버 확인을 시작합니다.</span
+                  >
+                </div>
+                <button
+                  id="check-device-connection"
+                  class="button button-secondary button-compact"
+                  type="button"
+                  disabled
+                  hidden
+                >
+                  지금 확인
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="inline-note">
+          <strong>로그인한 계정이 모든 PC의 연결 기준입니다</strong
+          ><span
+            >서버가 계정의 암호화 키를 보호해 관리하므로 첫 PC나 기존 PC의
+            승인이 필요하지 않습니다. PC를 해제하면 해당 기기의 서버 접근만
+            즉시 차단됩니다.</span
+          >
+        </div>
+        <div id="device-dialog-notice" class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button class="button button-primary" type="button" data-close-dialog>
+            확인
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="vault-reset-dialog"
+      class="form-dialog"
+      aria-labelledby="vault-reset-dialog-title"
+    >
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="vault-reset-form" class="dialog-form">
+        <div class="dialog-head">
+          <h2 id="vault-reset-dialog-title">새 보관함으로 시작</h2>
+          <p>이전 방식의 로컬 키를 복구할 방법이 없을 때만 선택하세요.</p>
+        </div>
+        <div class="vault-reset-warning" role="note">
+          <strong>이 작업은 되돌릴 수 없습니다.</strong>
+          <ul>
+            <li>서버의 기존 암호문과 모든 저장 기록을 삭제합니다.</li>
+            <li>연결된 PC가 0대여야 초기화할 수 있습니다.</li>
+            <li>다른 기기의 로컬 사본과 내보낸 파일은 지울 수 없습니다.</li>
+            <li>서버 계정과 이 브라우저에 새 키와 빈 보관함을 만듭니다.</li>
+          </ul>
+        </div>
+        <label for="vault-reset-confirmation">
+          계속하려면 <strong>보관함 초기화</strong>를 정확히 입력하세요.
+        </label>
+        <input
+          id="vault-reset-confirmation"
+          name="confirmation"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          aria-describedby="vault-reset-confirmation-help"
+          required
+        />
+        <small id="vault-reset-confirmation-help" class="field-help">
+          공백을 포함해 다른 글자가 있으면 진행할 수 없습니다.
+        </small>
+        <div id="vault-reset-notice" class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            data-close-dialog
+          >
+            취소
+          </button>
+          <button
+            id="vault-reset-submit"
+            class="button button-danger"
+            type="submit"
+            disabled
+          >
+            기존 데이터 삭제 후 시작
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="recovery-dialog" class="form-dialog">
+      <form id="recovery-confirm-form" class="dialog-form">
+        <div class="dialog-head">
+          <h2>새 복구 코드를 저장하세요</h2>
+          <p>
+            기존 코드는 더 이상 사용할 수 없습니다. 아래 새 코드는 이 창에서만
+            표시됩니다.
+          </p>
+        </div>
+        <pre
+          id="app-recovery-codes"
+          class="recovery-codes"
+          tabindex="0"
+          aria-label="새 복구 코드"
+        ></pre>
+        <div class="button-row">
+          <button
+            id="app-download-recovery"
+            class="button button-secondary"
+            type="button"
+          >
+            파일로 저장
+          </button>
+          <button
+            class="button button-secondary"
+            type="button"
+            data-copy-target="app-recovery-codes"
+          >
+            복사
+          </button>
+        </div>
+        <label class="confirm-check">
+          <input id="app-recovery-confirmed" type="checkbox" />
+          <span>새 복구 코드를 안전한 곳에 저장했습니다.</span>
+        </label>
+        <div id="app-recovery-error" class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button
+            id="app-recovery-finish"
+            class="button button-primary"
+            type="submit"
+            disabled
+          >
+            저장 완료
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog">
+        <div class="confirm-icon" aria-hidden="true">!</div>
+        <h2 id="confirm-title">확인</h2>
+        <p id="confirm-message"></p>
+        <div class="form-actions">
+          <button type="submit" class="button button-secondary" value="cancel">
+            취소</button
+          ><button
+            type="submit"
+            id="confirm-accept"
+            class="button button-primary"
+            value="confirm"
+          >
+            계속
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <div
+      id="toast-region"
+      class="toast-region"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+    <script type="module" src="/web/app.js"></script>
+  </body>
+</html>

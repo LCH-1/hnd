@@ -1,0 +1,13 @@
+**
+!package.json
+!package-lock.json
+!LICENSE
+!README.md
+!bin/
+!bin/hnd-server.mjs
+!src/
+!src/**
+!dist/
+!dist/connector-release/
+!dist/connector-release/manifest.json
+!dist/connector-release/*.hndb
