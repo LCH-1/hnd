@@ -25,8 +25,8 @@
    `SessionStart`가 짧은 제한 시간 안에서 원격 변경을 확인하고, 성공 여부와
    관계없이 검증된 로컬 캐시를 합성해 세션을 시작한다. 단순 네트워크 실패로
    처리하지 못한 변경은 pending으로 남기고 다음 훅이 재시도한다.
-   각 사용자 입력 직전에도 짧게 동기화하고, 유효 룰·선택한 활성 handoff·자동
-   checkpoint를 합친 세션별 Live Context revision이 달라진 경우에만 최신 전체
+   각 사용자 입력 직전에도 짧게 동기화하고, 유효 룰·선택한 활성 handoff·관련
+   knowledge·자동 checkpoint를 합친 세션별 Live Context revision이 달라진 경우에만 최신 전체
    snapshot을 전달한다. `hnd sync auto on/off/status`로 자동 동기화를 관리한다.
 2. 공개 npm 패키지 `@lch-1/hnd`는 Windows/macOS/Linux에 고정 launcher와
    검증된 fallback runtime을 최초 한 번 설치한다. lifecycle 설치 script와
@@ -46,20 +46,24 @@
    저장소 등록과 materialize를 자동 처리한다. 세 에이전트 모두 Stop과 SessionEnd 훅으로
    브랜치, HEAD, 마지막 commit과 working-tree 변경 경로를 자동 checkpoint에
    기록한다. 동일한 Git fingerprint는 다시 쓰지 않는다. `Stop`과
-   `SessionEnd`는 checkpoint를 로컬에 확정한 뒤 원격 동기화를 시도한다. 자동
+   `SessionEnd`, Claude의 `PreCompact`는 checkpoint를 로컬에 확정한 뒤 원격 동기화를 시도한다. 자동
    checkpoint와 사람이 작성한 handoff는 서로 덮어쓰지 않는다.
 4. 정책은 `global -> repo -> 선택한 environment -> local override` 순으로 한
    문서에 합성한다. local override는 가장 뒤에 붙고 동기화하지 않는다.
-   PLAN의 별도 `guard.md` 역할은 이 local override가 맡는다. PLAN의
-   repo-subpath 계층은 현재 구현 범위에서 보류했다.
-5. handoff는 정책이 아닌 구조화된 작업 상태다. 새 handoff는 현재
+   PLAN의 별도 `guard.md` 역할은 이 local override가 맡는다. 기존 범위별 단일
+   정책은 호환성을 위해 유지하고, 이름 있는 정책 record는 초안/사용 중, 자동/수동,
+   경로와 파일 glob 조건을 가진다. 경로는 현재 prompt와 Git checkpoint의 변경
+   경로로 결정적으로 판정하며, 경로를 아직 알 수 없으면 조건 자체를 정책에 명시한다.
+5. handoff는 정책이 아닌 구조화된 작업 상태다. 우선순위, workflow 상태, 상위·선행
+   작업, 준비 여부, 만료되는 세션 선점, 차단 원인·해제 조건과 항목별 감사 기록을 가진다. 새 handoff는 현재
    worktree/branch에 자동 선택되고, `hnd work use`로 선택을 바꾼다. 동기화로
    들어온 여러 active handoff 중 로컬 선택이 없으면 임의로 고르지 않고 선택
    목록을 주입한다. 만료된 handoff는 본문을 자동 주입하지 않고 stale 알림만
    넣는다. 결정, 실패한 접근, 변경 파일, 검증, 다음 작업과 열린 질문은
    명시적으로 저장한다.
-6. 클라이언트가 최종 바이트를 결정한다. 모든 계층과 handoff를 합성한 결과가
-   기본 32 KiB를 넘으면 계층 중간을 자르지 않고 전체 합성을 거부한다. 서버가
+6. 클라이언트가 최종 바이트를 결정한다. 기본 32 KiB 예산은 필수 정책, 활성 handoff,
+   관련 knowledge(최대 5개/6 KiB), checkpoint(4 KiB) 순으로 배분한다. 블록 중간은
+   자르지 않고 후순위 정보 블록을 생략하며, 필수 정책이 한도를 넘으면 합성을 거부한다. 서버가
    암호화 키를 관리하더라도 에이전트별 합성과 용량 절단은 클라이언트 책임으로
    유지한다.
 7. 저장소의 주 식별자는 hnd가 발급한 UUID다. credential을 제거해 정규화한
@@ -104,6 +108,11 @@
    지시를 합성한다. 기존 룰이나 동기화 snapshot을 수정하지 않고 global, project,
    environment 각각의 정확한 입력·출력 쌍을 현재 또는 새 에이전트 세션에서
    확인하게 한다. `hnd rule test stop`으로 즉시 제거할 수 있다.
+12. knowledge JSON은 원본이고 `cache/knowledge-fts.sqlite`는 언제든 재생성 가능한
+   device-local FTS5 색인이다. 지식은 유형·상태·승인·고정·출처·관계·피드백·변경
+   이력을 가지며, pending/rejected와 contradicted/retired/superseded 항목은 자동
+   주입하지 않는다. 가져오기는 기본 preview이고 모든 후보는 review inbox로 간다.
+   JSON, Markdown, OKF 형태의 전체 또는 범위별 내보내기를 지원한다.
 
 따라서 PLAN의 서버측 평문 합성과 Go 단일 바이너리 설계는 제외하고, 중앙 영속
 계층에는 SQLite를 채택한다. 이것은 결제·공개 SaaS 운영 기능을 갖춘 100명용
@@ -161,8 +170,9 @@ tenant 조건은 우발적인 교차 접근을 줄인다.
 - `policies/global.md`
 - `repositories.json`
 - `repositories/**` — 저장소 메타데이터, repo/environment 정책, active/archive
-  handoff
-- `knowledge/**` — 사용자가 명시적으로 남긴 장기 지식
+  handoff와 이름 있는 저장소/환경 룰
+- `rules/**` — 이름 있는 전체 룰
+- `knowledge/**` — 승인된 지식과 검토 대기 후보
 
 다음은 device-local이라 동기화하지 않는다.
 
@@ -174,11 +184,11 @@ tenant 조건은 우발적인 교차 접근을 줄인다.
 
 자동 sync는 `SessionStart`에서 짧게 pull/reconcile한 뒤 로컬 Live Context를
 합성한다. 사용자 입력 직전에는 다시 짧게 sync하고 `all`, `repo`, `env`, `pc`
-정책, 선택한 활성 handoff와 자동 checkpoint 전체로 만든 세션별 SHA-256 revision을
+정책, 선택한 활성 handoff, 현재 prompt와 관련된 승인 knowledge, 자동 checkpoint로 만든 세션별 SHA-256 revision을
 비교한다. revision이 달라졌을 때만 최신 전체 snapshot을 새로 전달하고, 각
 snapshot은 이전 HND snapshot을 대체한다고 명시한다. 새 세션과 resume, clear,
-compact에서는 최신 snapshot을 강제로 한 번 전달한다. 장기 knowledge는 검색형
-데이터로 남겨 매 snapshot에 자동 포함하지 않는다.
+compact에서는 최신 snapshot을 강제로 한 번 전달한다. 전체 knowledge 목록은 싣지
+않고 로컬 FTS5에서 고정 항목과 관련 항목만 선택한다.
 
 Claude와 Codex는 prompt hook의 추가 context를 사용한다. vendor 대화 기록에서
 과거 HND 메시지를 물리적으로 삭제할 수는 없으므로 가장 최근에 전달된 revision을
@@ -229,7 +239,7 @@ snapshot으로 저장된다. restore는 모든 입력을 검증한 뒤 journal�
   runtime을 짧게 background에서 확인하며 상시 daemon은 두지 않는다. 필요하면
   `hnd update apply`로 즉시 적용하고 `hnd update rollback`으로 검증된 이전 runtime에
   되돌린다.
-- repo-subpath 정책, 조직 공유와 승인 workflow도 후속 범위다.
+- 조직 단위 공유·승인 workflow와 외부 에이전트 adapter는 후속 범위다.
 
 100명용 서비스로 확장하려면 tenant 격리 테스트와 데이터 모델을 다시 검토하고,
   managed database/object storage, HA, migration, observability, abuse 대응, 계정 수명

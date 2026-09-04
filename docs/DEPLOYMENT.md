@@ -139,20 +139,19 @@ PC마다 설치합니다. 공개 패키지는 `@lch-1/hnd`이고 설치 후 실�
 모든 플랫폼에 Node.js 24.12 이상, 함께 설치되는 npm, Git이 필요합니다.
 
 Windows 10/11은 관리자 권한, WSL이나 Git Bash 없이 PowerShell에서 설치합니다.
-`npm.cmd`를 사용해 PowerShell script 실행 정책의 영향을 피합니다.
+웹에서 만드는 명령은 사용자가 익숙한 `npm`, `hnd` 이름을 그대로 사용합니다.
 
 ```powershell
-npm.cmd install --global '@lch-1/hnd@0.2.2'
-if ($LASTEXITCODE -ne 0) { throw 'hnd 설치에 실패했습니다.' }
-hnd.cmd --version
-if ($LASTEXITCODE -ne 0) { throw '설치된 hnd를 실행하지 못했습니다.' }
+npm install --global '@lch-1/hnd@0.2.2'
+hnd --version
 ```
 
-macOS와 Linux는 터미널에서 같은 패키지를 설치합니다. system Node의 global
-prefix에서 권한 오류가 나면 `sudo npm` 대신 Node 버전 관리자를 사용하세요.
+macOS와 Linux는 터미널에서 같은 패키지를 설치합니다. 배포판의 system Node가
+`/usr/local`을 사용하는 경우 웹은 권한 오류를 피하도록 `sudo -H npm` 명령을
+제공합니다. nvm·Volta처럼 사용자 소유 Node에서는 일반 `npm`을 사용합니다.
 
 ```sh
-npm install --global '@lch-1/hnd@0.2.2' &&
+sudo -H npm install --global '@lch-1/hnd@0.2.2'
 hnd --version
 ```
 
@@ -193,37 +192,24 @@ runtime이 import되지 않으면 이전 버전, 그마저 없으면 npm에 내�
 코드를 발급합니다. 최초 PC와 추가 PC 모두 같은 절차를 사용합니다. 기존 PC가
 켜져 있거나 특정 PC에서 초대를 만들거나 키 파일을 내려받을 필요가 없습니다.
 
-설정 화면은 Windows/macOS/Linux별 명령을 자동으로 만듭니다. 다음
-macOS·Linux 예시는 stdin을 파이프로 닫으므로 별도로 Ctrl-D를 입력할 필요가
-없습니다.
+설정 화면은 Linux, Windows, macOS 순서로 운영체제별 명령을 자동으로 만듭니다.
+아래처럼 발급 코드, 연결, 에이전트 설정을 짧은 블록으로 실행합니다. 프로젝트는
+이후 실제 Git 저장소에서 첫 AI 세션을 시작할 때 자동 등록됩니다.
 
 ```sh
-printf '%s\n' '웹에서 만든 연결 코드를 붙여넣고 Enter를 누르세요.' >&2
-IFS= read -r connection_code
-if printf '%s\n' "$connection_code" | hnd connect \
-    --url https://hnd.example.com \
-    --code-stdin \
-    --name laptop
-then
-  printf '%s\n' 'PC 연결을 확인했습니다.'
-else
-  printf '%s\n' 'PC 연결 실패: 이후 단계를 중단했습니다.' >&2
-fi
-unset connection_code
+printf '%s\n' '웹에서 만든 일회용 코드' | hnd connect \
+  --url https://hnd.example.com \
+  --code-stdin \
+  --name laptop
+hnd setup
 ```
 
-연결 성공을 확인한 경우에만 실제 Git 저장소에서 다음 블록을 실행합니다.
+직접 미리 등록하고 싶을 때만 실제 Git 저장소에서 다음 명령을 실행합니다.
 
 ```sh
-repo=/path/to/repository
-if cd -- "$repo" && \
-  hnd init --env laptop && \
-  hnd setup --agents all --dry-run && \
-  hnd setup --agents all && \
-  hnd doctor
-then
-  printf '%s\n' '저장소 자동화 설치를 확인했습니다.'
-fi
+cd /path/to/repository
+hnd init
+hnd doctor
 ```
 
 `setup`은 기존 에이전트 설정을 병합하고 hnd가 관리하는 훅과 skill만 추가합니다.

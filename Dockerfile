@@ -10,13 +10,13 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 COPY --chown=node:node package.json package-lock.json LICENSE README.md ./
-COPY --chown=node:node bin/hnd-server.mjs ./bin/hnd-server.mjs
-COPY --chown=node:node src ./src
-COPY --chown=node:node dist/connector-release ./dist/connector-release
-
 RUN npm ci --omit=dev \
     && mkdir /data \
     && chown node:node /data
+
+COPY --chown=node:node bin/hnd-server.mjs ./bin/hnd-server.mjs
+COPY --chown=node:node src ./src
+COPY --chown=node:node dist/connector-release ./dist/connector-release
 
 USER node
 EXPOSE 8787

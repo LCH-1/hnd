@@ -5,11 +5,11 @@
 없는 동안에는 마지막 로컬 캐시로 계속 작업하고 연결이 복구되면 자동으로
 동기화합니다.
 
-- 룰: 전체, 저장소, 환경, 이 PC 순서로 합성
+- 룰: 전체, 저장소, 환경, 이 PC 순서와 초안·수동·경로별 조건으로 합성
 - 자동 진행 저장: 세션 응답 종료와 세션 종료 시 Git 상태 체크포인트 기록
 - 수동 보강: 결정 이유, 실패한 방법, 다음 할 일을 구조화해서 기록
 - 자동 동기화: 로컬 변경과 세션 훅이 중앙 서버에 연결하고 실패한 변경은 pending 처리
-- 장기 지식: 사용자가 남기기로 한 메모를 공통·프로젝트·환경 범위로 저장하고 검색
+- 장기 지식: 유형·출처·검토 상태를 가진 지식을 공통·프로젝트·환경별로 저장하고 관련 항목만 자동 선택
 - 중앙 저장: 계정·보호된 보관함 키·암호화 snapshot을 서버에서 함께 관리
 - 오프라인 동작: 서버가 꺼져도 마지막 로컬 캐시로 계속 작업하고 다음 훅에서 재시도
 
@@ -236,6 +236,17 @@ hnd rule set pc --text "이 장치에서는 배포하지 않는다."
 
 hnd rule list
 hnd rule show repo
+
+# 이름 있는 조건부 룰: 초안으로 검토한 뒤 사용
+hnd rule add "SQL 마이그레이션" --scope repo --file ./AGENTS.md \
+  --path 'database/**' --file-pattern '**/*.sql' --draft
+hnd rule modules
+hnd rule activate RULE_ID
+
+# 평소에는 제외하고 이 PC에서 필요할 때만 켜는 룰
+hnd rule add "릴리스 점검" --scope repo --text "릴리스 체크리스트를 확인한다." --manual
+hnd rule invoke RULE_ID
+hnd rule clear RULE_ID
 ```
 
 실제 에이전트가 세 범위의 룰을 받았는지 기존 룰을 건드리지 않고 확인하려면 현재
@@ -289,7 +300,8 @@ hnd auto on
 ### 작업 인계
 
 ```sh
-hnd work new auth-refresh --goal "refresh token 교체를 안전하게 완료"
+hnd work new auth-refresh --goal "refresh token 교체를 안전하게 완료" \
+  --priority high --claim codex-session
 
 hnd work save auth-refresh \
   --current "구현 완료, rollback 테스트가 남음" \
@@ -300,8 +312,11 @@ hnd work save auth-refresh \
   --next "rollback 통합 테스트 추가"
 
 hnd work show auth-refresh
-hnd work list
+hnd work list --ready
 hnd work use auth-refresh
+hnd work block auth-refresh --reason "테스트 자격증명 대기" \
+  --unblock-when "staging 자격증명 발급"
+hnd work unblock auth-refresh
 hnd work done auth-refresh
 ```
 
@@ -314,7 +329,7 @@ hnd work done auth-refresh
 # 명시적으로 저장
 hnd know add "패스키와 암호화 경계" \
   --text "패스키는 계정 인증용이고 서버 master key는 tenant vault key 보호용이다." \
-  --tag 보안 --tag 설계
+  --tag 보안 --tag 설계 --type architecture --pinned
 
 # 현재 Git 프로젝트 전체에 저장
 hnd know add "API 오류 응답 원칙" --scope repo \
@@ -332,13 +347,34 @@ hnd know list --scope repo
 hnd know show KNOWLEDGE_ID
 hnd know edit KNOWLEDGE_ID --title "패스키와 암호화 경계"
 hnd know remove KNOWLEDGE_ID
+
+# 기존 룰 문서나 과거 세션은 먼저 후보를 확인한 뒤 검토함에 넣기
+hnd know import ./CLAUDE.md
+hnd know import ./CLAUDE.md --apply --scope repo
+hnd know import-session ~/.claude/projects/example/session.jsonl --apply --scope repo
+
+# 세션 종료 시 마지막 응답에서 후보 만들기 (선택 기능, 기본 꺼짐)
+hnd know suggest on
+hnd know list --approval pending
+hnd know review KNOWLEDGE_ID approve
+
+# 이동·백업용 내보내기
+hnd know export --format markdown --output knowledge.md
+hnd know export --format json --output knowledge.json
+hnd know export --format okf --output knowledge.okf.json
 ```
 
-지식은 사용자가 저장한 항목만 `~/.hnd/knowledge/`에 남고 중앙 동기화 대상에
-포함됩니다. `all`은 계정의 모든 프로젝트에서 찾는 공통 지식, `repo`는 현재 Git
-프로젝트 전체, `env`는 현재 프로젝트의 선택한 환경 범위입니다. 웹에서도 같은 세
-범위를 선택하고 프로젝트 상세에서 연결된 지식을 확인할 수 있습니다. 에이전트 대화
-전문이나 소스 코드를 자동으로 수집하지 않습니다.
+지식 원본은 `~/.hnd/knowledge/`의 JSON이며 중앙 동기화 대상입니다. `all`은 계정의
+모든 프로젝트에서 찾는 공통 지식, `repo`는 현재 Git 프로젝트 전체, `env`는 현재
+프로젝트의 선택한 환경 범위입니다. 로컬 SQLite FTS5 색인은 검색을 위한 파생
+캐시라 서버가 없어도 같은 방식으로 검색하며 필요하면 원본에서 다시 만듭니다.
+
+지식 유형은 `note`, `decision`, `solution`, `failure`, `caution`, `command`,
+`architecture`, `runbook`입니다. 출처 파일의 해시가 달라지면 에이전트에게
+`review needed`로 표시하고, pending/rejected 또는 contradicted/retired/superseded
+항목은 자동 전달하지 않습니다. 현재 질문과 관련된 승인 지식 최대 5개(6 KiB)와
+고정 지식만 Live Context에 포함하므로 전체 지식이 누적되지 않습니다. 대화 전문과
+소스 코드는 자동 수집하지 않으며 세션 제안도 사용자가 켜고 후보를 승인해야 합니다.
 
 ## 중앙 서버와 자동 동기화
 
@@ -363,12 +399,13 @@ hnd sync auto on
    자동 등록한 뒤 로컬 캐시의 context를 에이전트에 전달합니다. 서버가 느리거나
    꺼져 있어도 세션 시작을 막지 않습니다.
 2. 각 사용자 입력 직전에는 짧게 동기화한 뒤 유효 룰, 선택한 활성 작업과 자동
-   체크포인트를 합친 Live Context revision을 현재 세션의 마지막 revision과
+   현재 질문에 관련된 승인 지식과 체크포인트를 합친 Live Context revision을 현재 세션의 마지막 revision과
    비교합니다. 달라진 경우에만 그 시점의 최신 전체 snapshot을 전달하며, 같은
    revision은 반복하지 않습니다. 새 세션뿐 아니라 `resume`, `clear`, `compact`
    시점에도 최신 snapshot을 한 번 강제로 확인합니다.
 3. `Stop`과 `SessionEnd`는 Git 체크포인트를 로컬에 저장한 뒤 동기화를
-   시도합니다.
+   시도합니다. Claude는 컨텍스트 압축 직전 `PreCompact`에서도 같은 안전
+   체크포인트를 남깁니다.
 4. 네트워크 장애로 전송하지 못한 변경은 로컬에 pending으로 남고, 다음
    세션 훅이 자동으로 재시도합니다.
 
@@ -381,7 +418,7 @@ hnd sync auto on
 `.cursor/rules/50-hnd.mdc` 파일 자체를 최신 snapshot으로 교체합니다. HND가 각
 에이전트의 과거 대화 메시지를 삭제할 수는 없으므로, 매우 긴 세션은 에이전트의
 `compact` 기능을 사용하면 다음 훅이 최신 snapshot을 다시 전달합니다. 명시적으로
-저장한 장기 지식은 모든 입력에 싣지 않고 검색할 때만 읽습니다.
+저장한 장기 지식은 모든 입력에 싣지 않고 현재 입력과 관련된 승인 항목만 선택합니다.
 
 따라서 PC B가 꺼져 있어도 PC A에는 영향이 없습니다. 중앙 서버가 일시적으로
 꺼져도 룰 주입, 자동 체크포인트, 수동 작업 기록은 마지막 로컬 캐시를 기준으로
