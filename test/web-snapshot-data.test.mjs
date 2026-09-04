@@ -1,0 +1,1025 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import test from 'node:test';
+
+import { ApiError } from '../src/web/api.js';
+import {
+  beginBrowserWorkspaceReset,
+  finalizeBrowserWorkspaceReset,
+  resetBrowserWorkspaceCache,
+  SnapshotDataStore,
+} from '../src/web/snapshot-data.js';
+
+function emptySnapshot() {
+  return { schemaVersion: 1, files: [] };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function memoryCache() {
+  let record = null;
+  let resetEpoch = 0;
+  const workspaceRecords = {
+    snapshotLock: true,
+    pcPolicy: true,
+    offlineAccess: true,
+  };
+  let tail = Promise.resolve();
+  return {
+    async load() {
+      return record ? structuredClone(record) : null;
+    },
+    async getResetEpoch() {
+      return resetEpoch;
+    },
+    async compareAndSet(options) {
+      if (options.expectedResetEpoch !== undefined && options.expectedResetEpoch !== resetEpoch) {
+        return {
+          updated: false,
+          currentGeneration: record?.generation ?? 0,
+          currentResetEpoch: resetEpoch,
+        };
+      }
+      const generation = record?.generation ?? 0;
+      if (generation !== options.expectedGeneration) {
+        return {
+          updated: false,
+          currentGeneration: generation,
+          currentResetEpoch: resetEpoch,
+        };
+      }
+      record = {
+        snapshot: structuredClone(options.snapshot),
+        baseSnapshot:
+          options.baseSnapshot === undefined
+            ? options.pending
+              ? null
+              : structuredClone(options.snapshot)
+            : options.baseSnapshot
+              ? structuredClone(options.baseSnapshot)
+              : null,
+        etag: options.etag ?? null,
+        pending: Boolean(options.pending),
+        generation: generation + 1,
+        resetEpoch,
+      };
+      return { updated: true, ...structuredClone(record) };
+    },
+    async withLock(_tenantId, operation, expectedResetEpoch = resetEpoch) {
+      const previous = tail;
+      let release;
+      tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        if (expectedResetEpoch !== resetEpoch) {
+          const error = new Error('browser workspace reset');
+          error.code = 'browser_cache_reset';
+          throw error;
+        }
+        return await operation();
+      } finally {
+        release();
+      }
+    },
+    async reset() {
+      resetEpoch += 1;
+      record = null;
+      workspaceRecords.snapshotLock = false;
+      workspaceRecords.pcPolicy = false;
+      workspaceRecords.offlineAccess = false;
+      return { resetEpoch };
+    },
+    async beginReset() {
+      resetEpoch += 1;
+      if (record) record.resetEpoch = resetEpoch;
+      workspaceRecords.snapshotLock = false;
+      workspaceRecords.offlineAccess = false;
+      return { resetEpoch };
+    },
+    async finalizeReset(_tenantId, expectedResetEpoch) {
+      if (expectedResetEpoch !== resetEpoch) {
+        const error = new Error('browser workspace reset');
+        error.code = 'browser_cache_reset';
+        throw error;
+      }
+      record = null;
+      workspaceRecords.snapshotLock = false;
+      workspaceRecords.pcPolicy = false;
+      workspaceRecords.offlineAccess = false;
+      return { resetEpoch };
+    },
+    inspect() {
+      return {
+        ...(record ? structuredClone(record) : null),
+        resetEpoch,
+        workspaceRecords: structuredClone(workspaceRecords),
+      };
+    },
+  };
+}
+
+function controlledRemote() {
+  let snapshot = emptySnapshot();
+  let etag = '"0"';
+  let callCount = 0;
+  const starts = [deferred(), deferred()];
+  const releases = [deferred(), deferred()];
+  return {
+    starts,
+    releases,
+    async load() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+    async save(_tenantId, next, expectedEtag) {
+      const index = callCount;
+      callCount += 1;
+      starts[index]?.resolve();
+      await releases[index]?.promise;
+      if (expectedEtag !== etag) {
+        throw new ApiError('precondition failed', { status: 412 });
+      }
+      snapshot = structuredClone(next);
+      etag = `"${callCount}"`;
+      return { etag };
+    },
+    inspect() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+  };
+}
+
+function immediateRemote(initialSnapshot = emptySnapshot()) {
+  let snapshot = structuredClone(initialSnapshot);
+  let etag = '"0"';
+  let version = 0;
+  return {
+    async load() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+    async save(_tenantId, next, expectedEtag) {
+      if (expectedEtag !== etag) {
+        throw new ApiError('precondition failed', { status: 412 });
+      }
+      snapshot = structuredClone(next);
+      version += 1;
+      etag = `"${version}"`;
+      return { etag };
+    },
+    inspect() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+  };
+}
+
+function textFile(path, value) {
+  const content = Buffer.from(value, 'utf8');
+  return {
+    path,
+    encoding: 'base64',
+    bytes: content.byteLength,
+    sha256: createHash('sha256').update(content).digest('hex'),
+    content: content.toString('base64'),
+  };
+}
+
+function storeOptions(cache, remote) {
+  return {
+    cache,
+    loadRemote: () => remote.load(),
+    saveRemote: (...args) => remote.save(...args),
+    loadLocalRule: async () => null,
+  };
+}
+
+test('a stale clean result cannot overwrite a newer pending change from another tab', async () => {
+  const cache = memoryCache();
+  const remote = controlledRemote();
+  const first = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  const second = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await first.load();
+  await second.load();
+
+  const firstSave = first.createKnowledge({
+    title: 'first',
+    content: 'first body',
+    tags: [],
+  });
+  await remote.starts[0].promise;
+
+  // The second tab observes the first tab's durable pending generation, adds a
+  // newer mutation, and starts its own conditional save before the first
+  // response is delivered.
+  second._adoptCached(await cache.load());
+  const secondSave = second.createKnowledge({
+    title: 'second',
+    content: 'second body',
+    tags: [],
+  });
+  await remote.starts[1].promise;
+
+  remote.releases[0].resolve();
+  await firstSave;
+  remote.releases[1].resolve();
+  await secondSave;
+
+  const cached = cache.inspect();
+  assert.equal(cached.pending, false);
+  assert.equal(cached.snapshot.files.length, 2);
+  assert.equal(first.syncStatus().conflict, true);
+  assert.equal(second.syncStatus().conflict, false);
+  assert.equal(remote.inspect().snapshot.files.length, 2);
+});
+
+test('a truly stale tab fails closed before replacing another tab cache generation', async () => {
+  const cache = memoryCache();
+  const remote = controlledRemote();
+  remote.releases[0].resolve();
+  const first = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  const stale = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await first.load();
+  await stale.load();
+
+  await first.createKnowledge({ title: 'winner', content: '', tags: [] });
+  await assert.rejects(
+    stale.createKnowledge({ title: 'stale', content: '', tags: [] }),
+    /다른 탭/u,
+  );
+  assert.equal(cache.inspect().snapshot.files.length, 1);
+  assert.equal(stale.syncStatus().conflict, true);
+});
+
+test('412 with the identical plaintext snapshot is idempotently marked clean', async () => {
+  const cache = memoryCache();
+  let snapshot = emptySnapshot();
+  let etag = '"0"';
+  let firstAttempt = true;
+  const remote = {
+    async load() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+    async save(_tenantId, next, expectedEtag) {
+      if (firstAttempt) {
+        firstAttempt = false;
+        snapshot = structuredClone(next);
+        etag = '"1"';
+        throw new ApiError('response lost', { code: 'network_error' });
+      }
+      assert.equal(expectedEtag, '"0"');
+      throw new ApiError('already committed', { status: 412 });
+    },
+  };
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+  await store.createKnowledge({ title: 'saved', content: '', tags: [] });
+  assert.equal(store.syncStatus().pending, true);
+  assert.equal(store.syncStatus().offline, true);
+
+  assert.equal(await store.sync(), true);
+  assert.deepEqual(store.syncStatus(), {
+    pending: false,
+    offline: false,
+    conflict: false,
+    error: null,
+  });
+  assert.equal(cache.inspect().pending, false);
+  assert.equal(cache.inspect().etag, '"1"');
+});
+
+test('a stale pending empty browser snapshot adopts a populated server snapshot', async () => {
+  const cache = memoryCache();
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const index = {
+    schemaVersion: 1,
+    repositories: {
+      [repositoryId]: { id: repositoryId, name: 'server-project' },
+    },
+  };
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [textFile('repositories.json', `${JSON.stringify(index)}\n`)],
+  });
+  const seeded = await cache.compareAndSet({
+    snapshot: emptySnapshot(),
+    etag: '"stale-empty"',
+    pending: true,
+    expectedGeneration: 0,
+  });
+  assert.equal(seeded.updated, true);
+
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+
+  assert.deepEqual(store.syncStatus(), {
+    pending: false,
+    offline: false,
+    conflict: false,
+    error: null,
+  });
+  assert.equal((await store.projects()).at(0)?.name, 'server-project');
+  assert.equal(cache.inspect().etag, '"0"');
+});
+
+test('a non-empty pending browser snapshot still requires an explicit conflict choice', async () => {
+  const cache = memoryCache();
+  const local = {
+    schemaVersion: 1,
+    files: [
+      textFile(
+        'knowledge/11111111-1111-4111-8111-111111111111.json',
+        `${JSON.stringify({
+          schemaVersion: 1,
+          id: '11111111-1111-4111-8111-111111111111',
+          title: 'local',
+          body: '',
+          tags: [],
+        })}\n`,
+      ),
+    ],
+  };
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [textFile('policies/global.md', 'server policy\n')],
+  });
+  await cache.compareAndSet({
+    snapshot: local,
+    etag: '"stale-local"',
+    pending: true,
+    expectedGeneration: 0,
+  });
+
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+
+  assert.equal(store.syncStatus().pending, true);
+  assert.equal(store.syncStatus().conflict, true);
+  assert.equal(store.syncStatus().error?.code, 'remote_snapshot_conflict');
+  assert.deepEqual(cache.inspect().snapshot, local);
+});
+
+test('browser and connector changes to different items merge automatically', async () => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const index = {
+    schemaVersion: 1,
+    repositories: {
+      [repositoryId]: { id: repositoryId, name: 'backend' },
+    },
+  };
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [textFile('repositories.json', `${JSON.stringify(index)}\n`)],
+  });
+  const browser = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  const connector = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  await browser.load();
+  await connector.load();
+
+  await connector.createWork({
+    repoId: repositoryId,
+    name: 'connector task',
+    goal: 'record connector progress',
+    current: '',
+    decision: '',
+    rejected: '',
+    next: '',
+  });
+  await browser.createRule({
+    scope: 'repo',
+    repository: repositoryId,
+    content: 'browser rule',
+  });
+
+  assert.deepEqual(browser.syncStatus(), {
+    pending: false,
+    offline: false,
+    conflict: false,
+    error: null,
+  });
+  assert.equal((await browser.rules({ scope: 'repo' })).length, 1);
+  assert.equal((await browser.work({ repository: repositoryId })).length, 1);
+});
+
+test('authentication and integrity failures need attention while network failures are offline', async () => {
+  const cache = memoryCache();
+  let loadError = null;
+  const remote = {
+    async load() {
+      if (loadError) throw loadError;
+      return { snapshot: emptySnapshot(), etag: '"0"' };
+    },
+    async save() {
+      throw new Error('unused');
+    },
+  };
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+
+  loadError = new ApiError('unauthorized', { status: 401 });
+  await store.load({ force: true });
+  assert.equal(store.syncStatus().offline, false);
+  assert.equal(store.syncStatus().conflict, true);
+
+  loadError = new Error('snapshot authentication failed');
+  await store.load({ force: true });
+  assert.equal(store.syncStatus().offline, false);
+  assert.equal(store.syncStatus().conflict, true);
+
+  loadError = new ApiError('network down', { code: 'network_error' });
+  await store.load({ force: true });
+  assert.equal(store.syncStatus().offline, true);
+  assert.equal(store.syncStatus().conflict, false);
+});
+
+test('a reset installs a monotonic cache tombstone and a fresh store loads the new remote workspace', async () => {
+  const cache = memoryCache();
+  const oldSnapshot = emptySnapshot();
+  const newSnapshot = {
+    schemaVersion: 1,
+    files: [
+      textFile(
+        'knowledge/11111111-1111-4111-8111-111111111111.json',
+        `${JSON.stringify({
+          schemaVersion: 1,
+          id: '11111111-1111-4111-8111-111111111111',
+          title: '새 보관함',
+          body: '새 서버 저장본',
+          tags: [],
+          createdAt: '2026-08-31T00:00:00.000Z',
+          updatedAt: '2026-08-31T00:00:00.000Z',
+        })}\n`,
+      ),
+    ],
+  };
+  let snapshot = oldSnapshot;
+  let etag = '"old"';
+  const remote = {
+    async load() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+    async save(_tenantId, next, expectedEtag) {
+      if (expectedEtag !== etag) {
+        throw new ApiError('precondition failed', { status: 412 });
+      }
+      snapshot = structuredClone(next);
+      etag = '"saved"';
+      return { etag };
+    },
+  };
+  const old = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await old.load();
+  assert.equal(cache.inspect().resetEpoch, 0);
+  assert.equal(cache.inspect().generation, 1);
+
+  snapshot = newSnapshot;
+  etag = '"reset"';
+  assert.deepEqual(
+    await resetBrowserWorkspaceCache('tenant', { cache }),
+    { resetEpoch: 1 },
+  );
+  const afterReset = cache.inspect();
+  assert.equal(afterReset.snapshot, undefined);
+  assert.equal(afterReset.resetEpoch, 1);
+  assert.deepEqual(afterReset.workspaceRecords, {
+    snapshotLock: false,
+    pcPolicy: false,
+    offlineAccess: false,
+  });
+
+  const fresh = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await fresh.load();
+  assert.deepEqual(
+    (await fresh.knowledge()).map((entry) => entry.title),
+    ['새 보관함'],
+  );
+  assert.equal(cache.inspect().resetEpoch, 1);
+  assert.equal(cache.inspect().generation, 1);
+  assert.equal(cache.inspect().etag, '"reset"');
+
+  assert.deepEqual(
+    await resetBrowserWorkspaceCache('tenant', { cache }),
+    { resetEpoch: 2 },
+  );
+  assert.equal(cache.inspect().resetEpoch, 2);
+});
+
+test('a tab opened before reset cannot write or resolve after the reset tombstone', async () => {
+  const cache = memoryCache();
+  let saves = 0;
+  const remote = {
+    async load() {
+      return { snapshot: emptySnapshot(), etag: '"0"' };
+    },
+    async save() {
+      saves += 1;
+      return { etag: '"1"' };
+    },
+  };
+  const stale = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await stale.load();
+  await resetBrowserWorkspaceCache('tenant', { cache });
+
+  await assert.rejects(
+    stale.createKnowledge({ title: 'discarded', content: '', tags: [] }),
+    /보관함이 초기화/u,
+  );
+  await assert.rejects(stale.resolveConflict('local'), /보관함이 초기화/u);
+  assert.equal(saves, 0);
+  assert.equal(cache.inspect().snapshot, undefined);
+  assert.equal(stale.syncStatus().conflict, true);
+});
+
+test('a reset racing an old remote save keeps the reset server snapshot and rejects the old operation', async () => {
+  const cache = memoryCache();
+  const saveStarted = deferred();
+  const releaseSave = deferred();
+  let snapshot = emptySnapshot();
+  let etag = '"0"';
+  let saves = 0;
+  const remote = {
+    async load() {
+      return { snapshot: structuredClone(snapshot), etag };
+    },
+    async save(_tenantId, next, expectedEtag) {
+      saves += 1;
+      saveStarted.resolve();
+      await releaseSave.promise;
+      if (expectedEtag !== etag) {
+        throw new ApiError('precondition failed', { status: 412 });
+      }
+      snapshot = structuredClone(next);
+      etag = '"saved"';
+      return { etag };
+    },
+  };
+  const stale = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await stale.load();
+  const pendingWrite = stale.createKnowledge({
+    title: 'old tab',
+    content: '',
+    tags: [],
+  });
+  await saveStarted.promise;
+
+  // The server reset installs a different ETag before this request is allowed
+  // to reach its conditional write. The browser tombstone then invalidates the
+  // old tab's cache generation.
+  snapshot = emptySnapshot();
+  etag = '"reset"';
+  await resetBrowserWorkspaceCache('tenant', { cache });
+  releaseSave.resolve();
+
+  await assert.rejects(pendingWrite, /보관함이 초기화/u);
+  assert.equal(saves, 1);
+  assert.deepEqual(snapshot, emptySnapshot());
+  assert.equal(etag, '"reset"');
+  assert.equal(cache.inspect().snapshot, undefined);
+});
+
+test('the pre-reset barrier stops an in-flight old-tab conflict resolution before it can save', async () => {
+  const cache = memoryCache();
+  const remoteReadStarted = deferred();
+  const releaseRemoteRead = deferred();
+  const pendingSnapshot = {
+    schemaVersion: 1,
+    files: [
+      textFile(
+        'knowledge/22222222-2222-4222-8222-222222222222.json',
+        `${JSON.stringify({
+          schemaVersion: 1,
+          id: '22222222-2222-4222-8222-222222222222',
+          title: 'old local change',
+          body: '',
+          tags: [],
+          createdAt: '2026-08-31T00:00:00.000Z',
+          updatedAt: '2026-08-31T00:00:00.000Z',
+        })}\n`,
+      ),
+    ],
+  };
+  let phase = 'initial';
+  let saves = 0;
+  const remote = {
+    async load() {
+      if (phase === 'initial') {
+        return { snapshot: emptySnapshot(), etag: '"old"' };
+      }
+      remoteReadStarted.resolve();
+      await releaseRemoteRead.promise;
+      // This is the ETag and empty snapshot installed by the server reset.
+      return { snapshot: emptySnapshot(), etag: '"reset"' };
+    },
+    async save() {
+      saves += 1;
+      return { etag: '"should-not-save"' };
+    },
+  };
+  const stale = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await stale.load();
+  const pending = await cache.compareAndSet({
+    snapshot: pendingSnapshot,
+    etag: '"old"',
+    pending: true,
+    expectedGeneration: cache.inspect().generation,
+    expectedResetEpoch: 0,
+  });
+  stale._adoptCached(pending);
+  stale.conflict = true;
+
+  phase = 'resolve';
+  const resolution = stale.resolveConflict('local');
+  await remoteReadStarted.promise;
+
+  const barrier = await beginBrowserWorkspaceReset('tenant', { cache });
+  assert.deepEqual(barrier, { resetEpoch: 1 });
+  assert.equal(cache.inspect().resetEpoch, 1);
+  assert.equal(cache.inspect().generation, 2);
+  assert.equal(cache.inspect().workspaceRecords.offlineAccess, false);
+
+  releaseRemoteRead.resolve();
+  await assert.rejects(resolution, /보관함이 초기화/u);
+  assert.equal(saves, 0);
+
+  // The old cache remains readable by a *new* instance until a definitively
+  // confirmed server reset is finalized.
+  const recoveryStore = new SnapshotDataStore(
+    'tenant',
+    storeOptions(cache, {
+      async load() {
+        return { snapshot: pendingSnapshot, etag: '"old"' };
+      },
+      async save() {
+        throw new Error('unused');
+      },
+    }),
+  );
+  await recoveryStore.load();
+  assert.equal((await recoveryStore.knowledge())[0].title, 'old local change');
+
+  await finalizeBrowserWorkspaceReset('tenant', barrier.resetEpoch, { cache });
+  assert.equal(cache.inspect().snapshot, undefined);
+  assert.equal(cache.inspect().resetEpoch, 1);
+  assert.deepEqual(cache.inspect().workspaceRecords, {
+    snapshotLock: false,
+    pcPolicy: false,
+    offlineAccess: false,
+  });
+});
+
+test('an explicit local conflict choice replaces the server snapshot and clears pending state', async () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  const initial = {
+    schemaVersion: 1,
+    files: [textFile(`knowledge/${id}.json`, `${JSON.stringify({
+      schemaVersion: 1,
+      id,
+      title: 'base',
+      body: '',
+      tags: [],
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+    })}\n`)],
+  };
+  const remote = immediateRemote(initial);
+  const local = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  const other = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  await local.load();
+  await other.load();
+  await other.updateKnowledge(id, { title: 'server', content: '', tags: [], scope: 'global' });
+  await local.updateKnowledge(id, { title: 'local', content: '', tags: [], scope: 'global' });
+  assert.equal(local.syncStatus().pending, true);
+  assert.equal(local.syncStatus().conflict, true);
+
+  const late = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  await late.load();
+  await late.createKnowledge({
+    title: 'late server note',
+    content: 'must survive the conflict choice',
+    tags: [],
+    scope: 'global',
+  });
+
+  assert.equal(await local.resolveConflict('local'), true);
+  assert.deepEqual(local.syncStatus(), {
+    pending: false,
+    offline: false,
+    conflict: false,
+    error: null,
+  });
+  assert.equal(remote.inspect().snapshot.files.length, 2);
+  assert.deepEqual(
+    (await local.knowledge()).map((entry) => entry.title).sort(),
+    ['late server note', 'local'],
+  );
+});
+
+test('an explicit server conflict choice discards only the pending local snapshot', async () => {
+  const id = '22222222-2222-4222-8222-222222222222';
+  const initial = {
+    schemaVersion: 1,
+    files: [textFile(`knowledge/${id}.json`, `${JSON.stringify({
+      schemaVersion: 1,
+      id,
+      title: 'base',
+      body: '',
+      tags: [],
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+    })}\n`)],
+  };
+  const remote = immediateRemote(initial);
+  const local = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  const other = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  await local.load();
+  await other.load();
+  await other.updateKnowledge(id, { title: 'server', content: '', tags: [], scope: 'global' });
+  await local.updateKnowledge(id, { title: 'local', content: '', tags: [], scope: 'global' });
+  assert.equal(local.syncStatus().conflict, true);
+
+  const late = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  await late.load();
+  await late.createKnowledge({
+    title: 'late server note',
+    content: 'must survive the conflict choice',
+    tags: [],
+    scope: 'global',
+  });
+
+  assert.equal(await local.resolveConflict('server'), true);
+  assert.deepEqual(local.syncStatus(), {
+    pending: false,
+    offline: false,
+    conflict: false,
+    error: null,
+  });
+  assert.deepEqual(
+    (await local.knowledge()).map((entry) => entry.title).sort(),
+    ['late server note', 'server'],
+  );
+});
+
+test('local conflict resolution rechecks the cache before mutating the server', async () => {
+  const cache = memoryCache();
+  const remoteRead = deferred();
+  let saveCalls = 0;
+  const remote = {
+    async load() {
+      await remoteRead.promise;
+      return { snapshot: emptySnapshot(), etag: '"remote"' };
+    },
+    async save() {
+      saveCalls += 1;
+      return { etag: '"saved"' };
+    },
+  };
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  const initial = emptySnapshot();
+  const first = await cache.compareAndSet({
+    snapshot: initial,
+    etag: '"stale"',
+    pending: true,
+    expectedGeneration: 0,
+  });
+  store._adoptCached(first);
+  store.conflict = true;
+
+  const resolution = store.resolveConflict('local');
+  await new Promise((resolve) => setImmediate(resolve));
+  const newer = await cache.compareAndSet({
+    snapshot: initial,
+    etag: '"stale"',
+    pending: true,
+    expectedGeneration: first.generation,
+  });
+  assert.equal(newer.updated, true);
+  remoteRead.resolve();
+
+  assert.equal(await resolution, false);
+  assert.equal(saveCalls, 0);
+  assert.equal(cache.inspect().generation, newer.generation);
+});
+
+test('_markClean rejects an unrelated clean record from another tab', async () => {
+  const cache = memoryCache();
+  const remote = immediateRemote();
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+  const target = cache.inspect();
+
+  const otherCache = memoryCache();
+  const other = new SnapshotDataStore(
+    'tenant',
+    storeOptions(otherCache, immediateRemote()),
+  );
+  await other.load();
+  await other.createKnowledge({ title: 'other', content: '', tags: [] });
+  const otherSnapshot = otherCache.inspect().snapshot;
+  const replacement = await cache.compareAndSet({
+    snapshot: otherSnapshot,
+    etag: '"other"',
+    pending: false,
+    expectedGeneration: target.generation,
+  });
+  assert.equal(replacement.updated, true);
+
+  assert.equal(await store._markClean('"saved"', target), false);
+  assert.equal(store.syncStatus().conflict, true);
+  assert.equal(cache.inspect().etag, '"other"');
+});
+
+test('one repository keeps separate prod and test environment rules', async () => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const index = {
+    schemaVersion: 1,
+    repositories: {
+      [repositoryId]: { id: repositoryId, name: 'backend' },
+    },
+  };
+  const initial = {
+    schemaVersion: 1,
+    files: [textFile('repositories.json', `${JSON.stringify(index)}\n`)],
+  };
+  const store = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), immediateRemote(initial)),
+  );
+  await store.load();
+
+  await store.createRule({
+    scope: 'env',
+    repository: repositoryId,
+    environment: 'prod',
+    content: '배포 전 전체 검증을 실행한다.',
+  });
+  await store.createRule({
+    scope: 'env',
+    repository: repositoryId,
+    environment: 'test',
+    content: '테스트 데이터를 사용한다.',
+  });
+
+  const rules = await store.rules({ scope: 'env' });
+  assert.deepEqual(
+    rules.map((rule) => [rule.repositoryName, rule.environment, rule.content]),
+    [
+      ['backend', 'prod', '배포 전 전체 검증을 실행한다.'],
+      ['backend', 'test', '테스트 데이터를 사용한다.'],
+    ],
+  );
+  await assert.rejects(
+    store.createRule({
+      scope: 'env',
+      repository: repositoryId,
+      environment: 'PROD',
+      content: '대소문자 중복',
+    }),
+    /같은 범위/u,
+  );
+  await assert.rejects(
+    store.createRule({
+      scope: 'env',
+      repository: repositoryId,
+      environment: 'CON',
+      content: '이식 불가',
+    }),
+    /Windows/u,
+  );
+});
+
+test('projects expose scoped data and web metadata changes synchronize through the snapshot', async () => {
+  const repositoryId = '22222222-2222-4222-8222-222222222222';
+  const index = {
+    schemaVersion: 1,
+    repositories: {
+      [repositoryId]: {
+        schemaVersion: 1,
+        id: repositoryId,
+        name: 'api',
+        remoteAliases: ['github.com/example/api'],
+        rootCommits: ['abc123'],
+        createdAt: '2026-09-01T00:00:00.000Z',
+        updatedAt: '2026-09-01T00:00:00.000Z',
+      },
+    },
+  };
+  const initial = {
+    schemaVersion: 1,
+    files: [
+      textFile('repositories.json', `${JSON.stringify(index)}\n`),
+      textFile(`repositories/${repositoryId}/repository.json`, `${JSON.stringify(index.repositories[repositoryId])}\n`),
+    ],
+  };
+  const remote = immediateRemote(initial);
+  const store = new SnapshotDataStore(
+    'tenant',
+    storeOptions(memoryCache(), remote),
+  );
+  await store.load();
+  await store.createRule({
+    scope: 'repo',
+    repository: repositoryId,
+    content: '프로젝트 룰',
+  });
+  await store.createRule({
+    scope: 'env',
+    repository: repositoryId,
+    environment: 'prod',
+    content: '운영 환경 룰',
+  });
+  await store.createWork({
+    repository: repositoryId,
+    name: '배포 준비',
+    goal: '배포한다',
+    current: '검증 중',
+  });
+  await store.createKnowledge({
+    title: '공통 지식',
+    content: '모든 프로젝트',
+    tags: ['shared'],
+    scope: 'global',
+  });
+  await store.createKnowledge({
+    title: '프로젝트 지식',
+    content: '이 프로젝트',
+    tags: ['project'],
+    scope: 'repo',
+    repository: repositoryId,
+  });
+  await store.createKnowledge({
+    title: '운영 지식',
+    content: '운영 환경',
+    tags: ['prod'],
+    scope: 'env',
+    repository: repositoryId,
+    environment: 'prod',
+  });
+
+  const project = await store.project(repositoryId);
+  assert.equal(project.repository.name, 'api');
+  assert.deepEqual(project.environments, ['prod']);
+  assert.equal(project.rules.length, 2);
+  assert.equal(project.activeWork.length, 1);
+  assert.deepEqual(
+    project.knowledge
+      .map((entry) => [entry.scope, entry.title])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    [['env', '운영 지식'], ['repo', '프로젝트 지식']],
+  );
+  assert.deepEqual(
+    (await store.knowledge({ scope: 'global' })).map((entry) => entry.title),
+    ['공통 지식'],
+  );
+  assert.deepEqual(
+    (await store.knowledge({
+      scope: 'env',
+      repository: repositoryId,
+      environment: 'prod',
+    })).map((entry) => entry.title),
+    ['운영 지식'],
+  );
+
+  const updated = await store.updateProject(repositoryId, {
+    name: 'platform-api',
+    description: '인증과 수업 API',
+  });
+  assert.equal(updated.name, 'platform-api');
+  assert.equal(updated.description, '인증과 수업 API');
+  assert.equal((await store.projects({ q: '수업' })).length, 1);
+
+  const files = new Map(
+    remote.inspect().snapshot.files.map((file) => [
+      file.path,
+      Buffer.from(file.content, 'base64').toString('utf8'),
+    ]),
+  );
+  const remoteIndex = JSON.parse(files.get('repositories.json'));
+  const remoteMirror = JSON.parse(files.get(`repositories/${repositoryId}/repository.json`));
+  assert.equal(remoteIndex.repositories[repositoryId].name, 'platform-api');
+  assert.equal(remoteMirror.description, '인증과 수업 API');
+});
