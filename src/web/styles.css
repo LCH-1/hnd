@@ -5520,3 +5520,40 @@ td {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+/* --- 프로젝트 상세와 알림 --- */
+
+/* 프로젝트 상세의 두 지표 줄만 아직 divider 로 나눈 한 덩어리였다.
+   홈 지표와 같이 독립 카드로 세우고 열 너비도 균등하게 맞춘다. */
+.project-facts,
+.project-metrics {
+  gap: 14px;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.project-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.project-facts > div,
+.project-metrics > div {
+  padding: 15px 16px;
+  border: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--surface, #fff);
+  box-shadow: var(--shadow-soft);
+}
+
+.project-facts > div:last-child,
+.project-metrics > div:last-child {
+  border-right: 1px solid var(--border);
+}
+
+/* 알림은 위 여백만 있고 아래가 없어 다음 블록과 붙었다. */
+.notice {
+  margin-bottom: 16px;
+}

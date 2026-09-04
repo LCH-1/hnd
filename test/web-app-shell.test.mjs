@@ -22,7 +22,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.doesNotMatch(snapshotData, /rememberedAt|WORKSPACE_HINT_KEY/u);
   assert.match(worker, /request\.mode === "navigate"[\s\S]*?\/app/u);
   assert.match(worker, /async function staticAsset[\s\S]*?await fetch\(request\)/u);
-  assert.match(worker, /hnd-app-shell-v32/u);
+  assert.match(worker, /hnd-app-shell-v33/u);
   assert.match(html, /class="app-title sr-only"/u);
   assert.match(html, /class="app-mobile-brand"/u);
   assert.match(worker, /\/web\/hnd-icon\.png/u);
