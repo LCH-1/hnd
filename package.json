@@ -1,0 +1,19 @@
+{
+  "name": "hnd",
+  "version": "0.2.2",
+  "private": true,
+  "description": "Self-hosted rules, automatic progress, and work handoff for coding agents",
+  "type": "module",
+  "engines": {
+    "node": ">=24.12.0"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build:npm": "sh scripts/build-npm-package.sh",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "13.3.3",
+    "cookie": "2.0.1"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+dist/
+.superdesign/tmp/
+.DS_Store
+*.log
+
+# Local server state and secrets
+.hnd-data/
+.env
+.env.*
+!.env.example
