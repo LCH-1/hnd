@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { readJson, withFileLock, writeJsonAtomic } from './fs.mjs';
 import { statePaths } from '../paths.mjs';
+import { nativeWorkSession, workSessionKey } from './work-session.mjs';
 
 const SCHEMA_VERSION = 2;
 const KERNEL_VERSION = 1;
@@ -32,9 +33,9 @@ function payloadSessionId(payload) {
     payload?.threadId,
   ].find((value) => (
     typeof value === 'string'
-    && value.length > 0
+    && value.trim().length > 0
     && value.length <= 512
-    && !value.includes('\0')
+    && !/[\0\r\n]/.test(value)
   ));
 }
 
@@ -42,14 +43,16 @@ export function liveContextSessionKey(agent, payload = {}, env = process.env) {
   if (!['claude', 'codex', 'cursor'].includes(agent)) {
     throw new TypeError(`Unsupported live-context agent: ${agent}`);
   }
+  const sessionId = payloadSessionId(payload);
+  if (sessionId) return workSessionKey({ sessionId, agent, env: {} });
   if (
     agent === 'cursor'
     && /^[a-f0-9]{64}$/.test(env[CURSOR_LIVE_CONTEXT_SESSION_ENV] || '')
   ) {
     return env[CURSOR_LIVE_CONTEXT_SESSION_ENV];
   }
-  const sessionId = payloadSessionId(payload);
-  return sessionId ? sha256(`${agent}\0${sessionId}`) : null;
+  const native = nativeWorkSession(env, agent);
+  return native ? workSessionKey({ ...native, env: {} }) : null;
 }
 
 function contextLayers(composition) {
@@ -128,6 +131,8 @@ function validState(value) {
       && (entry.repositoryId === undefined || entry.repositoryId === null || typeof entry.repositoryId === 'string')
       && (entry.environment === undefined || entry.environment === null || typeof entry.environment === 'string')
       && (entry.ruleIds === undefined || (Array.isArray(entry.ruleIds) && entry.ruleIds.every((id) => typeof id === 'string')))
+      && (entry.workRevision === undefined || entry.workRevision === null || /^[a-f0-9]{64}$/.test(entry.workRevision))
+      && (entry.workRecordedAt === undefined || entry.workRecordedAt === null || typeof entry.workRecordedAt === 'string')
     ))
   );
 }
@@ -180,12 +185,19 @@ export async function recordLiveContextDelivery({
     const sessions = prunedSessions(current?.sessions || {}, now);
     const changed = force || sessions[sessionKey]?.contextRevision !== revision;
     if (changed) {
+      const previousWork = sessions[sessionKey]?.repositoryId === composition.repository?.id
+        ? sessions[sessionKey] : null;
       sessions[sessionKey] = {
         contextRevision: revision,
         recordedAt: now.toISOString(),
         agent,
         repositoryId: composition.repository?.id ?? null,
         environment: composition.environment ?? null,
+        workRevision: composition.work?.omitted
+          ? previousWork?.workRevision ?? null : composition.work?.revision ?? null,
+        workRecordedAt: composition.work?.omitted
+          ? previousWork?.workRecordedAt ?? null : composition.work ? now.toISOString() : null,
+        selectedHandoffId: composition.work?.selectedHandoffId ?? null,
         ruleIds: composition.layers
           .filter((layer) => layer.kind === 'policy')
           .map((layer) => layer.ruleId || layer.id)

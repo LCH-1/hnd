@@ -8,6 +8,7 @@ src/adapters/common.mjs
 src/adapters/cursor.mjs
 src/adapters/index.mjs
 src/adapters/mutation-lock.mjs
+src/adapters/session-environment.mjs
 src/args.mjs
 src/cli-help.mjs
 src/cli-i18n.mjs
@@ -29,6 +30,7 @@ src/core/policies.mjs
 src/core/repositories.mjs
 src/core/rule-records.mjs
 src/core/state.mjs
+src/core/work-session.mjs
 src/fs-operations.mjs
 src/input.mjs
 src/launcher-version.mjs

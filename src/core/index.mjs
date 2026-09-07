@@ -1,6 +1,7 @@
 import { composeEffectiveContext } from './compose.mjs';
 import { captureCheckpoint, getCheckpoint } from './checkpoints.mjs';
 import { withStateLock } from './mutation-lock.mjs';
+import { workSessionKey } from './work-session.mjs';
 import {
   closeHandoff,
   HANDOFF_ARRAY_FIELDS,
@@ -52,7 +53,11 @@ import {
 } from './state.mjs';
 
 function withDefaults(options, defaults, { cwd = false } = {}) {
-  const result = { ...options, env: defaults.env, clock: defaults.clock };
+  const result = {
+    agent: defaults.agent,
+    sessionKey: options.sessionId === undefined ? defaults.sessionKey : undefined,
+    ...options, env: defaults.env, clock: defaults.clock,
+  };
   if (cwd && result.cwd === undefined) result.cwd = defaults.cwd;
   return result;
 }
@@ -76,7 +81,11 @@ function mutationOptions(options, defaults) {
   source.patch = patch;
   source.append = append;
   if (source.cwd === undefined && source.repoId === undefined) source.cwd = defaults.cwd;
-  return { ...source, env: defaults.env, clock: defaults.clock };
+  return {
+    agent: defaults.agent,
+    sessionKey: source.sessionId === undefined ? defaults.sessionKey : undefined,
+    ...source, env: defaults.env, clock: defaults.clock,
+  };
 }
 
 function knowledgeOptions(options, defaults, { currentRepository = false } = {}) {
@@ -136,8 +145,8 @@ async function validateHandoffCandidate(candidate, defaults) {
  * Bound local core used by the CLI. Raw functions are exported below for tests
  * and integrations that prefer explicit env/cwd/clock parameters.
  */
-export function createCore({ env = process.env, cwd = process.cwd(), clock = Date } = {}) {
-  const defaults = { env, cwd, clock };
+export function createCore({ env = process.env, cwd = process.cwd(), clock = Date, sessionKey, sessionId, agent } = {}) {
+  const defaults = { env, cwd, clock, agent, sessionKey: workSessionKey({ sessionKey, sessionId, agent, env }) };
   const locked = (callback) => withStateLock(callback, { env });
   return Object.freeze({
     init: () => initializeState({ env, clock }),

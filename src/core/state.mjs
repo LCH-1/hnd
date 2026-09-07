@@ -175,7 +175,8 @@ export function validateHandoffSelections(value) {
         isUuid(selection.handoffId) &&
         typeof selection.worktree === 'string' &&
         (selection.branch === null || typeof selection.branch === 'string') &&
-        typeof selection.selectedAt === 'string',
+        typeof selection.selectedAt === 'string' &&
+        (selection.sessionKey === undefined || /^[a-f0-9]{64}$/.test(selection.sessionKey)),
     )
   );
 }

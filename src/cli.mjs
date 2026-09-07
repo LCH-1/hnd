@@ -36,9 +36,12 @@ import { withAdapterMutationLock } from './adapters/mutation-lock.mjs';
 import {
   CURSOR_LIVE_CONTEXT_SESSION_ENV,
   listLiveContextDeliveries,
+  liveContextSessionKey,
   recordLiveContextDelivery,
   renderLiveContextSnapshot,
 } from './core/live-context.mjs';
+import { WORK_SESSION_ENV, resolveWorkSession, workSessionKey } from './core/work-session.mjs';
+import { connectClaudeSessionEnvironment } from './adapters/session-environment.mjs';
 import { applyOperations, summarizeOperations } from './fs-operations.mjs';
 import { editText, readStdin, readTextInput } from './input.mjs';
 import {
@@ -60,7 +63,7 @@ const defaultSkillSource = path.resolve(
   'SKILL.md',
 );
 
-const commonOptions = ['cwd', 'json', 'help'];
+const commonOptions = ['cwd', 'json', 'help', 'session_key', 'session_id', 'session_agent'];
 
 const commandAliases = Object.freeze({
   rule: 'policy',
@@ -197,7 +200,7 @@ async function planCurrentCursorMaterialization({
 } = {}) {
   try {
     if (action === 'uninstall') return planCursorDematerialization({ cwd });
-    const effectiveContent = content ?? (await core.compose({ createRepository: false })).content;
+    const effectiveContent = content ?? (await core.compose({ createRepository: false, sharedWorkOnly: true })).content;
     return planCursorMaterialization({ cwd, content: effectiveContent });
   } catch (error) {
     if (optional && isOptionalMaterializationError(error)) {
@@ -575,7 +578,7 @@ function staleHoursOption(options) {
   return value;
 }
 
-async function handleHandoff({ subcommand, rest, options, core, refreshCursor, stdout, jsonOutput }) {
+async function handleHandoff({ subcommand, rest, options, core, refreshCursor, stdout, jsonOutput, env, sessionKey, sessionSource }) {
   subcommand = resolveAlias(subcommand, handoffCommandAliases);
   if (subcommand === 'start') {
     assertOptions(options, handoffWriteOptions);
@@ -653,7 +656,26 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     if (optionBoolean(options, 'ready')) result = result.filter((item) => item.ready);
     if (jsonOutput) writeJson(result, stdout);
     else if (result.length === 0) writeText(stdout, 'No handoffs found.');
-    else writeText(stdout, result.map((item) => `${item.status.padEnd(7)} ${item.task.padEnd(24)} ${item.id}`).join('\n'));
+    else writeText(stdout, result.map((item) => `${item.status.padEnd(7)} ${item.task.padEnd(24)} ${item.id}  ${item.workflowStatus}  ${item.claimActive ? item.claimedBy : 'unclaimed'}`).join('\n'));
+    return;
+  }
+
+  if (subcommand === 'session') {
+    assertOptions(options, []);
+    ensureNoExtra(rest, 'hnd work session');
+    const context = await core.compose({});
+    const deliveries = await listLiveContextDeliveries({ env });
+    const previous = deliveries.find((entry) => entry.sessionKey === context.work?.sessionKey
+      && entry.repositoryId === context.repository?.id);
+    writeJson({
+      sessionKey: context.work?.sessionKey ?? null,
+      sessionSource,
+      selectedHandoffId: context.work?.selectedHandoffId ?? null,
+      workRevision: context.work?.revision ?? null,
+      lastDeliveredWorkRevision: previous?.workRevision ?? null,
+      lastDeliveredAt: previous?.workRecordedAt ?? null,
+      hasUndeliveredChanges: context.work?.sessionKey ? previous?.workRevision !== context.work.revision : null,
+    }, stdout);
     return;
   }
 
@@ -676,16 +698,18 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     const result = await core.handoff.select({ id, task });
     await refreshCursor();
     if (jsonOutput) writeJson(result, stdout);
-    else writeText(stdout, `Selected ${result.task} (${result.id}) for this checkout and branch.`);
+    else writeText(stdout, sessionKey
+      ? `Selected ${result.task} (${result.id}) for this session.`
+      : `Selected ${result.task} (${result.id}) for this checkout and branch.`);
     return;
   }
   if (['claim', 'release', 'block', 'unblock'].includes(subcommand)) {
-    assertOptions(options, ['id', 'as', 'hours', 'reason', 'unblock_when']);
+    assertOptions(options, ['id', 'as', 'hours', 'reason', 'unblock_when', ...(['claim', 'release'].includes(subcommand) ? ['force'] : [])]);
     const task = rest.shift();
     ensureNoExtra(rest, `hnd work ${subcommand} [TASK] [--id ID]`);
     const patch = {};
     if (subcommand === 'claim') {
-      patch.claimedBy = requireValue(optionString(options, 'as'), '--as');
+      patch.claimedBy = requireValue(optionString(options, 'as', sessionKey ? `session:${sessionKey.slice(0, 12)}` : undefined), '--as');
       const hours = Number(optionString(options, 'hours', 2));
       if (!Number.isFinite(hours) || hours <= 0) throw new UsageError('--hours must be positive.');
       patch.claimExpiresAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
@@ -702,13 +726,13 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
       patch.blockedReason = '';
       patch.unblockCriteria = '';
     }
-    const result = await core.handoff.update({ id: optionString(options, 'id'), task, patch });
+    const result = await core.handoff.update({ id: optionString(options, 'id'), task, patch, forceClaim: optionBoolean(options, 'force') });
     await refreshCursor();
     if (jsonOutput) writeJson(result, stdout);
     else writeText(stdout, `${subcommand} ${result.task} (${result.id}).`);
     return;
   }
-  throw new UsageError('Work command must be new, save, show, list, use, done, claim, release, block, or unblock.');
+  throw new UsageError('Work command must be new, save, show, list, session, use, done, claim, release, block, or unblock.');
 }
 
 function hasTextInput(options) {
@@ -1116,15 +1140,15 @@ async function ensureHookRepository({ cwd, env }) {
   return resolved;
 }
 
-async function refreshCursorHookRoots({ hookCwds, env, stderr, primaryCwd, primaryContent }) {
+async function refreshCursorHookRoots({ hookCwds, env, stderr }) {
   for (const hookCwd of hookCwds) {
     try {
-      const content = hookCwd === primaryCwd && typeof primaryContent === 'string'
-        ? primaryContent
-        : (await createCore({ env, cwd: hookCwd }).compose({
-            createRepository: false,
-            fastRepository: true,
-          })).content;
+      // This file belongs to the checkout, not to the hook's calling session.
+      const content = (await createCore({ env, cwd: hookCwd }).compose({
+        createRepository: false,
+        fastRepository: true,
+        sharedWorkOnly: true,
+      })).content;
       await materializeCursor({ cwd: hookCwd, content });
     } catch (error) {
       if (!isOptionalMaterializationError(error)) {
@@ -1182,7 +1206,22 @@ async function mainImpl(argv = process.argv.slice(2), {
   if (runtimeEnv !== env) await useCliLanguage(runtimeEnv);
   const invocationCwd = path.resolve(optionString(options, 'cwd', cwd));
   const jsonOutput = optionBoolean(options, 'json');
-  const core = createCore({ env: runtimeEnv, cwd: invocationCwd });
+  if (options.session_key !== undefined && options.session_id !== undefined) {
+    throw new UsageError('Use --session-key or --session-id, not both.');
+  }
+  const sessionOptions = {
+    sessionKey: optionString(options, 'session_key'),
+    sessionId: optionString(options, 'session_id'),
+    agent: optionString(options, 'session_agent'),
+    env: runtimeEnv,
+  };
+  // Hook payloads have their own authoritative identity. Setup, sync, and
+  // other project-neutral commands must also work without a shell identity.
+  const workSession = ['handoff', 'context'].includes(command)
+    ? resolveWorkSession(sessionOptions)
+    : { sessionKey: command === 'hook' ? null : workSessionKey(sessionOptions) };
+  const sessionKey = workSession.sessionKey;
+  const core = createCore({ env: runtimeEnv, cwd: invocationCwd, sessionKey });
   const refreshCursorOnly = (refreshOptions = {}) => refreshCursorAfterMutation({
     core,
     cwd: invocationCwd,
@@ -1397,6 +1436,9 @@ async function mainImpl(argv = process.argv.slice(2), {
       rest: positionals,
       options,
       core,
+      env: runtimeEnv,
+      sessionKey,
+      sessionSource: workSession.source,
       refreshCursor,
       stdout,
       jsonOutput,
@@ -1467,7 +1509,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     assertOptions(options, ['dry_run']);
     ensureNoExtra(positionals, 'hnd materialize [--cwd DIR] [--dry-run]');
     const dryRun = optionBoolean(options, 'dry_run');
-    const context = await core.compose({ createRepository: false });
+    const context = await core.compose({ createRepository: false, sharedWorkOnly: true });
     const result = await materializeCursor({
       cwd: invocationCwd,
       content: context.content,
@@ -1505,6 +1547,14 @@ async function mainImpl(argv = process.argv.slice(2), {
       throw new UsageError('PreCompact is currently supported by the Claude adapter only.');
     }
     const payload = await parseHookInput(stdin);
+    const hookSessionKey = liveContextSessionKey(agent, payload, runtimeEnv);
+    if (agent === 'claude' && phase === 'start') {
+      try {
+        await connectClaudeSessionEnvironment({ sessionKey: hookSessionKey, env: runtimeEnv });
+      } catch (error) {
+        writeText(stderr, `hnd hook: automatic session connection unavailable (${error.code || error.name || 'ERROR'}); run hnd doctor and start a new session.`);
+      }
+    }
     const hookCwds = findHookCwds(
       payload,
       invocationCwd,
@@ -1581,11 +1631,12 @@ async function mainImpl(argv = process.argv.slice(2), {
     let contextAvailable = false;
     let primaryError = null;
     try {
-      const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd });
+      const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
       composition = await hookCore.compose({
         createRepository: false,
         fastRepository: true,
         knowledgeQuery: phase === 'prompt' ? hookKnowledgeQuery(payload) : '',
+        sharedWorkOnly: !hookSessionKey || (agent === 'cursor' && phase === 'prompt'),
       });
       content = composition.content;
       contextAvailable = true;
@@ -1640,8 +1691,6 @@ async function mainImpl(argv = process.argv.slice(2), {
         hookCwds,
         env: runtimeEnv,
         stderr,
-        primaryCwd: hookCwd,
-        primaryContent: phase === 'prompt' ? (delivery?.content ?? content) : content,
       });
     }
     if (phase === 'prompt') {
@@ -1660,7 +1709,10 @@ async function mainImpl(argv = process.argv.slice(2), {
     }
     if (agent === 'cursor' && delivery?.sessionKey) {
       const rendered = hookOutputObject(agent, content);
-      rendered.env = { [CURSOR_LIVE_CONTEXT_SESSION_ENV]: delivery.sessionKey };
+      rendered.env = {
+        [CURSOR_LIVE_CONTEXT_SESSION_ENV]: delivery.sessionKey,
+        [WORK_SESSION_ENV]: delivery.sessionKey,
+      };
       stdout.write(`${JSON.stringify(rendered)}\n`);
       return;
     }

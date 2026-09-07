@@ -8,6 +8,7 @@ import {
 } from '../constants.mjs';
 import { normalizeFsPath, repositoryPaths, statePaths } from '../paths.mjs';
 import { CoreError } from './errors.mjs';
+import { workSessionKey } from './work-session.mjs';
 import {
   listFiles,
   readJson,
@@ -49,6 +50,8 @@ const EXTENDED_PATCH_FIELDS = Object.freeze([
 const ALL_PATCH_FIELDS = Object.freeze([...PATCH_FIELDS, ...EXTENDED_PATCH_FIELDS]);
 const MAX_HISTORY = 50;
 const MAX_HANDOFF_TEXT_BYTES = DEFAULT_MAX_CONTEXT_BYTES - (8 * 1024);
+const MAX_SESSION_SELECTIONS = 512;
+const SESSION_SELECTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 function validHandoff(value) {
   return (
@@ -74,7 +77,8 @@ function validHandoff(value) {
     )) &&
     (value.parentId === undefined || value.parentId === null || isUuid(value.parentId)) &&
     (value.claimedBy === undefined || value.claimedBy === null || typeof value.claimedBy === 'string') &&
-    (value.claimExpiresAt === undefined || value.claimExpiresAt === null || typeof value.claimExpiresAt === 'string') &&
+    (value.claimExpiresAt === undefined || value.claimExpiresAt === null || (typeof value.claimExpiresAt === 'string' && Number.isFinite(Date.parse(value.claimExpiresAt)))) &&
+    (value.claimSessionKey === undefined || value.claimSessionKey === null || /^[a-f0-9]{64}$/.test(value.claimSessionKey)) &&
     (value.blockedReason === undefined || typeof value.blockedReason === 'string') &&
     (value.unblockCriteria === undefined || typeof value.unblockCriteria === 'string') &&
     (value.history === undefined || (Array.isArray(value.history) && value.history.length <= MAX_HISTORY)) &&
@@ -139,6 +143,20 @@ function addHours(iso, hours) {
   return new Date(new Date(iso).getTime() + hours * 60 * 60 * 1000).toISOString();
 }
 
+function assertClaimOwner(handoff, sessionKey, clock, force = false) {
+  // Legacy display-only claims remain compatible. Session-owned claims cannot
+  // be bypassed by omitting identity or by using the same display name.
+  if (!force && handoff.claimSessionKey && handoff.claimSessionKey !== sessionKey
+    && decorateHandoff(handoff, clock).claimActive) {
+    throw new CoreError('HANDOFF_CLAIM_CONFLICT', 'Another session owns this work item; wait for release/expiry or explicitly take over with work claim --force', {
+      id: handoff.id,
+      claimedBy: handoff.claimedBy,
+      claimSessionKey: handoff.claimSessionKey,
+      claimExpiresAt: handoff.claimExpiresAt,
+    });
+  }
+}
+
 function clockTime(clock) {
   return new Date(isoNow(clock)).getTime();
 }
@@ -156,6 +174,8 @@ function decorateHandoff(handoff, clock = Date) {
     parentId: handoff.parentId ?? null,
     claimedBy: handoff.claimedBy ?? null,
     claimExpiresAt: handoff.claimExpiresAt ?? null,
+    claimSessionKey: handoff.claimSessionKey ?? null,
+    claimActive: Boolean(handoff.status === 'active' && handoff.claimedBy && (!handoff.claimExpiresAt || Date.parse(handoff.claimExpiresAt) > clockTime(clock))),
     blockedReason: handoff.blockedReason ?? '',
     unblockCriteria: handoff.unblockCriteria ?? '',
     history: handoff.history ?? [],
@@ -185,13 +205,14 @@ function idList(value, field = 'dependencies') {
   return [...new Set(value)];
 }
 
-function auditRecord(action, at, { actor, agent, sessionId, before = null } = {}) {
+function auditRecord(action, at, { actor, agent, sessionId, sessionKey, before = null } = {}) {
   return {
     at,
     action,
     actor: actor ? String(actor).slice(0, 200) : null,
     agent: agent ? String(agent).slice(0, 80) : null,
     sessionId: sessionId ? String(sessionId).slice(0, 256) : null,
+    sessionKey: sessionKey ?? null,
     before,
   };
 }
@@ -220,9 +241,9 @@ function assertHandoffSize(handoff) {
   }
 }
 
-function selectionKey(git) {
+function selectionKey(git, sessionKey) {
   const identity = `${normalizeFsPath(git.worktree)}\0${git.branch ?? `@${git.head ?? 'detached'}`}`;
-  return createHash('sha256').update(identity).digest('hex');
+  return createHash('sha256').update(sessionKey ? `${identity}\0session\0${sessionKey}` : identity).digest('hex');
 }
 
 async function readSelections(env) {
@@ -231,19 +252,19 @@ async function readSelections(env) {
   });
 }
 
-async function selectedHandoffId(git, env) {
+async function selectedHandoffId(git, env, sessionKey) {
   if (!git) return null;
   const selections = await readSelections(env);
-  const selection = selections.selections[selectionKey(git)];
+  const selection = selections.selections[selectionKey(git, sessionKey)];
   return selection?.handoffId ?? null;
 }
 
-async function persistSelection({ git, repoId, handoffId, env, clock }) {
+async function persistSelection({ git, repoId, handoffId, sessionKey, env, clock }) {
   if (!git) return;
   const state = statePaths(env);
   await withFileLock(path.join(state.locks, 'handoff-selections.lock'), async () => {
     const selections = await readSelections(env);
-    const key = selectionKey(git);
+    const key = selectionKey(git, sessionKey);
     if (handoffId === null) {
       delete selections.selections[key];
     } else {
@@ -253,8 +274,20 @@ async function persistSelection({ git, repoId, handoffId, env, clock }) {
         worktree: normalizeFsPath(git.worktree),
         branch: git.branch,
         selectedAt: isoNow(clock),
+        ...(sessionKey ? { sessionKey } : {}),
       };
     }
+    const cutoff = clockTime(clock) - SESSION_SELECTION_MAX_AGE_MS;
+    const retainedSessions = Object.entries(selections.selections)
+      .filter(([, value]) => value.sessionKey && Date.parse(value.selectedAt) >= cutoff)
+      .sort((a, b) => Number(b[0] === key) - Number(a[0] === key)
+        || b[1].selectedAt.localeCompare(a[1].selectedAt)
+        || a[0].localeCompare(b[0]))
+      .slice(0, MAX_SESSION_SELECTIONS);
+    selections.selections = Object.fromEntries([
+      ...Object.entries(selections.selections).filter(([, value]) => !value.sessionKey),
+      ...retainedSessions,
+    ]);
     await writeJsonAtomic(state.handoffSelections, selections);
   });
 }
@@ -377,10 +410,22 @@ export async function listHandoffs({
     );
 }
 
-async function selectActiveHandoff({ id, task, repository, git, env, clock, required = true }) {
+async function selectActiveHandoff({ id, task, repository, git, sessionKey, env, clock, required = true }) {
   validateHandoffId(id);
   const active = await listForRepository(repository.id, 'active', env);
   let candidates = active;
+  if (sessionKey && !id && task === undefined) {
+    const selectedId = await selectedHandoffId(git, env, sessionKey);
+    const selected = active.find((handoff) => handoff.id === selectedId);
+    if (!selected) {
+      if (!required) return null;
+      throw new CoreError('HANDOFF_SELECTION_REQUIRED', 'Select a work item for this session with hnd work use --id ID', {
+        sessionKey,
+        candidates: active.map(summarize),
+      });
+    }
+    candidates = [selected];
+  }
   if (id) candidates = candidates.filter((handoff) => handoff.id === id);
   if (task !== undefined) candidates = candidates.filter((handoff) => handoff.task === task);
 
@@ -397,7 +442,7 @@ async function selectActiveHandoff({ id, task, repository, git, env, clock, requ
     }
 
     if (!id && task === undefined) {
-      const selectedId = await selectedHandoffId(git, env);
+      const selectedId = await selectedHandoffId(git, env, sessionKey);
       const selected = candidates.find((handoff) => handoff.id === selectedId);
       if (selected) candidates = [selected];
     }
@@ -443,11 +488,15 @@ export async function startHandoff({
   actor,
   agent,
   sessionId,
+  sessionKey,
   validate,
   env = process.env,
   clock = Date,
   ...arrays
 } = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
+  if (sessionKey && !claimedBy) claimedBy = `${agent || 'session'}:${sessionKey.slice(0, 12)}`;
+  if (claimedBy) validateStaleHours(Number(claimHours));
   const taskValue = requireText(task, 'task', { max: 200, singleLine: true });
   const objectiveValue = requireText(objective, 'objective');
   const currentStateValue = requireText(currentState, 'currentState', {
@@ -497,7 +546,8 @@ export async function startHandoff({
         dependencies: idList(dependencies),
         parentId: parentId === null ? null : validateHandoffId(parentId),
         claimedBy: claimedBy ? requireText(claimedBy, 'claimedBy', { max: 200, singleLine: true }) : null,
-        claimExpiresAt: claimedBy ? addHours(now, Number(claimHours) || 2) : null,
+        claimExpiresAt: claimedBy ? addHours(now, Number(claimHours)) : null,
+        claimSessionKey: claimedBy ? sessionKey : null,
         blockedReason: requireText(blockedReason, 'blockedReason', { allowEmpty: true, max: 4_000 }),
         unblockCriteria: requireText(unblockCriteria, 'unblockCriteria', { allowEmpty: true, max: 4_000 }),
         ...Object.fromEntries(ARRAY_FIELDS.map((field) => [field, textArray(arrays[field], field)])),
@@ -509,7 +559,7 @@ export async function startHandoff({
         createdAt: now,
         updatedAt: now,
         closedAt: null,
-        history: [auditRecord('created', now, { actor, agent, sessionId })],
+        history: [auditRecord('created', now, { actor, agent, sessionId, sessionKey })],
       };
       assertHandoffSize(handoff);
       if (validate !== undefined) {
@@ -521,6 +571,7 @@ export async function startHandoff({
         git: resolved.git,
         repoId: resolved.repository.id,
         handoffId: handoff.id,
+        sessionKey,
         env,
         clock,
       });
@@ -565,9 +616,15 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
     next.claimedBy = patch.claimedBy === null || patch.claimedBy === ''
       ? null
       : requireText(patch.claimedBy, 'claimedBy', { max: 200, singleLine: true });
+    next.claimSessionKey = next.claimedBy ? audit.sessionKey ?? null : null;
+    next.claimExpiresAt = next.claimedBy ? addHours(isoNow(clock), 2) : null;
   }
   if (patch.claimExpiresAt !== undefined) {
-    next.claimExpiresAt = patch.claimExpiresAt === null ? null : new Date(patch.claimExpiresAt).toISOString();
+    if (patch.claimExpiresAt !== null && !Number.isFinite(Date.parse(patch.claimExpiresAt))) {
+      throw new CoreError('INVALID_HANDOFF', 'claimExpiresAt must be a valid timestamp or null');
+    }
+    next.claimExpiresAt = next.claimedBy && patch.claimExpiresAt !== null
+      ? new Date(patch.claimExpiresAt).toISOString() : null;
   }
   for (const field of ['blockedReason', 'unblockCriteria']) {
     if (patch[field] !== undefined) {
@@ -578,6 +635,8 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
   next.updatedAt = now;
   next.staleAt = addHours(now, next.staleHours);
   delete next.stale;
+  delete next.claimActive;
+  delete next.ready;
   next.history = [
     ...(next.history || []),
     auditRecord('updated', now, {
@@ -589,6 +648,7 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
         parentId: handoff.parentId ?? null,
         claimedBy: handoff.claimedBy ?? null,
         claimExpiresAt: handoff.claimExpiresAt ?? null,
+        claimSessionKey: handoff.claimSessionKey ?? null,
         blockedReason: handoff.blockedReason ?? '',
         unblockCriteria: handoff.unblockCriteria ?? '',
       },
@@ -608,9 +668,13 @@ export async function updateHandoff({
   actor,
   agent,
   sessionId,
+  sessionKey,
+  forceClaim = false,
   env = process.env,
   clock = Date,
 } = {}) {
+  if (typeof forceClaim !== 'boolean') throw new CoreError('INVALID_HANDOFF', 'forceClaim must be a boolean');
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
   const state = statePaths(env);
   return withFileLock(
@@ -621,10 +685,12 @@ export async function updateHandoff({
         task,
         repository: resolved.repository,
         git: resolved.git,
+        sessionKey,
         env,
         clock,
       });
-      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId });
+      assertClaimOwner(handoff, sessionKey, clock, forceClaim && patch.claimedBy !== undefined);
+      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId, sessionKey });
       assertHandoffSize(next);
       if (validate !== undefined) {
         if (typeof validate !== 'function') throw new TypeError('validate must be a function');
@@ -642,9 +708,13 @@ export async function showHandoff({
   task,
   repoId,
   cwd,
+  sessionKey,
+  sessionId,
+  agent,
   env = process.env,
   clock = Date,
 } = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   validateHandoffId(id);
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
   if (id) {
@@ -662,6 +732,7 @@ export async function showHandoff({
     task,
     repository: resolved.repository,
     git: resolved.git,
+    sessionKey,
     env,
     clock,
   });
@@ -677,13 +748,18 @@ export async function findActiveHandoff({
   clock = Date,
   repository,
   git,
+  sessionKey,
+  sessionId,
+  agent,
 } = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock, repository, git });
   return selectActiveHandoff({
     id,
     task,
     repository: resolved.repository,
     git: resolved.git,
+    sessionKey,
     env,
     clock,
     required,
@@ -697,7 +773,11 @@ export async function selectHandoff({
   cwd = process.cwd(),
   env = process.env,
   clock = Date,
+  sessionKey,
+  sessionId,
+  agent,
 } = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   if (!id && task === undefined) {
     throw new CoreError('HANDOFF_SELECTION_REQUIRED', 'Provide a handoff id or task to select');
   }
@@ -711,6 +791,7 @@ export async function selectHandoff({
         task,
         repository: resolved.repository,
         git: resolved.git,
+        sessionKey,
         env,
         clock,
       });
@@ -718,6 +799,7 @@ export async function selectHandoff({
         git: resolved.git,
         repoId: resolved.repository.id,
         handoffId: handoff.id,
+        sessionKey,
         env,
         clock,
       });
@@ -737,9 +819,11 @@ export async function closeHandoff({
   actor,
   agent,
   sessionId,
+  sessionKey,
   env = process.env,
   clock = Date,
 } = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
   const state = statePaths(env);
   return withFileLock(
@@ -750,12 +834,17 @@ export async function closeHandoff({
         task,
         repository: resolved.repository,
         git: resolved.git,
+        sessionKey,
         env,
         clock,
       });
-      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId });
+      assertClaimOwner(handoff, sessionKey, clock);
+      const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId, sessionKey });
       next.status = 'closed';
       next.workflowStatus = 'done';
+      next.claimedBy = null;
+      next.claimSessionKey = null;
+      next.claimExpiresAt = null;
       next.closedAt = isoNow(clock);
       next.history[next.history.length - 1].action = 'closed';
       assertHandoffSize(next);
@@ -773,7 +862,7 @@ export async function closeHandoff({
       await writeJsonAtomic(archivedFile, next);
       await removeFile(activeFile);
 
-      if (resolved.git && await selectedHandoffId(resolved.git, env) === next.id) {
+      if (resolved.git && await selectedHandoffId(resolved.git, env, sessionKey) === next.id) {
         const remaining = (await listForRepository(next.repoId, 'active', env))
           .filter((candidate) => (
             candidate.worktree === resolved.git.worktree
@@ -783,7 +872,8 @@ export async function closeHandoff({
         await persistSelection({
           git: resolved.git,
           repoId: next.repoId,
-          handoffId: remaining[0]?.id ?? null,
+          handoffId: sessionKey ? null : remaining[0]?.id ?? null,
+          sessionKey,
           env,
           clock,
         });

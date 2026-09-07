@@ -694,7 +694,7 @@ test('policy CRUD, handoff lifecycle, and context composition preserve security 
   assert.equal(context.environment, 'prod-seoul');
   assert.deepEqual(
     context.layers.map((layer) => layer.scope),
-    ['global', 'repo', 'env', 'handoff', 'local'],
+    ['global', 'repo', 'env', 'handoff', 'work', 'local'],
   );
   const positions = [
     'GLOBAL RULE',
@@ -835,19 +835,22 @@ test('new and explicitly selected handoffs control the current checkout context'
   const context = await core.compose({});
   assert.equal(context.handoff.id, second.id);
   assert.match(context.content, /Second goal/);
-  assert.doesNotMatch(context.content, /First goal/);
+  assert.doesNotMatch(context.layers.find((layer) => layer.kind === 'handoff').content, /First goal/);
+  assert.match(context.work.content, /First goal/);
 
   const selectedFirst = await core.handoff.select({ id: first.id });
   assert.equal(selectedFirst.id, first.id);
   const afterSelection = await core.compose({});
   assert.equal(afterSelection.handoff.id, first.id);
   assert.match(afterSelection.content, /First goal/);
-  assert.doesNotMatch(afterSelection.content, /Second goal/);
+  assert.doesNotMatch(afterSelection.layers.find((layer) => layer.kind === 'handoff').content, /Second goal/);
+  assert.match(afterSelection.work.content, /Second goal/);
 
   const selected = await core.compose({ task: 'second-task' });
   assert.equal(selected.handoff.id, second.id);
   assert.match(selected.content, /Second goal/);
-  assert.doesNotMatch(selected.content, /First goal/);
+  assert.doesNotMatch(selected.layers.find((layer) => layer.kind === 'handoff').content, /First goal/);
+  assert.match(selected.work.content, /First goal/);
 });
 
 test('current branch disambiguates active handoffs in the same worktree', async (t) => {
@@ -864,7 +867,8 @@ test('current branch disambiguates active handoffs in the same worktree', async 
   const context = await core.compose({});
   assert.equal(context.handoff.id, feature.id);
   assert.match(context.content, /Work on the feature branch/);
-  assert.doesNotMatch(context.content, /Work on main/);
+  assert.doesNotMatch(context.layers.find((layer) => layer.kind === 'handoff').content, /Work on main/);
+  assert.match(context.work.content, /Work on main/);
 });
 
 test('mutations preflight the context budget and composition never truncates a block', async (t) => {

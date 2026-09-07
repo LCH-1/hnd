@@ -132,15 +132,26 @@ const WORK_HELP = `hnd work — 에이전트 사이 작업 인계
       [--check TEXT]... [--next TEXT]... [--question TEXT]... [--note TEXT]...
   hnd work show [TASK] [--id ID] [--cwd DIR] [--json]
   hnd work list [--all] [--ready] [--cwd DIR] [--json]
+  hnd work session [--session-key KEY] [--json]
   hnd work use [TASK] [--id ID] [--cwd DIR]
   hnd work done [TASK] [--id ID] [--cwd DIR]
-  hnd work claim [TASK] --as SESSION [--hours 2]
-  hnd work release [TASK]
+  hnd work claim [TASK] [--as NAME] [--hours 2] [--force]
+  hnd work release [TASK] [--force]
   hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
   hnd work unblock [TASK]
 
 Git 진행 상태는 자동 저장됩니다. work는 결정, 다음 단계, 열린 질문처럼
 사람이 보강해야 할 인계 내용을 남길 때 사용합니다.
+
+같은 프로젝트의 작업 목록은 공유합니다. 현재 작업은 세션별로 선택합니다.
+Codex/Cursor의 명령 환경과 Claude 시작 훅에서 세션을 자동 연결합니다.
+작업자가 환경변수나 세션 키를 설정할 필요는 없습니다. work session으로 확인합니다.
+에이전트 밖의 일반 터미널은 기존 경로+브랜치 선택 방식을 유지합니다.
+고급 연동에는 --session-key KEY / --session-id ID [--session-agent AGENT] 및
+HND_WORK_SESSION / HND_SESSION_ID를 사용할 수 있습니다.
+new는 현재 세션에 기본 2시간 담당을 부여하고 use는 선택만 변경합니다.
+다른 세션의 담당 작업은 수정할 수 없습니다. --force는 명시적 인수/해제입니다.
+session의 마지막 전달 버전은 LLM이 실제로 읽었다는 확인이 아닌 문맥 전달 기록입니다.
 `;
 
 const KNOW_HELP = `hnd know — 오래 남길 지식
@@ -309,15 +320,25 @@ Usage:
       [--check TEXT]... [--next TEXT]... [--question TEXT]... [--note TEXT]...
   hnd work show [TASK] [--id ID] [--cwd DIR] [--json]
   hnd work list [--all] [--ready] [--cwd DIR] [--json]
+  hnd work session [--session-key KEY] [--json]
   hnd work use [TASK] [--id ID] [--cwd DIR]
   hnd work done [TASK] [--id ID] [--cwd DIR]
-  hnd work claim [TASK] --as SESSION [--hours 2]
-  hnd work release [TASK]
+  hnd work claim [TASK] [--as NAME] [--hours 2] [--force]
+  hnd work release [TASK] [--force]
   hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
   hnd work unblock [TASK]
 
 Git progress is captured automatically. Use work for decisions, next steps, open questions,
 and other context that needs a human explanation.
+
+Project work is shared; current selection is session-local. Codex/Cursor shell identities
+and the Claude SessionStart hook connect automatically; workers need no keys or env setup.
+Use work session to inspect the connection. Advanced integrations may use --session-key KEY
+or --session-id ID [--session-agent AGENT], HND_WORK_SESSION, or HND_SESSION_ID.
+Ordinary terminals outside an agent retain legacy checkout+branch selection.
+New work is claimed for 2 hours;
+use selects without claiming. Claim/release --force explicitly overrides ownership.
+work session reports the last emitted work revision, not proof the LLM read it.
 `,
   know: `hnd know — long-term knowledge
 
