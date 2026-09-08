@@ -1802,6 +1802,31 @@ td span {
   align-items: center;
   gap: 8px;
 }
+.app-preferences {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.app-preference-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  align-items: center;
+  gap: 16px 32px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+}
+.app-preference-row:first-child { padding-top: 0; }
+.app-preference-row .field-help { margin-top: 6px; max-width: 65ch; color: var(--muted); }
+.app-preferences #app-settings-status { color: var(--muted); }
+.app-preferences .form-actions { align-items: center; justify-content: space-between; }
+.app-preferences .form-actions .field-help { flex: 1 1 220px; }
+.app-preferences .form-actions .button { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 620px) {
+  .app-preference-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .app-preferences .form-actions { flex-direction: column; align-items: stretch; }
+  .app-preferences .form-actions .field-help { flex: none; }
+}
 .settings-form {
   max-width: 850px;
   margin-bottom: 16px;

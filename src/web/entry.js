@@ -48,7 +48,7 @@ function isOwnerSetup(session) {
 function authenticatedDestination(session) {
   if (session?.requiresPasskey) return "/setup?recovery=1";
   if (session?.recoveryCodesConfirmed === false) return "/setup";
-  return "/app";
+  return "/home";
 }
 
 function renderSignup(signup = {}) {

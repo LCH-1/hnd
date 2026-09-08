@@ -233,6 +233,30 @@ function storeOptions(cache, remote, localRules = null) {
   };
 }
 
+test('app settings remain opt-in, persist across browsers, and preserve other workspace files', async () => {
+  const remote = immediateRemote({ schemaVersion: 1, files: [textFile('policies/global.md', 'Keep this rule.')] });
+  const first = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  assert.deepEqual(await first.appSettings(), { schemaVersion: 1, workRecording: 'manual', autoSave: true, knowledgeSuggestions: false });
+  await first.updateAppSettings({ workRecording: 'automatic', autoSave: false });
+  const second = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  assert.deepEqual(await second.appSettings(), { schemaVersion: 1, workRecording: 'automatic', autoSave: false, knowledgeSuggestions: false });
+  assert.equal(remote.inspect().snapshot.files.find(file => file.path === 'policies/global.md').content, Buffer.from('Keep this rule.').toString('base64'));
+  await assert.rejects(first.updateAppSettings({ workRecording: 'unknown' }), /올바르지/u);
+  await assert.rejects(first.updateAppSettings({ signupMode: 'open' }), /올바르지/u);
+});
+
+test('app settings merge independent changes and report conflicting edits', async () => {
+  const snapshot = value => ({ schemaVersion: 1, files: [textFile('app-settings.json', JSON.stringify({ schemaVersion: 1, ...value }))] });
+  const base = snapshot({ workRecording: 'manual', autoSave: true });
+  const local = snapshot({ workRecording: 'automatic', autoSave: true });
+  const remote = snapshot({ workRecording: 'manual', autoSave: false });
+  const result = await mergeBrowserSnapshots(base, local, remote);
+  assert.equal(result.conflicts.length, 0);
+  const value = JSON.parse(Buffer.from(result.snapshot.files[0].content, 'base64'));
+  assert.equal(value.workRecording, 'automatic');
+  assert.equal(value.autoSave, false);
+});
+
 function localRuleStorage() {
   let rule = null;
   return {

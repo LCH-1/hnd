@@ -1,5 +1,6 @@
 import { composeEffectiveContext } from './compose.mjs';
 import { captureCheckpoint, getCheckpoint } from './checkpoints.mjs';
+import { readAppSettings } from './app-settings.mjs';
 import { withStateLock } from './mutation-lock.mjs';
 import { workSessionKey } from './work-session.mjs';
 import { inspectWorkCoordination, acknowledgeWorkEvents, heartbeatWorkSession } from './work-coordination.mjs';
@@ -171,14 +172,18 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
   return Object.freeze({
     init: () => initializeState({ env, clock }),
     config: Object.freeze({
-      get: () => locked(() => readConfig({ env, clock })),
+      get: () => locked(async () => {
+        const config = await readConfig({ env, clock });
+        return { ...config, ...await readAppSettings({ env, localConfig: config }) };
+      }),
       update: (patch) => locked(() => updateConfig(patch, { env, clock })),
     }),
     auto: Object.freeze({
       get: () => locked(() => getAutoSave({ env, clock })),
       set: (enabled) => locked(() => setAutoSave(enabled, { env, clock })),
       suggest: ({ payload, agent: sourceAgent, sourceSessionId } = {}) => locked(async () => {
-        if ((await readConfig({ env, clock })).knowledgeSuggestions !== true) return null;
+        const settings = await readAppSettings({ env, localConfig: await readConfig({ env, clock }) });
+        if (!settings.knowledgeSuggestions) return null;
         // A transcript's raw ID is provenance only. The bound agent session
         // controls collection policy; sourceSessionId must never reroute it.
         const policy = await getPrivacyPolicy({ cwd, env, clock, sessionKey: defaults.sessionKey });

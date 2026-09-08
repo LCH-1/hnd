@@ -8,6 +8,7 @@ import {
 } from "./i18n.js";
 import { CONNECTOR_PACKAGE_SPEC } from "./connector-release.js";
 import { createSelectPicker } from "./select-picker.js";
+import { readAppRoute, routePath } from "./app-routes.js";
 import {
   beginBrowserWorkspaceReset,
   disableOfflineWorkspace,
@@ -260,25 +261,21 @@ function openSidebar() {
 }
 
 function currentView() {
-  const hashView = window.location.hash.slice(1).split("/", 1)[0];
-  if (Object.hasOwn(viewMeta, hashView)) return hashView;
-  const pathView = window.location.pathname
-    .replace(/^\/app\/?/, "")
-    .split("/", 1)[0];
-  return Object.hasOwn(viewMeta, pathView) ? pathView : "home";
+  return readAppRoute(window.location)?.view || "home";
 }
 
 function currentProjectId() {
-  const [view, id] = window.location.hash.slice(1).split("/");
-  if (view !== "projects" || !id) return null;
-  try {
-    return decodeURIComponent(id);
-  } catch {
-    return null;
-  }
+  const route = readAppRoute(window.location);
+  return route?.view === "projects" ? route.id : null;
+}
+
+async function navigate(path, { replace = false, force = false } = {}) {
+  window.history[replace ? "replaceState" : "pushState"](null, "", path);
+  await setView(currentView(), { force });
 }
 
 async function setView(view, { force = false } = {}) {
+  for (const picker of selectPickers) picker.close();
   const selected = Object.hasOwn(viewMeta, view) ? view : "home";
   const enteringProjects = selected === "projects" && state.view !== "projects";
   const requestedProjectId = selected === "projects" ? currentProjectId() : null;
@@ -697,10 +694,10 @@ function renderDiagnostics(value) {
   const container = $("#home-diagnostics");
   clearChildren(container);
   const items = [
-    ["차단 작업", value.blockedWork, "#work"],
-    ["지식 검토", value.knowledgeAttention ?? value.pendingKnowledge + value.reviewKnowledge, "#knowledge"],
-    ["초안 룰", value.draftRules, "#rules"],
-    ["큰 룰", value.largeRules, "#rules"],
+    ["차단 작업", value.blockedWork, "/work"],
+    ["지식 검토", value.knowledgeAttention ?? value.pendingKnowledge + value.reviewKnowledge, "/knowledge"],
+    ["초안 룰", value.draftRules, "/rule"],
+    ["큰 룰", value.largeRules, "/rule"],
   ];
   const attention = items.filter(([, count]) => count > 0);
   if (attention.length === 0) {
@@ -977,7 +974,7 @@ async function loadProjects(values = {}) {
     const repository = project.repository;
     const row = element("a", {
       className: "project-row",
-      attrs: { href: `#projects/${encodeURIComponent(repository.id)}` },
+      attrs: { href: routePath("projects", repository.id) },
     });
     const identity = element("div", { className: "project-row-identity" });
     identity.append(
@@ -1656,6 +1653,7 @@ async function loadAccountManagement() {
 
 async function loadSettings() {
   showNotice($("#settings-error"));
+  await loadAppSettings();
   const payload = await api.settings();
   const user = payload.user || state.session.user || {};
   $("#settings-username").value = user.username || "";
@@ -1671,6 +1669,25 @@ async function loadSettings() {
   }
   if (userCanManageAccounts()) await loadAccountManagement();
   else setHidden($("#account-management"), true);
+  refreshSelectPickers();
+}
+
+async function loadAppSettings() {
+  const fields = $("#app-settings-fields");
+  fields.disabled = true;
+  showNotice($("#app-settings-error"));
+  try {
+    if (!state.dataStore) throw new Error("앱 설정을 사용하려면 보관함을 먼저 열어 주세요.");
+    const settings = await state.dataStore.appSettings();
+    $("#work-recording").value = settings.workRecording;
+    $("#app-auto-save").value = String(settings.autoSave);
+    $("#app-knowledge-suggestions").value = String(settings.knowledgeSuggestions);
+    fields.disabled = false;
+    $("#app-settings-status").textContent = "저장한 설정은 다음 동기화부터 적용됩니다.";
+  } catch (error) {
+    $("#app-settings-status").textContent = "앱 설정을 불러오지 못했습니다.";
+    showNotice($("#app-settings-error"), error.message, "error");
+  }
   refreshSelectPickers();
 }
 
@@ -1721,11 +1738,11 @@ function openDialog(id, item) {
 async function returnAfterResourceSave(defaultView) {
   const destination = state.returnAfterDialog;
   state.returnAfterDialog = null;
-  if (destination?.startsWith("#projects/")) {
-    await setView("projects", { force: true });
+  if (destination?.startsWith("/project/")) {
+    await navigate(destination, { replace: true, force: true });
     return;
   }
-  await setView(defaultView, { force: true });
+  await navigate(routePath(defaultView), { replace: true, force: true });
 }
 
 function updateRuleScopeFields(form = $("#rule-form")) {
@@ -2259,17 +2276,17 @@ async function handleAction(button) {
     return;
   }
   if (action === "edit-rule") {
-    state.returnAfterDialog = state.view === "projects" ? window.location.hash : null;
+    state.returnAfterDialog = state.view === "projects" ? window.location.pathname : null;
     openDialog("rule-dialog", state.rules.get(id));
     return;
   }
   if (action === "edit-work") {
-    state.returnAfterDialog = state.view === "projects" ? window.location.hash : null;
+    state.returnAfterDialog = state.view === "projects" ? window.location.pathname : null;
     openDialog("work-dialog", state.work.get(id));
     return;
   }
   if (action === "edit-knowledge") {
-    state.returnAfterDialog = state.view === "projects" ? window.location.hash : null;
+    state.returnAfterDialog = state.view === "projects" ? window.location.pathname : null;
     openDialog("knowledge-dialog", state.knowledge.get(id));
     return;
   }
@@ -2288,7 +2305,7 @@ async function handleAction(button) {
     return;
   }
   if (action === "back-projects") {
-    window.location.hash = "projects";
+    await navigate(routePath("projects"));
     return;
   }
   if (action === "edit-project") {
@@ -2298,7 +2315,7 @@ async function handleAction(button) {
     return;
   }
   if (action === "new-project-rule") {
-    state.returnAfterDialog = window.location.hash;
+    state.returnAfterDialog = window.location.pathname;
     openDialog("rule-dialog");
     const form = $("#rule-form");
     form.elements.namedItem("scope").value = "repo";
@@ -2308,14 +2325,14 @@ async function handleAction(button) {
     return;
   }
   if (action === "new-project-work") {
-    state.returnAfterDialog = window.location.hash;
+    state.returnAfterDialog = window.location.pathname;
     openDialog("work-dialog");
     $("#work-form").elements.namedItem("repository").value = state.selectedProjectId;
     refreshSelectPickers();
     return;
   }
   if (action === "new-project-knowledge") {
-    state.returnAfterDialog = window.location.hash;
+    state.returnAfterDialog = window.location.pathname;
     openDialog("knowledge-dialog");
     const form = $("#knowledge-form");
     form.elements.namedItem("scope").value = "repo";
@@ -2648,7 +2665,7 @@ async function submitVaultReset(event) {
     state.loaded.clear();
     updateVaultLockControls();
     $("#vault-reset-dialog").close();
-    window.history.replaceState(null, "", "#home");
+    window.history.replaceState(null, "", "/home");
     await setView("home");
     toast("새 보관함을 만들었습니다.");
   } catch (error) {
@@ -3109,7 +3126,26 @@ async function initialize() {
   }
 }
 
-window.addEventListener("hashchange", () => setView(currentView()));
+function normalizeRoute() {
+  const route = readAppRoute(window.location);
+  if (route && (window.location.pathname !== route.path || /^#(?:home|projects|rules|work|knowledge|devices|revisions|security|settings)(?:\/|$)/.test(window.location.hash))) {
+    window.history.replaceState(null, "", route.path + window.location.search);
+  }
+}
+normalizeRoute();
+window.addEventListener("popstate", () => { normalizeRoute(); void setView(currentView()); });
+window.addEventListener("hashchange", () => { normalizeRoute(); void setView(currentView()); });
+document.addEventListener("click", (event) => {
+  if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  const anchor = event.target.closest("a[href]");
+  if (!anchor || anchor.hasAttribute("download") || (anchor.target && anchor.target !== "_self")) return;
+  const url = new URL(anchor.href, window.location.href);
+  if (url.origin !== window.location.origin || url.hash) return;
+  const route = readAppRoute(url);
+  if (!route) return;
+  event.preventDefault();
+  void navigate(route.path + url.search).catch((error) => toast(error.message, "error"));
+});
 let lastProjectRevalidationAt = 0;
 
 async function revalidateProjectsOnReturn() {
@@ -3388,6 +3424,33 @@ for (const button of $$('[data-device-install-mode]')) {
     updateDeviceCommands();
   });
 }
+$("#app-settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const fields = $("#app-settings-fields");
+  if (fields.disabled) return;
+  const button = event.currentTarget.querySelector('[type="submit"]');
+  const values = {
+    workRecording: $("#work-recording").value,
+    autoSave: $("#app-auto-save").value === "true",
+    knowledgeSuggestions: $("#app-knowledge-suggestions").value === "true",
+  };
+  fields.disabled = true;
+  setBusy(button, true, "저장 중…");
+  refreshSelectPickers();
+  showNotice($("#app-settings-error"));
+  try {
+    await state.dataStore.updateAppSettings(values);
+    const message = localSaveMessage("앱 설정을 저장했습니다.");
+    $("#app-settings-status").textContent = message;
+    toast(message);
+  } catch (error) {
+    showNotice($("#app-settings-error"), error.message, "error");
+  } finally {
+    fields.disabled = false;
+    setBusy(button, false);
+    refreshSelectPickers();
+  }
+});
 $("#settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.currentTarget.querySelector('[type="submit"]');

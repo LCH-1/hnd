@@ -311,7 +311,7 @@ export class OpaqueSyncServer {
     if (webAsset) {
       const assetDirectory = webAsset.source === 'browser'
         ? this.browserDirectory
-        : this.webDirectory;
+        : webAsset.source === 'shared' ? path.join(this.webDirectory, '..', 'shared') : this.webDirectory;
       if (!assetDirectory) throw new HttpError(404, 'Not found');
       await sendWebAsset(req, res, assetDirectory, webAsset);
       return;

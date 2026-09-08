@@ -1,4 +1,5 @@
 import { ApiError } from "./api.js";
+import { APP_SETTINGS_PATH, effectiveAppSettings, validAppSettings } from "../shared/app-settings.mjs";
 import {
   loadEncryptedSnapshot,
   openBrowserValue,
@@ -159,6 +160,7 @@ function assertAllowedPath(value) {
   }
   if (
     value !== GLOBAL_POLICY_PATH &&
+    value !== APP_SETTINGS_PATH &&
     value !== REPOSITORY_INDEX_PATH &&
     !value.startsWith("repositories/") &&
     !value.startsWith("knowledge/") &&
@@ -1880,6 +1882,7 @@ function mergeJsonValue(base, local, remote) {
 function mergeableJsonPath(path) {
   return (
     path === REPOSITORY_INDEX_PATH ||
+    path === APP_SETTINGS_PATH ||
     /^repositories\/[^/]+\/repository\.json$/.test(path) ||
     KNOWLEDGE_PATTERN.test(path) ||
     GLOBAL_RULE_RECORD_PATTERN.test(path) ||
@@ -2745,6 +2748,26 @@ export class SnapshotDataStore {
       const mirrorPath = `repositories/${current.id}/repository.json`;
       next = await replaceTextFile(next, mirrorPath, jsonText(metadata));
       return { snapshot: next, value: structuredClone(metadata) };
+    });
+  }
+
+  async appSettings() {
+    await this.load();
+    const file = fileAt(this.snapshot, APP_SETTINGS_PATH);
+    if (!file) return effectiveAppSettings();
+    const value = JSON.parse(textOf(file));
+    if (!validAppSettings(value)) throw new Error("앱 설정을 읽을 수 없습니다. 저장본을 확인해 주세요.");
+    return effectiveAppSettings(value);
+  }
+
+  async updateAppSettings(values) {
+    if (!validAppSettings({ ...values, schemaVersion: 1 })) throw new TypeError("앱 설정 값이 올바르지 않습니다.");
+    return this._commit(async (snapshot) => {
+      const file = fileAt(snapshot, APP_SETTINGS_PATH);
+      const current = file ? JSON.parse(textOf(file)) : { schemaVersion: 1 };
+      if (!validAppSettings(current)) throw new Error("기존 앱 설정을 읽을 수 없어 덮어쓰지 않았습니다.");
+      const next = { ...current, ...values, schemaVersion: 1 };
+      return { snapshot: await replaceTextFile(snapshot, APP_SETTINGS_PATH, jsonText(next)), value: effectiveAppSettings(next) };
     });
   }
 

@@ -12,6 +12,7 @@ src/cli-help.mjs
 src/cli-i18n.mjs
 src/cli.mjs
 src/constants.mjs
+src/core/app-settings.mjs
 src/core/checkpoints.mjs
 src/core/compose.mjs
 src/core/errors.mjs
@@ -39,6 +40,7 @@ src/materialize.mjs
 src/paths.mjs
 src/presentation.mjs
 src/remote-cli.mjs
+src/shared/app-settings.mjs
 src/sync/auto.mjs
 src/sync/capture.mjs
 src/sync/client.mjs

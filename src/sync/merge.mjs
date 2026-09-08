@@ -101,6 +101,7 @@ function parseJsonObject(contents) {
 
 function isMergeableJsonPath(relativePath) {
   return relativePath === REPOSITORY_INDEX_PATH
+    || relativePath === 'app-settings.json'
     || REPOSITORY_METADATA_PATTERN.test(relativePath)
     || KNOWLEDGE_ENTRY_PATTERN.test(relativePath)
     || RULE_ENTRY_PATTERN.test(relativePath);

@@ -7,6 +7,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { APP_SETTINGS_PATH } from '../shared/app-settings.mjs';
 import { withKnowledgeSnapshotLock } from '../core/knowledge.mjs';
 import {
   atomicWriteFile,
@@ -108,6 +109,7 @@ function normalizeRelativePath(value) {
   if (normalized !== value) throw new Error('Snapshot file path is not canonical');
   if (
     normalized !== GLOBAL_POLICY_PATH
+    && normalized !== APP_SETTINGS_PATH
     && normalized !== REPOSITORY_INDEX_PATH
     && !normalized.startsWith(REPOSITORIES_PREFIX)
     && !normalized.startsWith(KNOWLEDGE_PREFIX)
@@ -217,6 +219,9 @@ export async function captureSyncSnapshot(homeDirectory, options = {}) {
     limits,
   );
   if (repositoryIndex) files.push(repositoryIndex);
+  await assertNoSymlinkComponents(home, APP_SETTINGS_PATH);
+  const appSettings = await readCaptureFile(safeJoin(home, APP_SETTINGS_PATH), APP_SETTINGS_PATH, limits);
+  if (appSettings) files.push(appSettings);
   await walkManagedDirectory(
     safeJoin(home, 'repositories'),
     'repositories',

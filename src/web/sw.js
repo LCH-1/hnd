@@ -1,5 +1,6 @@
-const CACHE_NAME = "hnd-app-shell-v35";
-const APP_DOCUMENT = "/app";
+const CACHE_NAME = "hnd-app-shell-v36";
+const APP_DOCUMENT = "/home";
+const isAppNavigation = (pathname) => /^\/(?:app(?:\/.*)?|home\/?|project(?:\/[a-zA-Z0-9._-]+)?\/?|rule\/?|work\/?|knowledge\/?|device\/?|history\/?|security\/?|settings\/?)$/.test(pathname);
 const APP_ASSETS = Object.freeze([
   APP_DOCUMENT,
   "/web/styles.css",
@@ -9,6 +10,8 @@ const APP_ASSETS = Object.freeze([
   "/web/vault.js",
   "/web/ui.js",
   "/web/app.js",
+  "/web/app-routes.js",
+  "/shared/app-settings.mjs",
   "/web/select-picker.js",
   "/web/connector-release.js",
   "/web/snapshot-data.js",
@@ -96,7 +99,7 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (request.mode === "navigate" && /^\/app(?:\/|$)/.test(url.pathname)) {
+  if (request.mode === "navigate" && isAppNavigation(url.pathname)) {
     event.respondWith(appNavigation(request));
     return;
   }
@@ -125,7 +128,7 @@ self.addEventListener("message", (event) => {
               const url = new URL(client.url);
               return (
                 url.origin === self.location.origin &&
-                /^\/app(?:\/|$)/.test(url.pathname)
+                isAppNavigation(url.pathname)
               );
             })
             .map((client) => client.navigate(client.url)),

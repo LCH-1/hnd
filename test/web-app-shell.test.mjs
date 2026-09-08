@@ -20,9 +20,9 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(app, /logoutAfterRevokingOfflineAccess/u);
   assert.match(snapshotData, /sealBrowserValue[\s\S]*?offline-access:/u);
   assert.doesNotMatch(snapshotData, /rememberedAt|WORKSPACE_HINT_KEY/u);
-  assert.match(worker, /request\.mode === "navigate"[\s\S]*?\/app/u);
+  assert.match(worker, /request\.mode === "navigate" && isAppNavigation/u);
   assert.match(worker, /async function staticAsset[\s\S]*?await fetch\(request\)/u);
-  assert.match(worker, /hnd-app-shell-v35/u);
+  assert.match(worker, /hnd-app-shell-v36/u);
   assert.match(worker, /\/web\/select-picker\.js/u);
   assert.match(html, /class="app-title sr-only"/u);
   assert.match(html, /class="app-mobile-brand"/u);
@@ -119,7 +119,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(html, /다른 기기의 로컬 사본과 내보낸 파일은 지울 수 없습니다/u);
   assert.match(
     html,
-    /href="#devices"[\s\S]*?href="#security"[\s\S]*?href="#settings"/u,
+    /href="\/device"[\s\S]*?href="\/security"[\s\S]*?href="\/settings"/u,
   );
   assert.match(
     app,
@@ -211,7 +211,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   );
   const logoutHandler = app.slice(
     app.indexOf('$("#logout-button").addEventListener'),
-    app.indexOf('document.addEventListener("click"'),
+    app.indexOf('document.addEventListener("click"', app.indexOf('$("#logout-button").addEventListener')),
   );
   assert.match(
     logoutHandler,
@@ -225,7 +225,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
     onlineHandler,
     /unauthenticatedSession = true;[\s\S]*?localTenantIds\(\)[\s\S]*?disableOfflineWorkspace\(id, \{ sessionId: webSessionId\(\) \}\)[\s\S]*?if \(unauthenticatedSession\)[\s\S]*?새로고침해 다시 시도/u,
   );
-  assert.match(html, /href="#projects"[\s\S]*?data-view-link="projects"/u);
+  assert.match(html, /href="\/project"[\s\S]*?data-view-link="projects"/u);
   assert.doesNotMatch(html, /workspace-avatar/u);
   assert.doesNotMatch(styles, /\.workspace-avatar/u);
   assert.doesNotMatch(html, /workspace-label|sidebar-server/u);
@@ -241,7 +241,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(app, /async function loadProjects/u);
   assert.match(
     app,
-    /function currentProjectId\(\)[\s\S]*?try \{[\s\S]*?decodeURIComponent\(id\)[\s\S]*?catch \{[\s\S]*?return null/u,
+    /function currentProjectId\(\)[\s\S]*?readAppRoute\(window.location\)[\s\S]*?route\.id : null/u,
   );
   assert.match(app, /state\.dataStore\.project\(repository\.id\)/u);
   assert.match(app, /state\.dataStore\.updateProject\(values\.id, values\)/u);

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { readAppSettings, updateExistingAppSettings } from './app-settings.mjs';
 
 import { DEFAULT_STALE_HOURS, STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { repositoryPaths, statePaths } from '../paths.mjs';
@@ -297,6 +298,7 @@ export async function updateConfig(patch, { env = process.env, clock = Date } = 
     if (!validateConfig(next)) {
       throw new CoreError('INVALID_CONFIG', 'Configuration update is invalid', { patch });
     }
+    await updateExistingAppSettings(patch, { env });
     await writeJsonAtomic(paths.config, next);
     return next;
   });
@@ -318,7 +320,7 @@ export async function setActiveEnvironment(
 
 export async function getAutoSave(options = {}) {
   const config = await readConfig(options);
-  return config.autoSave !== false;
+  return (await readAppSettings({ ...options, localConfig: config })).autoSave;
 }
 
 export async function setAutoSave(enabled, { env = process.env, clock = Date } = {}) {

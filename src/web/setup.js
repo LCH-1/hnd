@@ -320,7 +320,7 @@ function configurePasskeyStep() {
 
 async function deriveAuthenticatedStep(session) {
   if (session?.onboarding?.complete) {
-    window.location.replace("/app");
+    window.location.replace("/home");
     return;
   }
   if (session?.requiresPasskey && session?.onboarding?.recovery) {

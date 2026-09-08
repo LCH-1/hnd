@@ -2,6 +2,7 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { isAppPath } from '../web/app-routes.js';
 
 const ASSETS = new Map([
   ['/web/styles.css', ['styles.css', 'text/css; charset=utf-8']],
@@ -13,6 +14,8 @@ const ASSETS = new Map([
   ['/web/entry.js', ['entry.js', 'text/javascript; charset=utf-8']],
   ['/web/setup.js', ['setup.js', 'text/javascript; charset=utf-8']],
   ['/web/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/web/app-routes.js', ['app-routes.js', 'text/javascript; charset=utf-8']],
+  ['/shared/app-settings.mjs', ['app-settings.mjs', 'text/javascript; charset=utf-8', 'shared']],
   ['/web/select-picker.js', ['select-picker.js', 'text/javascript; charset=utf-8']],
   ['/web/connector-release.js', ['connector-release.js', 'text/javascript; charset=utf-8']],
   ['/web/snapshot-data.js', ['snapshot-data.js', 'text/javascript; charset=utf-8']],
@@ -57,12 +60,12 @@ export function resolveWebAsset(pathname) {
   if (pathname === '/setup' || pathname === '/setup/') {
     return Object.freeze({ ...DOCUMENTS.setup, source: 'web' });
   }
-  if (pathname === '/app' || pathname === '/app/' || pathname.startsWith('/app/')) {
+  if (isAppPath(pathname)) {
     return Object.freeze({ ...DOCUMENTS.app, source: 'web' });
   }
   const asset = ASSETS.get(pathname);
   if (asset) {
-    return Object.freeze({ file: asset[0], contentType: asset[1], source: 'web' });
+    return Object.freeze({ file: asset[0], contentType: asset[1], source: asset[2] || 'web' });
   }
   const browserAsset = BROWSER_ASSETS.get(pathname);
   return browserAsset

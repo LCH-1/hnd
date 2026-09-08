@@ -27,12 +27,11 @@
   <body class="app-page">
     <!--
       DIRECTION CONTRACT
-      THESIS: 설치된 개인 서버의 상태와 다음 행동만 또렷하게 보여 주는 조용한 출입구다.
-      OWN-WORLD: 따뜻한 종이색 바탕과 네이비 원장 문법으로 로그인, 설정, 작업 기록이 한 제품처럼 이어진다. 빨강은 작은 충돌 표시와 복구 불가능한 동작에만 남긴다.
-      STORY: 서버 상태 확인, 패스키 로그인 또는 최초 설정, 작업 공간 진입 순서로 한 가지 결정만 요청한다.
-      FIRST VIEWPORT: 제품 홍보 없이 서버 문맥과 단일 인증 과업이 먼저 보인다.
-      FORM: Activity Ledger
-      SEED: a01d76f4
+      THESIS: 작업 공간의 기록 방식을 명확한 선택과 별도 저장으로 관리한다.
+      OWN-WORLD: 기존 Muted Cobalt, 흰 surface, 중립 텍스트, 6px 컨트롤과 공통 드롭다운을 유지한다.
+      STORY: 앱 설정의 적용 범위와 기록 방식을 확인하고 저장한다. 계정과 서버 소유자 설정은 분리한다.
+      FIRST VIEWPORT: 기존 사이드바 옆 설정 화면 맨 위에 앱 설정. 왼쪽 설명, 오른쪽 선택, 하단 저장. 모바일은 설명 아래 선택.
+      FORM: 기존 설정 화면 확장; 시안 없이 구현하도록 사용자가 지정. 공통 드롭다운의 선택과 저장 피드백을 유지한다.
       FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
     -->
     <a class="skip-link" href="#app-main">본문으로 건너뛰기</a>
@@ -44,7 +43,7 @@
     <div id="app-shell" class="app-shell" hidden>
       <aside id="app-sidebar" class="app-sidebar" aria-label="HND 메뉴">
         <div class="sidebar-head">
-          <a class="wordmark wordmark-light" href="/app" aria-label="HND 홈">
+          <a class="wordmark wordmark-light" href="/home" aria-label="HND 홈">
             <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
             <span>HND</span>
           </a>
@@ -66,7 +65,7 @@
           </button>
         </div>
         <nav class="app-nav" aria-label="작업 공간">
-          <a href="#home" data-view-link="home" aria-current="page"
+          <a href="/home" data-view-link="home" aria-current="page"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1v-9Z"
@@ -77,7 +76,7 @@
               /></svg
             ><span>홈</span></a
           >
-          <a href="#projects" data-view-link="projects"
+          <a href="/project" data-view-link="projects"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M4 5.5h6l2 2h8v11H4zM8 12h8M8 15h5"
@@ -89,7 +88,7 @@
               /></svg
             ><span>프로젝트</span></a
           >
-          <a href="#rules" data-view-link="rules"
+          <a href="/rule" data-view-link="rules"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4"
@@ -101,7 +100,7 @@
               /></svg
             ><span>룰</span></a
           >
-          <a href="#work" data-view-link="work"
+          <a href="/work" data-view-link="work"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M4 7h16v13H4zM9 7V4h6v3M4 12h16"
@@ -112,7 +111,7 @@
               /></svg
             ><span>작업</span></a
           >
-          <a href="#knowledge" data-view-link="knowledge"
+          <a href="/knowledge" data-view-link="knowledge"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4Zm3 12h11M9 8h6M9 11h5"
@@ -125,7 +124,7 @@
             ><span>지식</span></a
           >
           <div class="nav-separator" role="separator"></div>
-          <a href="#devices" data-view-link="devices"
+          <a href="/device" data-view-link="devices"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <rect
                 x="4"
@@ -146,7 +145,7 @@
               /></svg
             ><span>기기</span></a
           >
-          <a href="#revisions" data-view-link="revisions"
+          <a href="/history" data-view-link="revisions"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M4 7h16M6 3h12a2 2 0 0 1 2 2v15H4V5a2 2 0 0 1 2-2Zm3 8h6M9 15h4"
@@ -158,7 +157,7 @@
               /></svg
             ><span>저장 기록</span></a
           >
-          <a href="#security" data-view-link="security"
+          <a href="/security" data-view-link="security"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M12 3 5 6v5c0 4.6 2.9 8.1 7 10 4.1-1.9 7-5.4 7-10V6l-7-3Z"
@@ -175,7 +174,7 @@
               /></svg
             ><span>보안</span></a
           >
-          <a href="#settings" data-view-link="settings"
+          <a href="/settings" data-view-link="settings"
             ><svg viewBox="0 0 24 24" aria-hidden="true">
               <circle
                 cx="12"
@@ -255,12 +254,12 @@
             <h1 id="page-title">홈</h1>
             <p id="page-kicker" class="page-kicker">내 작업 공간</p>
           </div>
-          <a class="app-mobile-brand" href="#home" aria-label="HND 홈">
+          <a class="app-mobile-brand" href="/home" aria-label="HND 홈">
             <img class="wordmark-icon" src="/web/hnd-icon.png" alt="" />
             <span>HND</span>
           </a>
           <div class="app-header-actions">
-            <a id="sync-chip" class="server-chip" href="#home">
+            <a id="sync-chip" class="server-chip" href="/home">
               <span class="status-dot status-pending" aria-hidden="true"></span
               ><span>상태 확인 중</span>
             </a>
@@ -331,9 +330,9 @@
                 <h3 id="vault-account-title">계정은 계속 관리할 수 있습니다</h3>
                 <p>보관함 키 없이도 연결 현황과 로그인 보안을 확인할 수 있습니다.</p>
                 <nav class="vault-account-links" aria-label="계정 관리 바로가기">
-                  <a href="#devices">기기</a>
-                  <a href="#security">보안</a>
-                  <a href="#settings">설정</a>
+                  <a href="/device">기기</a>
+                  <a href="/security">보안</a>
+                  <a href="/settings">설정</a>
                 </nav>
               </section>
               <section
@@ -589,7 +588,7 @@
                       <h3>활동 기록</h3>
                       <p>룰·작업·지식 변경 순</p>
                     </div>
-                    <a href="#work">전체 보기</a>
+                    <a href="/work">전체 보기</a>
                   </div>
                   <div
                     id="home-work-list"
@@ -609,7 +608,7 @@
                       <h3>최근 지식</h3>
                       <p>다시 꺼내 쓰기 위해 남긴 내용</p>
                     </div>
-                    <a href="#knowledge">전체 보기</a>
+                    <a href="/knowledge">전체 보기</a>
                   </div>
                   <div
                     id="home-knowledge-list"
@@ -760,7 +759,7 @@
                       </button>
                     </div>
                     <div id="project-rules-list" class="project-data-list"></div>
-                    <a class="project-section-link" href="#rules">모든 룰 관리</a>
+                    <a class="project-section-link" href="/rule">모든 룰 관리</a>
                   </section>
 
                   <section class="project-section" aria-labelledby="project-work-title">
@@ -778,7 +777,7 @@
                       </button>
                     </div>
                     <div id="project-work-list" class="project-data-list"></div>
-                    <a class="project-section-link" href="#work">모든 작업 관리</a>
+                    <a class="project-section-link" href="/work">모든 작업 관리</a>
                   </section>
 
                   <section class="project-section project-knowledge-section" aria-labelledby="project-knowledge-title">
@@ -796,7 +795,7 @@
                       </button>
                     </div>
                     <div id="project-knowledge-list" class="project-data-list"></div>
-                    <a class="project-section-link" href="#knowledge">모든 지식 관리</a>
+                    <a class="project-section-link" href="/knowledge">모든 지식 관리</a>
                   </section>
                 </div>
 
@@ -1264,9 +1263,52 @@
               <div class="view-heading">
                 <div>
                   <h2 id="settings-title">설정</h2>
-                  <p>계정과 이 서버의 사용 방식을 관리합니다.</p>
+                  <p>앱의 기록 방식과 계정 설정을 관리합니다.</p>
                 </div>
               </div>
+              <form id="app-settings-form" class="settings-form panel" aria-labelledby="app-settings-title">
+                <div class="panel-head">
+                  <div>
+                    <h3 id="app-settings-title">앱 설정</h3>
+                    <p>이 작업 공간의 모든 프로젝트와 연결된 기기에 적용합니다.</p>
+                  </div>
+                </div>
+                <fieldset id="app-settings-fields" class="app-preferences" disabled>
+                  <div class="app-preference-row">
+                    <div>
+                      <label for="work-recording">작업 기록 방식</label>
+                      <p id="work-recording-help" class="field-help">자동 기록을 켜면 에이전트가 작업 목표와 진행 내용을 요약해 남깁니다. 단순 질문과 대화는 제외합니다.</p>
+                    </div>
+                    <select id="work-recording" name="workRecording" aria-describedby="work-recording-help">
+                      <option value="manual">기록을 요청할 때만</option>
+                      <option value="automatic">자동으로 기록</option>
+                    </select>
+                  </div>
+                  <div class="app-preference-row">
+                    <div>
+                      <label for="app-auto-save">Git 상태 자동 저장</label>
+                      <p id="app-auto-save-help" class="field-help">브랜치와 변경된 파일 목록을 저장합니다. 파일 본문은 수집하지 않습니다.</p>
+                    </div>
+                    <select id="app-auto-save" name="autoSave" aria-describedby="app-auto-save-help">
+                      <option value="true">켜짐</option><option value="false">꺼짐</option>
+                    </select>
+                  </div>
+                  <div class="app-preference-row">
+                    <div>
+                      <label for="app-knowledge-suggestions">지식 후보 자동 수집</label>
+                      <p id="app-knowledge-help" class="field-help">세션 마지막 응답을 지식 후보로 보관합니다. 직접 승인한 뒤에만 다음 작업에 활용합니다.</p>
+                    </div>
+                    <select id="app-knowledge-suggestions" name="knowledgeSuggestions" aria-describedby="app-knowledge-help">
+                      <option value="false">꺼짐</option><option value="true">켜짐</option>
+                    </select>
+                  </div>
+                  <div class="form-actions">
+                    <p id="app-settings-status" class="field-help" role="status" aria-live="polite">설정 불러오는 중…</p>
+                    <button class="button button-primary" type="submit">앱 설정 저장</button>
+                  </div>
+                </fieldset>
+                <div id="app-settings-error" class="notice" role="alert" hidden></div>
+              </form>
               <form id="settings-form" class="settings-form panel">
                 <div class="panel-head">
                   <div>
@@ -1369,7 +1411,7 @@
                 <div class="panel-head">
                   <div>
                     <h3>서버 가입</h3>
-                    <p>새 사용자가 이 서버에 들어오는 방식을 정합니다.</p>
+                    <p>서버 소유자만 변경할 수 있습니다.</p>
                   </div>
                 </div>
                 <label for="signup-mode">가입 방식</label

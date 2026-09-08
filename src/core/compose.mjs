@@ -4,10 +4,12 @@ import { BUNDLE_SCHEMA_VERSION, DEFAULT_MAX_CONTEXT_BYTES } from '../constants.m
 
 import { CoreError } from './errors.mjs';
 import { getCheckpoint } from './checkpoints.mjs';
+import { readAppSettings } from './app-settings.mjs';
+import { workRecordingInstructions } from '../shared/app-settings.mjs';
 import { findActiveHandoff, listHandoffs } from './handoffs.mjs';
 import { workSessionKey } from './work-session.mjs';
 import { inspectWorkCoordination } from './work-coordination.mjs';
-import { redactSensitiveText } from './privacy.mjs';
+import { collectionAllowed, getPrivacyPolicy, redactSensitiveText } from './privacy.mjs';
 import {
   effectiveLiveContextRevision,
   liveContextPreamble,
@@ -456,6 +458,14 @@ export async function composeEffectiveContext({
     ? null
     : activeRuleTest(await readConfig({ env, clock }), repository, activeEnvironment);
   const config = await readConfig({ env, clock });
+  const appSettings = await readAppSettings({ env, localConfig: config });
+  const recordingInstructions = workRecordingInstructions(appSettings.workRecording);
+  if (repository && !testPolicy && recordingInstructions) {
+    const privacy = await getPrivacyPolicy({ repoId: repository.id, sessionKey, env, clock });
+    if (collectionAllowed({ policy: privacy, sourceKind: 'session' })) {
+      layers.push(policyLayer('global', 'Policy: Automatic work recording', recordingInstructions, 'app-settings.json', 5, { id: 'policy:app-settings' }));
+    }
+  }
 
   const globalPolicy = await loadPolicy('global', { env, clock }, policyOverrides, testPolicy);
   if (globalPolicy.exists) {
