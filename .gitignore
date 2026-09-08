@@ -12,3 +12,4 @@ images/
 .env
 .env.*
 !.env.example
+docs
