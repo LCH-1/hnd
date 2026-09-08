@@ -2,14 +2,32 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { versionAtLeast } from '../src/update/manifest.mjs';
+import {
+  CONNECTOR_PACKAGE_NAME,
+  CONNECTOR_PACKAGE_SPEC,
+  CONNECTOR_PACKAGE_VERSION,
+} from '../src/web/connector-release.js';
+
+test('web connector install pins an exact stable release no newer than the prepared launcher', async () => {
+  const rootPackage = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(CONNECTOR_PACKAGE_NAME, '@lch-1/hnd');
+  assert.match(CONNECTOR_PACKAGE_VERSION, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u);
+  assert.equal(CONNECTOR_PACKAGE_SPEC, `${CONNECTOR_PACKAGE_NAME}@${CONNECTOR_PACKAGE_VERSION}`);
+  // A prepared launcher may not be published yet. Keep the web pin on the
+  // published release; deployment verifies registry availability and minimum compatibility.
+  assert.ok(
+    versionAtLeast(rootPackage.version, CONNECTOR_PACKAGE_VERSION),
+    'The web install pin must not be newer than the prepared launcher',
+  );
+});
+
 test('setup keeps a server retry path and lets users defer the optional PC connection', async () => {
-  const [html, script, release, entry, styles, rootPackage] = await Promise.all([
+  const [html, script, entry, styles] = await Promise.all([
     readFile(new URL('../src/web/setup.html', import.meta.url), 'utf8'),
     readFile(new URL('../src/web/setup.js', import.meta.url), 'utf8'),
-    readFile(new URL('../src/web/connector-release.js', import.meta.url), 'utf8'),
     readFile(new URL('../src/web/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../src/web/styles.css', import.meta.url), 'utf8'),
-    readFile(new URL('../package.json', import.meta.url), 'utf8').then(JSON.parse),
   ]);
   assert.match(entry, /첫 소유자 계정을 웹에서 바로 만듭니다/u);
   assert.match(entry, /소유자 계정 만들기/u);
@@ -111,8 +129,6 @@ test('setup keeps a server retry path and lets users defer the optional PC conne
   assert.doesNotMatch(script, /Invoke-WebRequest -UseBasicParsing/u);
   assert.doesNotMatch(script, /LOCALAPPDATA/u);
   assert.doesNotMatch(script, /export PATH=/u);
-  assert.match(release, /CONNECTOR_PACKAGE_NAME = "@lch-1\/hnd"/u);
-  assert.match(release, new RegExp(`CONNECTOR_PACKAGE_VERSION = "${rootPackage.version.replaceAll('.', '\\.')}"`, 'u'));
   assert.match(html, /id="create-device-invitation"/u);
   assert.match(html, /id="cancel-device-auth"[\s\S]*?패스키 인증 취소/u);
   assert.match(html, /id="device-invitation"/u);
