@@ -1134,29 +1134,63 @@ async function handleAdapters({
           optional: true,
         })
       : { operations: [] };
-    return applyOperations([...materialized.operations, ...adapterOperations], { dryRun });
+    const applied = await applyOperations([...materialized.operations, ...adapterOperations], { dryRun });
+    return { applied, materialized };
   };
-  const applied = dryRun
+  const { applied, materialized } = dryRun
     ? await planAndApply()
     : await withAdapterMutationLock(env, planAndApply);
   const summary = summarizeOperations(applied);
   if (jsonOutput) writeJson({ dryRun, operations: summary }, stdout);
   else {
-    if (summary.length === 0) {
+    const changed = summary.filter((item) => item.changed);
+    if (dryRun) writeText(stdout, ct('미리보기: 파일을 변경하지 않았습니다.'));
+    if (changed.length === 0) {
       if (action === 'install') {
-        writeText(stdout, cliLanguage() === 'ko'
-          ? '설정이 이미 완료되어 변경할 내용이 없습니다.'
-          : 'Setup is already complete. No changes needed.');
+        writeText(stdout, materialized.skipped
+          ? ct('사용자 공통 설정은 이미 완료되어 변경할 내용이 없습니다.')
+          : ct('설정이 이미 완료되어 변경할 내용이 없습니다.'));
       } else {
-        writeText(stdout, cliLanguage() === 'ko'
-          ? '제거할 HND 관리 파일이 없습니다.'
-          : 'No HND-managed files found. Nothing to uninstall.');
+        writeText(stdout, ct('제거할 HND 관리 설정이 없습니다.'));
       }
-      return;
+    } else {
+      writeText(stdout, dryRun
+        ? ct(action === 'install' ? '다음 파일에 HND 설정을 적용할 예정입니다.' : '다음 파일에서 HND 설정을 제거할 예정입니다.')
+        : ct(action === 'install' ? 'HND 설정을 적용했습니다.' : 'HND 설정을 제거했습니다. 다른 사용자 설정은 보존했습니다.'));
     }
-    for (const item of summary) {
-      const verb = item.changed ? (dryRun ? `would ${item.action}` : item.action) : 'unchanged';
-      writeText(stdout, `${verb.padEnd(13)} ${item.path}`);
+    const projectComponents = new Set(['cursor-rule', 'cursor-exclude']);
+    for (const [projectOnly, label] of [
+      [true, '프로젝트 전용 — 현재 Git 저장소'],
+      [false, '사용자 공통 — 이 PC의 같은 사용자로 실행하는 모든 프로젝트'],
+    ]) {
+      const items = summary.filter((item) => projectComponents.has(item.component) === projectOnly);
+      if (items.length === 0) continue;
+      writeText(stdout, ct(label));
+      for (const item of items) {
+        const verb = !item.changed ? ct('변경 없음')
+          : dryRun ? ct(item.action === 'write' ? '저장 예정' : '삭제 예정')
+            : ct(item.action === 'write' ? '저장' : '삭제');
+        writeText(stdout, `  ${verb}  ${item.path}`);
+      }
+    }
+    if (action === 'install') {
+      writeText(stdout, agents.includes('cursor')
+        ? ct('Cursor 룰은 프로젝트마다 설정하고, 훅·스킬은 사용자 공통 설정을 공유합니다. 같은 내용의 파일은 다시 저장하지 않습니다.')
+        : ct('훅·스킬은 사용자 공통 설정입니다. 같은 내용의 파일은 다시 저장하지 않습니다.'));
+    }
+    if (materialized.skipped) {
+      const unregistered = materialized.skipped === 'REPOSITORY_NOT_REGISTERED';
+      writeText(stdout, unregistered
+        ? ct('프로젝트 전용 Cursor 룰은 건너뛰었습니다. 현재 Git 저장소가 HND에 등록되지 않았습니다.')
+        : ct('프로젝트 전용 Cursor 룰은 건너뛰었습니다. 현재 경로가 Git 저장소가 아닙니다.'));
+      if (action === 'install') {
+        writeText(stdout, unregistered
+          ? ct('다음 단계: hnd init으로 현재 프로젝트를 등록한 뒤 hnd setup을 실행하세요.')
+          : ct('다음 단계: Git 프로젝트 경로에서 hnd init을 실행한 뒤 hnd setup을 실행하세요.'));
+      }
+    }
+    if (action === 'install') {
+      writeText(stdout, `${ct('설정 확인')}: hnd doctor --agents ${agents.join(',')}`);
     }
     if (
       action === 'install'

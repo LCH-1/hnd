@@ -218,5 +218,6 @@ test('npm package is public client-only and installs as a global hnd command', a
     encoding: 'utf8',
     timeout: 10_000,
   });
-  assert.match(setupDryRun.stdout, /would write/u);
+  assert.match(setupDryRun.stdout, /Preview: no files were changed/u);
+  assert.match(setupDryRun.stdout, /Would save/u);
 });

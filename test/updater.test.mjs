@@ -233,22 +233,58 @@ test('update status separates the npm launcher, local runtime, and server runtim
   env.LANG = 'ko_KR.UTF-8';
   const stdout = outputStream();
   const stderr = outputStream();
-  await launcherMain(['update', 'status'], { env, stdout, stderr });
+  const fetchImpl = async () => Response.json({ name: '@lch-1/hnd', version: LAUNCHER_VERSION });
+  await launcherMain(['update', 'status'], { env, stdout, stderr, fetchImpl });
   const status = stdout.text();
-  assert.match(status, /npm 런처: \d+\.\d+\.\d+/u);
-  assert.match(status, /로컬 런타임: \d+\.\d+\.\d+ · npm 내장/u);
-  assert.match(status, /서버 제공 런타임: PC 연결 후 확인 가능/u);
-  assert.match(status, /업데이트 상태: 중앙 서버에 PC 연결 필요/u);
+  assert.match(status, /현재 npm 런처: \d+\.\d+\.\d+/u);
+  assert.match(status, /현재 클라이언트: \d+\.\d+\.\d+ · npm 내장/u);
+  assert.match(status, /최신 클라이언트 \(연결된 서버 기준\): 확인 불가/u);
+  assert.match(status, /판단 불가 · PC 연결이 필요/u);
+  assert.match(status, /현재 서버 프로그램 버전: 확인 불가/u);
+  assert.doesNotMatch(status, /일치함|적용 상태/u);
   assert.equal(stderr.text(), '');
 
   const jsonOut = outputStream();
-  await launcherMain(['update', 'status', '--json'], { env, stdout: jsonOut, stderr });
+  await launcherMain(['update', 'status', '--json'], { env, stdout: jsonOut, stderr, fetchImpl });
   const json = JSON.parse(jsonOut.text());
   assert.equal(json.launcherVersion, LAUNCHER_VERSION);
   assert.equal(json.clientRelease.version, RUNTIME_VERSION);
   assert.notEqual(json.launcherVersion, json.clientRelease.version);
   assert.equal(json.clientRelease.builtIn, true);
   assert.equal(json.serverRelease, null);
+  assert.equal(json.launcherLatestVersion, LAUNCHER_VERSION);
+  assert.equal(json.clientUpdate.status, 'not_connected');
+});
+
+test('failed update checks retain installed versions, give recovery steps, and preserve failure exit semantics', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  env.LANG = 'ko_KR.UTF-8';
+  await configureRemote(env);
+  const fetchImpl = async (url) => String(url).startsWith('https://registry.npmjs.org/')
+    ? Response.json({ name: '@lch-1/hnd', version: '9.0.0' })
+    : new Response('offline', { status: 503 });
+  for (const action of ['status', 'check', 'apply']) {
+    const stdout = outputStream();
+    const stderr = outputStream();
+    const pending = launcherMain(['update', action], { env, stdout, stderr, fetchImpl });
+    if (action === 'status') await pending;
+    else await assert.rejects(pending, /HTTP 503/);
+    const text = stdout.text();
+    assert.match(text, /현재 클라이언트: \d+\.\d+\.\d+/u);
+    assert.match(text, /판단 불가 · 서버를 확인할 수 없습니다/u);
+    assert.match(text, /다음 명령: hnd update check/u);
+    assert.match(text, /npm install --global @lch-1\/hnd@latest/u);
+    assert.doesNotMatch(text, /업데이트 완료|일치함|적용 상태/u);
+  }
+  const stdout = outputStream();
+  await assert.rejects(launcherMain(['update', 'check', '--json'], {
+    env, stdout, stderr: outputStream(), fetchImpl,
+  }), /HTTP 503/);
+  const result = JSON.parse(stdout.text());
+  assert.equal(result.clientUpdate.status, 'check_failed');
+  assert.equal(result.serverRelease, null);
+  assert.equal(Object.hasOwn(result, 'remote'), false);
+  assert.ok(!stdout.text().includes('hndd_'));
 });
 
 test('connector manifests verify Ed25519 signatures and reject tampering, rollback, and old launchers', () => {

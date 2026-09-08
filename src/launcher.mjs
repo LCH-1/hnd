@@ -19,6 +19,8 @@ import {
   runtimeReady,
 } from './update/state.mjs';
 import { refreshManagedSkillsAfterUpdate } from './update/integration.mjs';
+import { checkLauncherRelease } from './update/registry.mjs';
+import { describeClientUpdate, formatUpdateReport } from './update/report.mjs';
 import './update/worker.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -47,25 +49,6 @@ function releaseDescriptor(release, { builtIn = false } = {}) {
     sha256: releaseDigest(release),
     builtIn,
   };
-}
-
-function releaseLabel(release, { ko, builtIn = false } = {}) {
-  if (!release) return ko ? '확인되지 않음' : 'unknown';
-  if (builtIn) return ko ? `${release.version} · npm 내장` : `${release.version} · npm built-in`;
-  const digest = releaseDigest(release);
-  return [
-    release.version,
-    release.sequence === undefined || release.sequence === null
-      ? null
-      : (ko ? `릴리스 ${release.sequence}` : `release ${release.sequence}`),
-    digest ? digest.slice(0, 12) : null,
-  ].filter(Boolean).join(' · ');
-}
-
-function sameRelease(left, right) {
-  const leftDigest = releaseDigest(left);
-  const rightDigest = releaseDigest(right);
-  return Boolean(leftDigest && rightDigest && leftDigest === rightDigest);
 }
 
 function withoutSignature(release) {
@@ -145,18 +128,26 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   if (action === 'help' || action === '--help' || action === '-h') {
     writeText(stdout, ko ? [
       '사용법:',
-      '  hnd update status',
-      '  hnd update check',
-      '  hnd update apply',
-      '  hnd update rollback',
+      '  hnd update status    현재·최신 클라이언트와 npm 런처 버전, 필요한 명령 확인',
+      '  hnd update check     연결된 서버와 npm 공식 registry에서 최신 정보 조회',
+      '  hnd update apply     이 PC의 클라이언트 업데이트 (서버는 변경하지 않음)',
+      '  hnd update rollback  이전 정상 클라이언트로 복구하고 문제 릴리스 적용 차단',
+      '  npm install --global @lch-1/hnd@latest    npm 런처 업데이트',
+      '',
+      '서버 프로그램은 서버 관리자가 별도로 배포합니다: docs/DEPLOYMENT.md',
+      '서버 자체 버전과 최신 서버 릴리스는 현재 조회 기능이 없습니다. 서버가 제공하는 클라이언트 버전과 구분합니다.',
       '',
       'hnd 명령을 실행할 때 마지막 확인 시도 후 6시간이 지났으면 짧은 백그라운드 확인을 시작합니다. 계속 실행되는 업데이트 프로그램은 없습니다. 서버가 꺼져 있으면 마지막 정상 버전을 계속 사용합니다.',
     ].join('\n') : [
       'Usage:',
-      '  hnd update status',
-      '  hnd update check',
-      '  hnd update apply',
-      '  hnd update rollback',
+      '  hnd update status    Show installed/latest client and npm launcher versions and next steps',
+      '  hnd update check     Check the connected server and official npm registry',
+      '  hnd update apply     Update this PC client (does not update the server)',
+      '  hnd update rollback  Restore the previous client and block the problematic release',
+      '  npm install --global @lch-1/hnd@latest    Update the npm launcher',
+      '',
+      'Server administrators deploy the server separately: docs/DEPLOYMENT.md',
+      'Server program and latest server release versions are not currently exposed; the client release offered by the server is separate.',
       '',
       'HND starts a short background check when the last attempt was more than 6 hours ago. No updater runs continuously. If the server is unavailable, the last verified version remains active.',
     ].join('\n'));
@@ -166,39 +157,44 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     throw new Error(`알 수 없는 update 작업: ${action}`);
   }
   let result;
-  if (action === 'status') {
+  let operationError = null;
+  if (action === 'rollback') result = await rollbackConnectorUpdate(env);
+  else {
+    // A failed version check must not erase the locally installed version or
+    // present an unavailable/quarantined release as already up to date.
     result = await connectorUpdateStatus(env);
-    if (result.configured) {
+    const launcherCheck = checkLauncherRelease({ fetchImpl });
+    try {
+      const checked = action === 'apply'
+        ? await applyConnectorUpdate(updateOptions(env, { fetchImpl }))
+        : await checkConnectorUpdate(updateOptions(env, { fetchImpl, timeoutMs: 5_000 }));
+      result = {
+        ...result,
+        ...checked,
+        serverRelease: checked.manifest ?? null,
+        serverCheckedAt: checked.configured ? new Date().toISOString() : null,
+        serverError: null,
+      };
+    } catch (error) {
+      operationError = error;
+      result = {
+        ...result,
+        serverRelease: null,
+        available: null,
+        serverCheckedAt: null,
+        serverError: error?.message || String(error),
+      };
+    }
+    if (action === 'apply' && !operationError) {
       try {
-        const checked = await checkConnectorUpdate(updateOptions(env, { fetchImpl, timeoutMs: 5_000 }));
-        result = {
-          ...result,
-          serverRelease: checked.manifest,
-          available: checked.available,
-          quarantined: checked.quarantined,
-          serverCheckedAt: new Date().toISOString(),
-          serverError: null,
-        };
+        result.refreshedSkills = await refreshManagedSkillsAfterUpdate(result, env);
       } catch (error) {
-        result = {
-          ...result,
-          serverRelease: null,
-          available: null,
-          serverCheckedAt: null,
-          serverError: error?.message || String(error),
-        };
+        operationError = error;
+        result.skillsRefreshError = error?.message || String(error);
       }
     }
+    result = { ...result, ...await launcherCheck };
   }
-  else if (action === 'check') result = await checkConnectorUpdate(updateOptions(env, { fetchImpl }));
-  else if (action === 'apply') {
-    result = await applyConnectorUpdate(updateOptions(env, { fetchImpl }));
-    result = {
-      ...result,
-      refreshedSkills: await refreshManagedSkillsAfterUpdate(result, env),
-    };
-  }
-  else result = await rollbackConnectorUpdate(env);
   const activeRelease = action === 'apply' && result.pointer ? result.pointer : result.current;
   result = {
     ...result,
@@ -209,72 +205,26 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     ),
     serverRelease: result.serverRelease ?? result.manifest ?? null,
   };
+  if (action !== 'rollback') result.clientUpdate = describeClientUpdate(result);
   if (json) {
     const safe = { ...result };
     delete safe.remote;
     safe.manifest = withoutSignature(safe.manifest);
     safe.serverRelease = withoutSignature(safe.serverRelease);
     writeJson(stdout, safe);
+    if (operationError && action !== 'status') throw operationError;
     return;
   }
-  if (action === 'status') {
-    writeText(stdout, ko ? [
-      `중앙 서버: ${result.configured ? `연결됨 (${result.server})` : 'PC 연결 후 확인 가능'}`,
-      `npm 런처: ${result.launcherVersion}`,
-      `로컬 런타임: ${releaseLabel(result.clientRelease, { ko: true, builtIn: result.clientRelease.builtIn })}`,
-      `서버 제공 런타임: ${!result.configured ? 'PC 연결 후 확인 가능' : result.serverError ? `확인 실패 (${result.serverError})` : releaseLabel(result.serverRelease, { ko: true })}`,
-      `업데이트 상태: ${!result.configured ? '중앙 서버에 PC 연결 필요' : result.serverError ? '서버 확인 실패 · 로컬 런타임은 계속 사용 가능' : result.available ? '업데이트 가능' : '최신 · 로컬 런타임과 서버가 일치함'}`,
-      `이전 런타임: ${releaseLabel(result.previous, { ko: true })}`,
-      `최근 확인: ${result.update?.lastCheckedAt ?? '아직 없음'}`,
-      result.lastError ? `최근 오류: ${result.lastError.message}` : '최근 오류: 없음',
-    ].join('\n') : [
-      `Central server: ${result.configured ? `connected (${result.server})` : 'available after PC connection'}`,
-      `npm launcher: ${result.launcherVersion}`,
-      `Local runtime: ${releaseLabel(result.clientRelease, { ko: false, builtIn: result.clientRelease.builtIn })}`,
-      `Server runtime: ${!result.configured ? 'available after PC connection' : result.serverError ? `check failed (${result.serverError})` : releaseLabel(result.serverRelease, { ko: false })}`,
-      `Update state: ${!result.configured ? 'connect this PC to the central server' : result.serverError ? 'server check failed; the local runtime remains usable' : result.available ? 'update available' : 'current; local runtime and server match'}`,
-      `Previous runtime: ${releaseLabel(result.previous, { ko: false })}`,
-      `Last check: ${result.update?.lastCheckedAt ?? 'never'}`,
-      result.lastError ? `Last error: ${result.lastError.message}` : 'Last error: none',
-    ].join('\n'));
-  } else if (action === 'check') {
-    if (!result.configured) {
-      writeText(stdout, ko
-        ? '이 PC를 HND 서버에 먼저 연결하세요.'
-        : 'Connect this PC to the HND server first.');
-    } else {
-      writeText(stdout, (ko ? [
-        `로컬 런타임: ${releaseLabel(result.clientRelease, { ko: true, builtIn: result.clientRelease.builtIn })}`,
-        `서버 제공 런타임: ${releaseLabel(result.serverRelease, { ko: true })}`,
-        `확인 결과: ${result.available ? '업데이트 가능' : '최신 · 로컬 런타임과 서버가 일치함'}`,
-      ] : [
-        `Local runtime: ${releaseLabel(result.clientRelease, { ko: false, builtIn: result.clientRelease.builtIn })}`,
-        `Server runtime: ${releaseLabel(result.serverRelease, { ko: false })}`,
-        `Result: ${result.available ? 'update available' : 'current; local runtime and server match'}`,
-      ]).join('\n'));
-    }
-  } else if (action === 'apply') {
-    if (!result.configured) {
-      writeText(stdout, ko
-        ? '이 PC는 HND 서버에 연결되지 않아 업데이트할 수 없습니다. 웹의 [기기 → PC 연결]에서 새 명령을 만든 뒤 먼저 연결하세요.'
-        : 'This PC is not connected to an HND server. Create a new command under [Devices → Connect PC] and connect it first.');
-    } else {
-      writeText(stdout, (ko ? [
-        result.installed ? '업데이트 완료' : '변경 없음',
-        `로컬 런타임: ${releaseLabel(result.clientRelease, { ko: true, builtIn: result.clientRelease.builtIn })}`,
-        `서버 제공 런타임: ${releaseLabel(result.serverRelease, { ko: true })}`,
-        `적용 상태: ${sameRelease(result.clientRelease, result.serverRelease) ? '일치함' : '일치하지 않음'}`,
-      ] : [
-        result.installed ? 'Update complete' : 'No changes',
-        `Local runtime: ${releaseLabel(result.clientRelease, { ko: false, builtIn: result.clientRelease.builtIn })}`,
-        `Server runtime: ${releaseLabel(result.serverRelease, { ko: false })}`,
-        `Applied state: ${sameRelease(result.clientRelease, result.serverRelease) ? 'matching' : 'not matching'}`,
-      ]).join('\n'));
-    }
-  } else {
+  if (action === 'rollback') {
     writeText(stdout, ko
-      ? `이전 버전으로 전환했습니다: ${result.current.version}`
-      : `Rolled back to the previous version: ${result.current.version}`);
+      ? `이전 정상 클라이언트로 복구했습니다: ${result.current.version}\n문제가 있던 릴리스는 다시 적용하지 않습니다.\n다음 단계: hnd update check`
+      : `Restored the previous verified client: ${result.current.version}\nThe problematic release will not be reapplied.\nNext: hnd update check`);
+  } else {
+    writeText(stdout, formatUpdateReport(result, { action, ko }));
+    if (result.skillsRefreshError) writeText(stderr, ko
+      ? '클라이언트 버전 확인/적용은 끝났지만 기존 스킬 갱신에 실패했습니다. hnd update apply로 다시 시도하세요.'
+      : 'Client processing finished, but managed skill refresh failed. Retry with hnd update apply.');
+    if (operationError && action !== 'status') throw operationError;
   }
 }
 

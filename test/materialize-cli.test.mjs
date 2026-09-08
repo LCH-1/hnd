@@ -111,7 +111,7 @@ test('setup installs the fallback and cursor hook preserves output when a user t
 
   await item.run(['setup', '--agents', 'cursor']);
   const repeatedSetup = await item.run(['setup', '--agents', 'cursor']);
-  assert.equal(repeatedSetup.stdout, 'Setup is already complete. No changes needed.\n');
+  assert.match(repeatedSetup.stdout, /^Setup is already complete\. No changes needed\.\n/u);
   assert.match(await fs.readFile(item.rule, 'utf8'), /SETUP-MATERIALIZED/);
   await item.run(['uninstall', '--agents', 'cursor']);
 
