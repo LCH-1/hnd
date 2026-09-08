@@ -43,6 +43,7 @@ import {
 import {
   getRepository,
   getRepositoryEnvironment,
+  initializeRepository,
   linkRepository,
   listBindings,
   listRepositories,
@@ -224,6 +225,8 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
       ),
     }),
     repo: Object.freeze({
+      init: (options = {}) =>
+        locked(() => initializeRepository(withDefaults(options, defaults, { cwd: true }))),
       resolve: (options = {}) =>
         locked(() => resolveRepository(withDefaults(options, defaults, { cwd: true }))),
       register: (options = {}) =>

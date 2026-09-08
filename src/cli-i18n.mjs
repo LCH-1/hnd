@@ -73,6 +73,9 @@ export async function saveLanguagePreference(preference, env = process.env) {
 
 const EN = Object.freeze({
   '프로젝트 등록 완료': 'Project registered',
+  '이미 등록된 프로젝트입니다.': 'This project is already registered.',
+  '프로젝트 연결 완료': 'Project linked',
+  '환경 변경': 'Change environment',
   '환경 선택을 해제했습니다.': 'Environment selection cleared.',
   '선택된 환경이 없습니다.': 'No environment selected.',
   'Cursor 룰이 최신 상태입니다.': 'Cursor rules are up to date.',

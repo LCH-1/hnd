@@ -77,7 +77,7 @@ const PROJECT_HELP = `hnd project — 프로젝트 등록과 환경
   Git 저장소에서 Claude Code·Codex·Cursor 세션을 시작하면 자동 등록됩니다.
   즉시 직접 등록하거나 자동 등록을 확인하려면 아래 명령을 사용합니다.
 
-  hnd init [--cwd DIR] [--env LABEL]        현재 Git 저장소 등록
+  hnd init [--cwd DIR] [--env LABEL]        최초 등록 (기존 설정은 변경하지 않음)
   hnd status [--cwd DIR] [--json]           현재 상태 확인
   hnd env set LABEL [--cwd DIR]             이 체크아웃의 환경 선택
   hnd env show [--cwd DIR]                  선택한 환경 확인
@@ -268,7 +268,7 @@ Recommended flow:
   Starting Claude Code, Codex, or Cursor in a Git repository registers it automatically.
   Use these commands to register immediately or inspect automatic registration.
 
-  hnd init [--cwd DIR] [--env LABEL]        Register the current Git repository
+  hnd init [--cwd DIR] [--env LABEL]        First-time registration (keeps existing settings)
   hnd status [--cwd DIR] [--json]           Show current status
   hnd env set LABEL [--cwd DIR]             Select this checkout's environment
   hnd env show [--cwd DIR]                  Show the selected environment

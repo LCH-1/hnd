@@ -7,6 +7,8 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 
 import { main } from '../src/cli.mjs';
+import { createCore } from '../src/core/index.mjs';
+import { statePaths } from '../src/paths.mjs';
 
 function captureStream() {
   let value = '';
@@ -71,7 +73,38 @@ test('init keeps an independent environment for each checkout', async (context) 
   assert.equal(JSON.parse((await run(['init', '--json'], secondRepository)).stdout).environment, 'default');
   assert.equal(JSON.parse((await run(['env', 'show', '--json'])).stdout).environment, 'laptop');
 
-  assert.equal(JSON.parse((await run(['init', '--env', 'staging', '--json'])).stdout).environment, 'staging');
+  const beforeRepeat = await fs.readFile(statePaths(env).bindings, 'utf8');
+  const cursorBeforeRepeat = await fs.readFile(path.join(firstRepository, '.cursor/rules/50-hnd.mdc'), 'utf8');
+  const repeated = JSON.parse((await run(['init', '--env', 'staging', '--json'])).stdout);
+  assert.equal(repeated.environment, 'laptop');
+  assert.equal(repeated.registrationStatus, 'existing');
+  assert.equal(await fs.readFile(statePaths(env).bindings, 'utf8'), beforeRepeat);
+  assert.equal(await fs.readFile(path.join(firstRepository, '.cursor/rules/50-hnd.mdc'), 'utf8'), cursorBeforeRepeat);
+  const repeatedText = (await run(['init', '--env', 'deva'])).stdout;
+  assert.match(repeatedText, /이미 등록된 프로젝트입니다\./u);
+  assert.doesNotMatch(repeatedText, /프로젝트 등록 완료/u);
+  assert.match(repeatedText, /환경: laptop/u);
+  assert.match(repeatedText, /hnd env set LABEL/u);
+  await run(['env', 'set', 'staging']);
+  assert.equal(JSON.parse((await run(['init', '--json'])).stdout).environment, 'staging');
   await run(['env', 'clear']);
-  assert.equal(JSON.parse((await run(['init', '--json'])).stdout).environment, 'default');
+  assert.equal(JSON.parse((await run(['init', '--json'])).stdout).environment, null);
+});
+
+test('concurrent init preserves the first environment; invalid first-time input creates no binding', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-init-once-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, 'repo');
+  await fs.mkdir(repository);
+  initializeRepository(repository);
+  const env = { ...process.env, HND_HOME: path.join(root, 'state'), HND_USER_HOME: path.join(root, 'user') };
+  const core = createCore({ cwd: repository, env });
+  await assert.rejects(core.repo.init({ environment: '../invalid' }), { code: 'INVALID_ENVIRONMENT' });
+  assert.deepEqual((await core.repo.list()), []);
+  const results = await Promise.all(['dev', 'deva', 'prod'].map((environment) => core.repo.init({ environment })));
+  const created = results.find((result) => result.registrationStatus === 'created');
+  assert.ok(created);
+  assert.equal(results.filter((result) => result.registrationStatus === 'created').length, 1);
+  assert.ok(results.every((result) => result.environment === created.environment));
+  assert.equal(await core.env.get(), created.environment);
 });

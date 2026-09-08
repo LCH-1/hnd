@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { STATE_SCHEMA_VERSION } from '../constants.mjs';
+import { DEFAULT_ENVIRONMENT, STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { normalizeFsPath, repositoryPaths, statePaths } from '../paths.mjs';
 import { detectGitCheckout, detectGitRepository } from './git.mjs';
 import { CoreError } from './errors.mjs';
@@ -293,6 +293,40 @@ export async function resolveRepository({
       environment: undefined,
     };
   });
+}
+
+/** First-time checkout setup. Call under the state lock to keep concurrent init
+ * commands from changing the environment selected by the first registration. */
+export async function initializeRepository({
+  cwd = process.cwd(), env = process.env, clock = Date, environment,
+} = {}) {
+  let existing;
+  try {
+    existing = await resolveRepositoryBinding({ cwd, env, clock });
+  } catch (error) {
+    if (error.code !== 'REPOSITORY_NOT_REGISTERED') throw error;
+  }
+  if (existing) {
+    return {
+      ...existing,
+      git: publicGit(await detectGitRepository(cwd)),
+      match: 'binding',
+      registrationStatus: 'existing',
+      environment: existing.environment === undefined
+        ? await getActiveEnvironment({ env, clock }) : existing.environment,
+    };
+  }
+  // Validate before creating a repository or binding: a mistyped environment
+  // must not leave behind a half-initialized checkout.
+  const selected = validateEnvironmentLabel(environment
+    ?? (await getActiveEnvironment({ env, clock })) ?? DEFAULT_ENVIRONMENT);
+  const resolved = await resolveRepository({ cwd, env, clock, create: true });
+  await setRepositoryEnvironment(selected, { cwd, env, clock });
+  return {
+    ...resolved,
+    registrationStatus: resolved.match === 'created' ? 'created' : 'linked',
+    environment: selected,
+  };
 }
 
 /** Returns the environment selected for this checkout, with legacy fallback. */

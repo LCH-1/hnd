@@ -1482,17 +1482,16 @@ async function mainImpl(argv = process.argv.slice(2), {
   if (command === 'init') {
     assertOptions(options, ['env']);
     ensureNoExtra(positionals, 'hnd init [--cwd DIR] [--env LABEL]');
-    await core.init();
-    const resolved = await core.repo.resolve({ create: true });
     const requestedEnvironment = optionString(options, 'env');
-    if (requestedEnvironment !== undefined) {
-      await core.env.set(requestedEnvironment);
-    } else if (resolved.environment === undefined || resolved.environment === null) {
-      await core.env.set((await core.env.get()) ?? DEFAULT_ENVIRONMENT);
+    const resolved = await core.repo.init({ environment: requestedEnvironment });
+    const existing = resolved.registrationStatus === 'existing';
+    if (!existing) await refreshCursor({ force: true });
+    if (jsonOutput) writeJson(resolved, stdout);
+    else {
+      const label = existing ? ct('이미 등록된 프로젝트입니다.')
+        : resolved.registrationStatus === 'linked' ? ct('프로젝트 연결 완료') : ct('프로젝트 등록 완료');
+      writeText(stdout, `${label}${existing ? '\n' : ': '}${describeRepository(resolved)}\n${ct('환경')}: ${resolved.environment ?? ct('선택 안 됨')}${existing ? `\n${ct('환경 변경')}: hnd env set LABEL` : ''}`);
     }
-    await refreshCursor({ force: true });
-    if (jsonOutput) writeJson({ ...resolved, environment: await core.env.get() }, stdout);
-    else writeText(stdout, `${ct('프로젝트 등록 완료')}: ${describeRepository(resolved)}\n${ct('환경')}: ${(await core.env.get()) ?? ct('선택 안 됨')}`);
     return;
   }
 
