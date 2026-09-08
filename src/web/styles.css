@@ -2835,6 +2835,26 @@ summary:focus-visible {
   width: 100%;
 }
 
+/* Keep project filtering readable when the sidebar leaves a narrow toolbar. */
+#work-filter {
+  flex-wrap: wrap;
+}
+
+#work-filter .segmented {
+  flex-shrink: 0;
+}
+
+#work-filter .segmented button {
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  #work-filter .filter-select {
+    /* On the column layout, a 180px flex basis would become empty height. */
+    flex: 0 0 auto;
+  }
+}
+
 .tag.tag-scope {
   border-color: var(--border-strong);
   background: var(--selection-soft);

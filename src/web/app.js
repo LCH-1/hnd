@@ -1101,23 +1101,75 @@ function workStatus(item) {
   );
 }
 
+let workLoadGeneration = 0;
+
+function populateWorkProjectFilter(form = $("#work-filter")) {
+  const select = form?.elements.namedItem("repository");
+  if (!select) return;
+  const selected = select.value;
+  const repositories = state.dataStore?.repositories() || [];
+  clearChildren(select);
+  select.append(element("option", {
+    text: "모든 프로젝트",
+    attrs: { value: "" },
+  }));
+  for (const repository of repositories) {
+    select.append(element("option", {
+      text: repositoryOptionLabel(repository),
+      attrs: { value: repository.id },
+    }));
+  }
+  // Keep an explicit filter if a refreshed snapshot no longer has its metadata.
+  // Silently selecting "all" would unexpectedly expose unrelated work.
+  if (selected && !repositories.some((repository) => repository.id === selected)) {
+    select.append(element("option", {
+      text: "연결 해제된 프로젝트",
+      attrs: { value: selected },
+    }));
+  }
+  select.value = selected;
+}
+
 async function loadWork(values = {}) {
+  const generation = ++workLoadGeneration;
   const container = $("#work-list");
+  const filter = $("#work-filter");
+  const filters = {
+    ...(filter ? formObject(filter) : {}),
+    ...values,
+    status: state.workStatus,
+  };
   loadingState(container, "작업을 불러오는 중");
   showNotice($("#work-error"));
-  const items = await state.dataStore.work({
-    status: state.workStatus,
-    ...values,
-  });
+  let items;
+  try {
+    items = await state.dataStore.work(filters);
+  } catch (error) {
+    if (generation !== workLoadGeneration) return false;
+    clearChildren(container);
+    throw error;
+  }
+  if (generation !== workLoadGeneration) return false;
+  populateWorkProjectFilter(filter);
   state.work = new Map(items.map((item) => [String(item.id), item]));
   clearChildren(container);
   if (items.length === 0) {
     emptyState(
       container,
-      state.workStatus === "done"
-        ? "완료한 작업이 없습니다"
-        : "진행 중인 작업이 없습니다",
-      "새 작업을 만들고 중요한 판단과 다음 할 일을 남겨보세요.",
+      filters.repository
+        ? "선택한 프로젝트에 조건에 맞는 작업이 없습니다"
+        : filters.q
+          ? "검색 조건에 맞는 작업이 없습니다"
+          : state.workStatus === "done"
+            ? "완료한 작업이 없습니다"
+            : state.workStatus === "all"
+              ? "작업이 없습니다"
+              : "진행 중인 작업이 없습니다",
+      filters.repository
+        ? "프로젝트, 상태 또는 검색어를 바꿔보세요."
+        : filters.q
+          ? "상태 또는 검색어를 바꿔보세요."
+          : "새 작업을 만들고 중요한 판단과 다음 할 일을 남겨보세요.",
     );
     return;
   }
@@ -1612,23 +1664,43 @@ async function loadSettings() {
   else setHidden($("#account-management"), true);
 }
 
+const dialogFormStates = new WeakMap();
+
 function openDialog(id, item) {
   const dialog = document.getElementById(id);
   if (!dialog) return;
   const form = $("form.dialog-form", dialog);
-  form?.reset();
+  if (form) {
+    form.reset();
+    // Hidden input values also become their reset defaults in the DOM. A
+    // previous edit must never become the target of a later create dialog.
+    const idField = form.elements.namedItem("id");
+    if (idField) {
+      idField.defaultValue = "";
+      idField.value = "";
+    }
+    dialogFormStates.set(form, Object.freeze({
+      mode: item ? "edit" : "create",
+      id: item?.id ?? null,
+    }));
+  }
   showNotice($(".notice", form));
   if (form) populateRepositoryFields(form);
   if (item && form) fillForm(form, item);
-  if (form?.id === "rule-form") {
+  // A control named "id" shadows HTMLFormElement.id through named lookup.
+  const formId = form?.getAttribute("id");
+  if (formId === "rule-form") {
     $(".dialog-head h2", form).textContent = item ? "룰 수정" : "룰 추가";
     updateRuleScopeFields(form);
   }
-  if (form?.id === "knowledge-form") {
+  if (formId === "work-form") {
+    $(".dialog-head h2", form).textContent = item ? "작업 수정" : "작업 추가";
+  }
+  if (formId === "knowledge-form") {
     $(".dialog-head h2", form).textContent = item ? "지식 수정" : "지식 추가";
     updateKnowledgeScopeFields(form);
   }
-  if (form?.id === "project-form") {
+  if (formId === "project-form") {
     $(".dialog-head h2", form).textContent = "프로젝트 설정";
   }
   dialog.showModal();
@@ -1651,7 +1723,21 @@ function updateRuleScopeFields(form = $("#rule-form")) {
   const environmentLabel = $('[data-rule-field="environment"]', form);
   const repository = form.elements.namedItem("repository");
   const environment = form.elements.namedItem("environment");
-  const editing = Boolean(form.elements.namedItem("id")?.value);
+  const dialogState = dialogFormStates.get(form);
+  const editing = dialogState?.mode === "edit";
+  const legacy = editing && !/(?:^|\/)rules\/[0-9a-f-]+\.json$/i.test(dialogState.id);
+  // Legacy policy documents keep their exact storage and precedence until an
+  // explicit migration is available. Do not present settings we cannot save.
+  for (const name of ["title", "status", "activation", "paths", "files"]) {
+    const field = form.elements.namedItem(name);
+    if (field) field.disabled = legacy;
+  }
+  const title = form.elements.namedItem("title");
+  if (title) title.required = !legacy;
+  for (const group of form.querySelectorAll("[data-rule-record-field]")) {
+    setHidden(group, legacy);
+  }
+  setHidden($("#rule-legacy-help", form), !legacy);
   const needsRepository = ["repo", "env"].includes(scope);
   const needsEnvironment = scope === "env";
 
@@ -1871,6 +1957,17 @@ function formObject(form) {
   );
 }
 
+async function saveDialogResource(form, values, { create, update }) {
+  const editing = dialogFormStates.get(form);
+  if (!editing || (editing.mode === "edit" && !editing.id)) {
+    throw new Error("저장할 항목을 확인할 수 없습니다. 창을 다시 열어 주세요.");
+  }
+  const payload = { ...values };
+  delete payload.id;
+  if (editing.mode === "create") return create(payload);
+  return update(editing.id, { ...payload, id: editing.id });
+}
+
 function closeDialog(dialog) {
   dialog?.close();
 }
@@ -1902,8 +1999,10 @@ async function submitRule(event) {
   setBusy(button, true, "저장 중…");
   showNotice(notice);
   try {
-    if (values.id) await state.dataStore.updateRule(values.id, values);
-    else await state.dataStore.createRule(values);
+    await saveDialogResource(form, values, {
+      create: (payload) => state.dataStore.createRule(payload),
+      update: (id, payload) => state.dataStore.updateRule(id, payload),
+    });
     closeDialog(form.closest("dialog"));
     await returnAfterResourceSave("rules");
     toast(localSaveMessage("룰을 저장했습니다."));
@@ -1923,8 +2022,10 @@ async function submitWork(event) {
   setBusy(button, true, "저장 중…");
   showNotice(notice);
   try {
-    if (values.id) await state.dataStore.updateWork(values.id, values);
-    else await state.dataStore.createWork(values);
+    await saveDialogResource(form, values, {
+      create: (payload) => state.dataStore.createWork(payload),
+      update: (id, payload) => state.dataStore.updateWork(id, payload),
+    });
     closeDialog(form.closest("dialog"));
     await returnAfterResourceSave("work");
     toast(localSaveMessage("작업을 저장했습니다."));
@@ -1971,8 +2072,10 @@ async function submitKnowledge(event) {
   setBusy(button, true, "저장 중…");
   showNotice(notice);
   try {
-    if (values.id) await state.dataStore.updateKnowledge(values.id, values);
-    else await state.dataStore.createKnowledge(values);
+    await saveDialogResource(form, values, {
+      create: (payload) => state.dataStore.createKnowledge(payload),
+      update: (id, payload) => state.dataStore.updateKnowledge(id, payload),
+    });
     closeDialog(form.closest("dialog"));
     await returnAfterResourceSave("knowledge");
     toast(localSaveMessage("지식을 저장했습니다."));
@@ -3102,7 +3205,7 @@ $("#rule-filter").addEventListener("submit", async (event) => {
   await loadRules(formObject(event.currentTarget));
   state.loaded.add("rules");
 });
-$("#work-filter").addEventListener("submit", async (event) => {
+async function applyWorkFilter(event) {
   event.preventDefault();
   const submitter = event.submitter;
   if (submitter?.name === "status") {
@@ -3110,9 +3213,18 @@ $("#work-filter").addEventListener("submit", async (event) => {
     for (const button of $$(".segmented button", event.currentTarget))
       button.setAttribute("aria-pressed", String(button === submitter));
   }
-  const query = new FormData(event.currentTarget).get("q")?.toString().trim();
-  await loadWork({ q: query });
-  state.loaded.add("work");
+  try {
+    if (await loadWork() !== false) state.loaded.add("work");
+  } catch (error) {
+    showNotice($("#work-error"), error.message, "error");
+  }
+}
+$("#work-filter").addEventListener("submit", applyWorkFilter);
+$("#work-project-filter").addEventListener("change", applyWorkFilter);
+$('#work-filter [name="q"]').addEventListener("keydown", (event) => {
+  // Implicit form submission would pick the first status button (active).
+  // Searching must keep the status the user actually selected.
+  if (event.key === "Enter" && !event.isComposing) return applyWorkFilter(event);
 });
 $("#knowledge-filter").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -718,6 +718,7 @@ test('browser and connector changes to different items merge automatically', asy
     next: '',
   });
   await browser.createRule({
+    title: 'Browser rule',
     scope: 'repo',
     repository: repositoryId,
     content: 'browser rule',
@@ -1473,7 +1474,7 @@ test('_markClean rejects an unrelated clean record from another tab', async () =
   assert.equal(cache.inspect().etag, '"other"');
 });
 
-test('one repository keeps separate prod and test environment rules', async () => {
+test('one repository keeps legacy prod and test environment rules readable and editable', async () => {
   const repositoryId = '11111111-1111-4111-8111-111111111111';
   const index = {
     schemaVersion: 1,
@@ -1483,26 +1484,17 @@ test('one repository keeps separate prod and test environment rules', async () =
   };
   const initial = {
     schemaVersion: 1,
-    files: [textFile('repositories.json', `${JSON.stringify(index)}\n`)],
+    files: [
+      textFile('repositories.json', `${JSON.stringify(index)}\n`),
+      textFile(`repositories/${repositoryId}/environments/prod.md`, '배포 전 전체 검증을 실행한다.'),
+      textFile(`repositories/${repositoryId}/environments/test.md`, '테스트 데이터를 사용한다.'),
+    ],
   };
   const store = new SnapshotDataStore(
     'tenant',
     storeOptions(memoryCache(), immediateRemote(initial)),
   );
   await store.load();
-
-  await store.createRule({
-    scope: 'env',
-    repository: repositoryId,
-    environment: 'prod',
-    content: '배포 전 전체 검증을 실행한다.',
-  });
-  await store.createRule({
-    scope: 'env',
-    repository: repositoryId,
-    environment: 'test',
-    content: '테스트 데이터를 사용한다.',
-  });
 
   const rules = await store.rules({ scope: 'env' });
   assert.deepEqual(
@@ -1512,17 +1504,19 @@ test('one repository keeps separate prod and test environment rules', async () =
       ['backend', 'test', '테스트 데이터를 사용한다.'],
     ],
   );
+  const prodPath = `repositories/${repositoryId}/environments/prod.md`;
+  await store.updateRule(prodPath, {
+    scope: 'env',
+    repository: repositoryId,
+    environment: 'PROD',
+    content: '운영 환경 검증을 보완한다.',
+  });
+  const updated = await store.rules({ scope: 'env' });
+  assert.equal(updated.length, 2);
+  assert.equal(updated.find((rule) => rule.id === prodPath).environment, 'prod');
+  assert.equal(updated.find((rule) => rule.id === prodPath).content, '운영 환경 검증을 보완한다.');
   await assert.rejects(
-    store.createRule({
-      scope: 'env',
-      repository: repositoryId,
-      environment: 'PROD',
-      content: '대소문자 중복',
-    }),
-    /같은 범위/u,
-  );
-  await assert.rejects(
-    store.createRule({
+    store.updateRule(prodPath, {
       scope: 'env',
       repository: repositoryId,
       environment: 'CON',
@@ -1530,6 +1524,182 @@ test('one repository keeps separate prod and test environment rules', async () =
     }),
     /Windows/u,
   );
+});
+
+test('new shared rules are independent named records and preserve legacy policy bytes', async (t) => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const legacyGlobal = textFile('policies/global.md', '\n  원문 전체 룰\r\n\r\n- 순서를 유지한다.  \r\n');
+  const initial = {
+    schemaVersion: 1,
+    files: [
+      textFile('repositories.json', `${JSON.stringify({
+        schemaVersion: 1,
+        repositories: { [repositoryId]: { id: repositoryId, name: 'backend' } },
+      })}\n`),
+      legacyGlobal,
+      textFile(`repositories/${repositoryId}/policy.md`, '기존 저장소 룰'),
+      textFile(`repositories/${repositoryId}/environments/prod.md`, '기존 환경 룰'),
+    ],
+  };
+
+  for (const scope of ['all', 'global', 'repo', 'env']) {
+    await t.test(scope, async () => {
+      const remote = immediateRemote(initial);
+      const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+      const values = { scope, repository: repositoryId, environment: 'prod', content: '첫 번째 지침' };
+      const first = await store.createRule({ ...values, title: '검토 기준' });
+      const second = await store.createRule({ ...values, title: '배포 기준', content: '두 번째 지침' });
+      assert.equal(first._record, true);
+      assert.equal(second._record, true);
+      assert.notEqual(first.id, second.id);
+      const prefix = ['all', 'global'].includes(scope) ? 'rules/' : `repositories/${repositoryId}/rules/`;
+      assert.ok(first.id.startsWith(prefix));
+      assert.ok(second.id.startsWith(prefix));
+
+      await store.updateRule(first.id, { ...values, title: '바뀐 검토 기준', content: '보완한 지침' });
+      const rules = await store.rules({ scope });
+      assert.equal(rules.filter((rule) => rule._record).length, 2);
+      assert.equal(rules.find((rule) => rule.id === first.id).content, '보완한 지침');
+      assert.equal(rules.find((rule) => rule.id === second.id).title, '배포 기준');
+      assert.equal(rules.find((rule) => rule.id === second.id).content, '두 번째 지침');
+      await store.deleteRule(first.id);
+      assert.deepEqual((await store.rules({ scope })).filter((rule) => rule._record).map((rule) => rule.id), [second.id]);
+      for (const original of initial.files) {
+        assert.deepEqual(remote.inspect().snapshot.files.find((file) => file.path === original.path), original);
+      }
+      assert.equal((await store.rules({ scope: 'all' })).find((rule) => rule.id === legacyGlobal.path).content,
+        Buffer.from(legacyGlobal.content, 'base64').toString('utf8'));
+    });
+  }
+});
+
+test('named rule updates reject scope changes even when the record path stays the same', async () => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [textFile('repositories.json', JSON.stringify({
+      schemaVersion: 1,
+      repositories: { [repositoryId]: { id: repositoryId, name: 'backend' } },
+    }))],
+  });
+  const cache = memoryCache();
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  const values = { repository: repositoryId, environment: 'prod', title: '범위 유지', content: '기존 지침' };
+  for (const scope of ['all', 'repo', 'env']) {
+    const created = await store.createRule({ ...values, scope });
+    const beforeRemote = remote.inspect();
+    const beforeCache = cache.inspect();
+    for (const nextScope of ['all', 'repo', 'env'].filter((candidate) => candidate !== scope)) {
+      await assert.rejects(store.updateRule(created.id, {
+        ...values, scope: nextScope, content: '다른 범위에 저장하지 않는다.',
+      }), /수정 중에는 룰 범위를 바꿀 수 없습니다/u);
+      assert.deepEqual(remote.inspect(), beforeRemote);
+      assert.deepEqual(cache.inspect(), beforeCache);
+    }
+    // Global scope aliases and an omitted scope still identify the same scope.
+    const updated = await store.updateRule(created.id, {
+      ...values, ...(scope === 'all' ? { scope: 'global' } : {}), content: '같은 범위에서 수정한다.',
+      ...(scope === 'env' ? { environment: 'staging' } : {}),
+    });
+    assert.equal(updated.id, created.id);
+    assert.equal(updated.scope, scope === 'all' ? 'global' : scope);
+    if (scope === 'env') assert.equal(updated.environment, 'staging');
+  }
+});
+
+test('shared rule creation rejects missing or blank names without persisting anything', async () => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [textFile('repositories.json', JSON.stringify({
+      schemaVersion: 1,
+      repositories: { [repositoryId]: { id: repositoryId, name: 'backend' } },
+    }))],
+  });
+  const cache = memoryCache();
+  const store = new SnapshotDataStore('tenant', storeOptions(cache, remote));
+  await store.load();
+  const beforeRemote = remote.inspect();
+  const beforeCache = cache.inspect();
+  for (const scope of ['all', 'global', 'repo', 'env']) {
+    for (const title of [undefined, '', ' \t\n ', null, 123]) {
+      await assert.rejects(store.createRule({
+        scope, repository: repositoryId, environment: 'prod', title, content: '이름 없이 저장하지 않는다.',
+      }), /룰 이름/u);
+      assert.deepEqual(remote.inspect(), beforeRemote);
+      assert.deepEqual(cache.inspect(), beforeCache);
+    }
+  }
+  await assert.rejects(store.createRule({
+    scope: 'env', repoId: repositoryId, env: 'CON', title: '이식 가능한 환경만', content: '검증',
+  }), /Windows/u);
+  assert.deepEqual(remote.inspect(), beforeRemote);
+  const rule = await store.createRule({
+    scope: 'env', repoId: repositoryId, env: 'prod', title: '기존 입력 alias', content: '검증',
+  });
+  assert.equal(rule.repoId, repositoryId);
+  assert.equal(rule.environment, 'prod');
+});
+
+test('legacy policies stay editable without silently accepting named-rule settings', async () => {
+  const repositoryId = '11111111-1111-4111-8111-111111111111';
+  const fixtures = [
+    { id: 'policies/global.md', scope: 'all' },
+    { id: `repositories/${repositoryId}/policy.md`, scope: 'repo' },
+    { id: `repositories/${repositoryId}/environments/prod.md`, scope: 'env', environment: 'prod' },
+  ];
+  const remote = immediateRemote({
+    schemaVersion: 1,
+    files: [
+      textFile('repositories.json', JSON.stringify({
+        schemaVersion: 1,
+        repositories: { [repositoryId]: { id: repositoryId, name: 'backend' } },
+      })),
+      ...fixtures.map((fixture) => textFile(fixture.id, '기존 원문')),
+    ],
+  });
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  for (const fixture of fixtures) {
+    const values = { ...fixture, repository: repositoryId, content: '내용만 수정' };
+    await store.updateRule(fixture.id, values);
+    // Older browser forms submitted these default controls even for text rules.
+    await store.updateRule(fixture.id, {
+      ...values, title: '', status: 'active', activation: 'always', paths: ' \n ', files: [],
+    });
+    const before = remote.inspect();
+    for (const namedChange of [
+      { title: '저장되지 않는 이름' }, { status: 'draft' }, { activation: 'manual' },
+      { paths: 'src/**' }, { files: ['**/*.sql'] },
+    ]) {
+      await assert.rejects(store.updateRule(fixture.id, { ...values, ...namedChange }), /이전 형식 룰은 내용을 수정/u);
+      assert.deepEqual(remote.inspect(), before);
+    }
+    const current = (await store.rules()).find((rule) => rule.id === fixture.id);
+    assert.equal(current.content, '내용만 수정');
+    assert.equal(current._record, undefined);
+  }
+  assert.equal(remote.inspect().snapshot.files.filter((file) => file.path.includes('/rules/')).length, 0);
+});
+
+test('PC overrides remain browser-local singletons with or without a name', async (t) => {
+  for (const title of [undefined, '', '내 PC 예외']) {
+    await t.test(String(title), async () => {
+      const remote = immediateRemote();
+      const localRules = localRuleStorage();
+      const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote, localRules));
+      const before = remote.inspect();
+      const rule = await store.createRule({ scope: 'pc', title, content: '이 브라우저에서만 적용' });
+      assert.equal(rule.id, 'pc');
+      assert.equal(rule.scope, 'pc');
+      assert.equal(rule._record, undefined);
+      assert.equal(localRules.inspect().content, '이 브라우저에서만 적용');
+      assert.deepEqual(remote.inspect(), before);
+      await assert.rejects(store.createRule({ scope: 'pc', title: '다른 제목', content: '중복' }), /이미 있습니다/u);
+      await store.updateRule('pc', { scope: 'pc', title: '이름은 PC 저장 형식을 바꾸지 않는다', content: '수정한 PC 예외' });
+      assert.equal(localRules.inspect().content, '수정한 PC 예외');
+      assert.deepEqual(remote.inspect(), before);
+    });
+  }
 });
 
 test('projects expose scoped data and web metadata changes synchronize through the snapshot', async () => {
@@ -1553,6 +1723,9 @@ test('projects expose scoped data and web metadata changes synchronize through t
     files: [
       textFile('repositories.json', `${JSON.stringify(index)}\n`),
       textFile(`repositories/${repositoryId}/repository.json`, `${JSON.stringify(index.repositories[repositoryId])}\n`),
+      // Existing CLI/connector text policies remain part of project summaries.
+      textFile(`repositories/${repositoryId}/policy.md`, '프로젝트 룰'),
+      textFile(`repositories/${repositoryId}/environments/prod.md`, '운영 환경 룰'),
     ],
   };
   const remote = immediateRemote(initial);
@@ -1561,17 +1734,6 @@ test('projects expose scoped data and web metadata changes synchronize through t
     storeOptions(memoryCache(), remote),
   );
   await store.load();
-  await store.createRule({
-    scope: 'repo',
-    repository: repositoryId,
-    content: '프로젝트 룰',
-  });
-  await store.createRule({
-    scope: 'env',
-    repository: repositoryId,
-    environment: 'prod',
-    content: '운영 환경 룰',
-  });
   await store.createWork({
     repository: repositoryId,
     name: '배포 준비',

@@ -2133,12 +2133,14 @@ function ruleRecord(snapshot, values, current = null) {
   if (!["global", "repo", "env"].includes(scope)) throw new Error("룰 범위를 선택해 주세요.");
   const repository = scope === "global"
     ? null
-    : resolveRepository(snapshot, values.repository || values.repo || current?.repoId);
+    : resolveRepository(snapshot, values.repository || values.repo || values.repoId || current?.repoId);
   const environment = scope === "env"
-    ? String(values.environment || current?.environment || "").trim()
+    ? String(values.environment || values.env || current?.environment || "").trim()
     : null;
   if (scope === "env" && !ENVIRONMENT_PATTERN.test(environment))
     throw new Error("환경 이름을 확인해 주세요.");
+  if (scope === "env" && /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(environment))
+    throw new Error("이 환경 이름은 Windows에서 사용할 수 없습니다.");
   const status = values.status || current?.status || "active";
   const activation = values.activation || current?.activation || "always";
   if (!["draft", "active"].includes(status)) throw new Error("룰 상태를 확인해 주세요.");
@@ -3313,19 +3315,9 @@ export class SnapshotDataStore {
 
   async createRule(values) {
     await this.load();
-    if (String(values.title || "").trim()) {
-      return this._commit(async (snapshot) => {
-        const record = ruleRecord(snapshot, values);
-        const target = ruleRecordPath(record);
-        return {
-          snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
-          value: { ...record, recordId: record.id, id: target, _record: true, _path: target },
-        };
-      });
-    }
-    const path = rulePath(this.snapshot, values);
-    const content = policyContent(values.content);
-    if (path === "pc") {
+    // PC overrides are device-local singletons, not shared named records.
+    if (values.scope === "pc") {
+      const content = policyContent(values.content);
       return this._commitLocalRule(async (current) => {
         if (current)
           throw new Error(
@@ -3343,11 +3335,11 @@ export class SnapshotDataStore {
       });
     }
     return this._commit(async (snapshot) => {
-      if (fileAt(snapshot, path))
-        throw new Error("같은 범위의 룰이 이미 있습니다.");
+      const record = ruleRecord(snapshot, values);
+      const target = ruleRecordPath(record);
       return {
-        snapshot: await replaceTextFile(snapshot, path, content),
-        value: { id: path, content },
+        snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
+        value: { ...record, recordId: record.id, id: target, _record: true, _path: target },
       };
     });
   }
@@ -3361,7 +3353,9 @@ export class SnapshotDataStore {
         const current = ruleFromFile(snapshot, file);
         const record = ruleRecord(snapshot, values, current);
         const target = ruleRecordPath(record);
-        if (target !== id) throw new Error("수정 중에는 룰 범위를 바꿀 수 없습니다.");
+        const currentScope = current.scope === "all" ? "global" : current.scope;
+        if (target !== id || record.scope !== currentScope)
+          throw new Error("수정 중에는 룰 범위를 바꿀 수 없습니다.");
         return {
           snapshot: await replaceTextFile(snapshot, target, jsonText(record)),
           value: { ...record, recordId: record.id, id: target, _record: true, _path: target },
@@ -3387,7 +3381,21 @@ export class SnapshotDataStore {
       });
     }
     return this._commit(async (snapshot) => {
-      if (!fileAt(snapshot, id)) throw new Error("수정할 룰이 없습니다.");
+      const file = fileAt(snapshot, id);
+      if (!file) throw new Error("수정할 룰이 없습니다.");
+      const current = ruleFromFile(snapshot, file);
+      // Older forms submit default named-rule controls for legacy text files.
+      // Accept those no-ops, but never silently discard a requested condition.
+      const title = values.title === undefined ? "" : values.title;
+      if (
+        (typeof title !== "string" || (title.trim() && title !== current?.title)) ||
+        (values.status !== undefined && values.status !== "active") ||
+        (values.activation !== undefined && values.activation !== "always") ||
+        lines(values.paths).length ||
+        lines(values.files).length
+      ) {
+        throw new Error("이전 형식 룰은 내용을 수정할 수 있습니다. 조건이 필요한 룰은 새로 추가해 주세요.");
+      }
       return {
         snapshot: await replaceTextFile(snapshot, id, content),
         value: { id, content },
