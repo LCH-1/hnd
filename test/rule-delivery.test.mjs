@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   CURSOR_LIVE_CONTEXT_SESSION_ENV,
   effectiveLiveContextRevision,
+  listLiveContextDeliveries,
   liveContextSessionKey,
   recordLiveContextDelivery,
   renderLiveContextSnapshot,
@@ -110,4 +111,28 @@ test('empty snapshots revoke earlier HND state and Cursor carries its live sessi
     liveContextSessionKey('cursor', {}, { [CURSOR_LIVE_CONTEXT_SESSION_ENV]: key }),
     key,
   );
+});
+
+test('delivery cache retains the current session when all 512 existing entries have the same timestamp', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-live-context-capacity-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const env = { HND_HOME: path.join(root, '.hnd'), HND_USER_HOME: root };
+  const recordedAt = '2026-09-07T00:00:00.000Z';
+  const clock = () => new Date(recordedAt);
+  const initial = composition();
+  const contextRevision = effectiveLiveContextRevision(initial);
+  const sessions = Object.fromEntries(Array.from({ length: 512 }, (_, index) => [
+    liveContextSessionKey('codex', { session_id: `existing-${index}` }, {}),
+    { contextRevision, recordedAt, agent: 'codex' },
+  ]));
+  const cache = path.join(env.HND_HOME, 'cache', 'live-context-delivery.json');
+  await fs.mkdir(path.dirname(cache), { recursive: true });
+  await fs.writeFile(cache, JSON.stringify({ schemaVersion: 2, sessions }));
+  const options = { agent: 'codex', payload: { session_id: 'new-session' }, composition: initial, env, clock };
+  const first = await recordLiveContextDelivery(options);
+  assert.equal(first.changed, true);
+  const entries = await listLiveContextDeliveries({ env });
+  assert.equal(entries.length, 512);
+  assert.ok(entries.some((entry) => entry.sessionKey === first.sessionKey));
+  assert.equal((await recordLiveContextDelivery(options)).changed, false);
 });

@@ -9,6 +9,7 @@ import {
 import { normalizeFsPath, repositoryPaths, statePaths } from '../paths.mjs';
 import { CoreError } from './errors.mjs';
 import { workSessionKey } from './work-session.mjs';
+import { assertNoSensitive } from './privacy.mjs';
 import {
   listFiles,
   readJson,
@@ -46,6 +47,7 @@ const HANDOFF_WORKFLOW_STATUSES = Object.freeze(['todo', 'in_progress', 'blocked
 const EXTENDED_PATCH_FIELDS = Object.freeze([
   'priority', 'workflowStatus', 'dependencies', 'parentId', 'claimedBy',
   'claimExpiresAt', 'blockedReason', 'unblockCriteria',
+  'plannedFiles',
 ]);
 const ALL_PATCH_FIELDS = Object.freeze([...PATCH_FIELDS, ...EXTENDED_PATCH_FIELDS]);
 const MAX_HISTORY = 50;
@@ -82,6 +84,8 @@ function validHandoff(value) {
     (value.blockedReason === undefined || typeof value.blockedReason === 'string') &&
     (value.unblockCriteria === undefined || typeof value.unblockCriteria === 'string') &&
     (value.history === undefined || (Array.isArray(value.history) && value.history.length <= MAX_HISTORY)) &&
+    (value.plannedFiles === undefined || (Array.isArray(value.plannedFiles)
+      && value.plannedFiles.length <= 64 && value.plannedFiles.every(validPlannedPath))) &&
     ARRAY_FIELDS.every(
       (field) => Array.isArray(value[field]) && value[field].every((item) => typeof item === 'string'),
     )
@@ -118,6 +122,22 @@ function validateHandoffId(id) {
     throw new CoreError('INVALID_HANDOFF_ID', `Invalid handoff id: ${id}`, { id });
   }
   return id;
+}
+
+function validPlannedPath(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512
+    && value === value.trim() && !/[\x00-\x1f\x7f]/u.test(value)
+    && !path.posix.isAbsolute(value) && !path.win32.isAbsolute(value) && !/^[a-z]:/iu.test(value)
+    && !value.replaceAll('\\', '/').split('/').includes('..')
+    && !value.endsWith('/') && !value.endsWith('\\')
+    && path.posix.normalize(value.replaceAll('\\', '/')) !== '.';
+}
+
+export function normalizePlannedFiles(value = []) {
+  if (!Array.isArray(value) || value.length > 64 || !value.every(validPlannedPath)) {
+    throw new CoreError('INVALID_WORK_FILES', 'plannedFiles must contain at most 64 repository-relative file paths without traversal');
+  }
+  return [...new Set(value.map((file) => path.posix.normalize(file.replaceAll('\\', '/'))))].sort();
 }
 
 function textArray(value, field) {
@@ -179,6 +199,7 @@ function decorateHandoff(handoff, clock = Date) {
     blockedReason: handoff.blockedReason ?? '',
     unblockCriteria: handoff.unblockCriteria ?? '',
     history: handoff.history ?? [],
+    plannedFiles: normalizePlannedFiles(handoff.plannedFiles),
     stale,
   };
 }
@@ -231,6 +252,7 @@ function summarize(handoff) {
 function assertHandoffSize(handoff) {
   const fields = [handoff.task, handoff.objective, handoff.currentState];
   for (const name of ARRAY_FIELDS) fields.push(...handoff[name]);
+  fields.push(...(handoff.plannedFiles ?? []));
   const bytes = Buffer.byteLength(fields.join('\n'));
   if (bytes > MAX_HANDOFF_TEXT_BYTES) {
     throw new CoreError(
@@ -485,6 +507,8 @@ export async function startHandoff({
   claimHours = 2,
   blockedReason = '',
   unblockCriteria = '',
+  plannedFiles = [],
+  allowSensitive = false,
   actor,
   agent,
   sessionId,
@@ -550,6 +574,7 @@ export async function startHandoff({
         claimSessionKey: claimedBy ? sessionKey : null,
         blockedReason: requireText(blockedReason, 'blockedReason', { allowEmpty: true, max: 4_000 }),
         unblockCriteria: requireText(unblockCriteria, 'unblockCriteria', { allowEmpty: true, max: 4_000 }),
+        plannedFiles: normalizePlannedFiles(plannedFiles),
         ...Object.fromEntries(ARRAY_FIELDS.map((field) => [field, textArray(arrays[field], field)])),
         worktree: resolved.git.worktree,
         branch: resolved.git.branch,
@@ -562,6 +587,8 @@ export async function startHandoff({
         history: [auditRecord('created', now, { actor, agent, sessionId, sessionKey })],
       };
       assertHandoffSize(handoff);
+      const { history: _history, ...currentContent } = handoff;
+      assertNoSensitive(currentContent, { allowSensitive });
       if (validate !== undefined) {
         if (typeof validate !== 'function') throw new TypeError('validate must be a function');
         await validate(decorateHandoff(handoff, clock));
@@ -609,6 +636,7 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
   }
   if (patch.staleHours !== undefined) next.staleHours = validateStaleHours(patch.staleHours);
   if (patch.priority !== undefined) next.priority = priorityValue(patch.priority);
+  if (patch.plannedFiles !== undefined) next.plannedFiles = normalizePlannedFiles(patch.plannedFiles);
   if (patch.workflowStatus !== undefined) next.workflowStatus = workflowValue(patch.workflowStatus);
   if (patch.dependencies !== undefined) next.dependencies = idList(patch.dependencies);
   if (patch.parentId !== undefined) next.parentId = patch.parentId === null ? null : validateHandoffId(patch.parentId);
@@ -620,7 +648,8 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
     next.claimExpiresAt = next.claimedBy ? addHours(isoNow(clock), 2) : null;
   }
   if (patch.claimExpiresAt !== undefined) {
-    if (patch.claimExpiresAt !== null && !Number.isFinite(Date.parse(patch.claimExpiresAt))) {
+    if (patch.claimExpiresAt !== null && (typeof patch.claimExpiresAt !== 'string'
+      || !Number.isFinite(Date.parse(patch.claimExpiresAt)))) {
       throw new CoreError('INVALID_HANDOFF', 'claimExpiresAt must be a valid timestamp or null');
     }
     next.claimExpiresAt = next.claimedBy && patch.claimExpiresAt !== null
@@ -651,6 +680,7 @@ function applyPatch(handoff, patch = {}, append = {}, clock = Date, audit = {}) 
         claimSessionKey: handoff.claimSessionKey ?? null,
         blockedReason: handoff.blockedReason ?? '',
         unblockCriteria: handoff.unblockCriteria ?? '',
+        plannedFiles: handoff.plannedFiles ?? [],
       },
     }),
   ].slice(-MAX_HISTORY);
@@ -670,6 +700,7 @@ export async function updateHandoff({
   sessionId,
   sessionKey,
   forceClaim = false,
+  allowSensitive = false,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -691,6 +722,7 @@ export async function updateHandoff({
       });
       assertClaimOwner(handoff, sessionKey, clock, forceClaim && patch.claimedBy !== undefined);
       const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId, sessionKey });
+      assertNoSensitive({ patch, append }, { allowSensitive });
       assertHandoffSize(next);
       if (validate !== undefined) {
         if (typeof validate !== 'function') throw new TypeError('validate must be a function');
@@ -701,6 +733,53 @@ export async function updateHandoff({
       return decorateHandoff(next, clock);
     },
   );
+}
+
+export async function renewHandoffClaims({
+  repoId, cwd, sessionKey, sessionId, agent, expectedOwnedIds = [],
+  leaseHours = 2, renewWithinMinutes = 30, env = process.env, clock = Date,
+} = {}) {
+  sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
+  if (!sessionKey) throw new CoreError('WORK_SESSION_REQUIRED', 'A session identity is required to renew work claims');
+  validateStaleHours(leaseHours);
+  if (!Number.isFinite(renewWithinMinutes) || renewWithinMinutes <= 0 || renewWithinMinutes > leaseHours * 60) {
+    throw new CoreError('INVALID_HANDOFF', 'renewWithinMinutes must be positive and no longer than the lease');
+  }
+  const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
+  return withFileLock(path.join(statePaths(env).locks, `handoffs-${resolved.repository.id}.lock`), async () => {
+    const records = await listForRepository(resolved.repository.id, 'all', env);
+    const selected = await selectedHandoffId(resolved.git, env, sessionKey);
+    const ids = new Set([
+      ...expectedOwnedIds,
+      ...records.filter((record) => record.claimSessionKey === sessionKey).map((record) => record.id),
+      ...(selected ? [selected] : []),
+    ]);
+    const result = { renewed: [], lost: [], unchanged: [] };
+    const now = isoNow(clock);
+    for (const id of ids) {
+      const record = records.find((value) => value.id === id);
+      const reason = !record ? 'removed' : record.status !== 'active' ? 'closed'
+        : record.claimSessionKey !== sessionKey ? (record.claimSessionKey ? 'taken-over' : 'released')
+          : !decorateHandoff(record, clock).claimActive ? 'expired' : null;
+      if (reason) {
+        result.lost.push({ id, reason, claimSessionKey: record?.claimSessionKey ?? null });
+        continue;
+      }
+      if (!record.claimExpiresAt || Date.parse(record.claimExpiresAt) - Date.parse(now) > renewWithinMinutes * 60_000) {
+        result.unchanged.push({ id, claimExpiresAt: record.claimExpiresAt ?? null });
+        continue;
+      }
+      const renewed = {
+        ...record,
+        claimExpiresAt: addHours(now, leaseHours),
+        history: [...(record.history ?? []), auditRecord('claim_renewed', now, { agent, sessionKey })].slice(-MAX_HISTORY),
+      };
+      // A heartbeat is not new progress: do not refresh updatedAt/staleAt.
+      await writeJsonAtomic(path.join(repositoryPaths(record.repoId, env).handoffs, `${id}.json`), renewed);
+      result.renewed.push({ id, claimExpiresAt: renewed.claimExpiresAt });
+    }
+    return result;
+  });
 }
 
 export async function showHandoff({
@@ -820,6 +899,7 @@ export async function closeHandoff({
   agent,
   sessionId,
   sessionKey,
+  allowSensitive = false,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -840,6 +920,7 @@ export async function closeHandoff({
       });
       assertClaimOwner(handoff, sessionKey, clock);
       const next = applyPatch(handoff, patch, append, clock, { actor, agent, sessionId, sessionKey });
+      assertNoSensitive({ patch, append }, { allowSensitive });
       next.status = 'closed';
       next.workflowStatus = 'done';
       next.claimedBy = null;

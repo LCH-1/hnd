@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 
 import { UsageError, optionBoolean, optionList, optionString, parseArgs } from './args.mjs';
 import { HELP, HELP_TOPIC_NAMES, helpFor } from './cli-help.mjs';
@@ -19,8 +20,9 @@ import {
   VERSION,
 } from './constants.mjs';
 import { createCore } from './core/index.mjs';
+import { scanSensitive } from './core/privacy.mjs';
+import { watchWork, writeWatchUpdate } from './work-watch.mjs';
 import {
-  automaticSessionCandidate,
   documentCandidate,
   exportKnowledge,
   importKnowledgeFile,
@@ -548,6 +550,7 @@ function handoffFields(options) {
     decisions: listStrings(options, 'decision'),
     failedApproaches: listStrings(options, 'rejected'),
     changedFiles: listStrings(options, 'changed_file'),
+    plannedFiles: options.planned_file === undefined ? undefined : listStrings(options, 'planned_file'),
     validation: listStrings(options, 'check'),
     nextSteps: listStrings(options, 'next'),
     openQuestions: listStrings(options, 'question'),
@@ -565,7 +568,7 @@ function handoffFields(options) {
 const handoffWriteOptions = [
   'goal', 'current', 'decision', 'rejected', 'changed_file', 'check', 'next', 'question',
   'note', 'stale_hours', 'priority', 'status', 'depends', 'parent', 'claim',
-  'claim_hours', 'blocked_reason', 'unblock_when',
+  'claim_hours', 'blocked_reason', 'unblock_when', 'planned_file', 'allow_sensitive',
 ];
 
 function staleHoursOption(options) {
@@ -578,8 +581,70 @@ function staleHoursOption(options) {
   return value;
 }
 
-async function handleHandoff({ subcommand, rest, options, core, refreshCursor, stdout, jsonOutput, env, sessionKey, sessionSource }) {
+async function handleHandoff({ subcommand, rest, options, core, refreshCursor, stdout, jsonOutput, env, sessionKey, sessionSource, signal, cwd }) {
   subcommand = resolveAlias(subcommand, handoffCommandAliases);
+  if (subcommand === 'plan') {
+    assertOptions(options, ['id', 'file', 'clear']);
+    const task = rest.shift();
+    ensureNoExtra(rest, 'hnd work plan [TASK] [--id ID] --file PATH... | --clear');
+    if ((options.file !== undefined) === optionBoolean(options, 'clear')) {
+      throw new UsageError('Provide --file PATH... or --clear, not both.');
+    }
+    const saved = await core.handoff.update({ id: optionString(options, 'id'), task, plannedFiles: listStrings(options, 'file') });
+    const coordination = await core.work.inspect();
+    await refreshCursor();
+    writeJson({ work: saved, conflicts: coordination.conflicts }, stdout);
+    return;
+  }
+  if (['conflicts', 'changes', 'heartbeat'].includes(subcommand)) {
+    assertOptions(options, subcommand === 'changes' ? ['limit', 'ack', 'ack_gap'] : []);
+    ensureNoExtra(rest, `hnd work ${subcommand}`);
+    if (subcommand === 'heartbeat') {
+      writeJson(await core.work.heartbeat(), stdout);
+      return;
+    }
+    const snapshot = await core.work.inspect({ limit: Number(optionString(options, 'limit', 20)) });
+    writeJson(subcommand === 'conflicts' ? { conflicts: snapshot.conflicts } : snapshot, stdout);
+    if (subcommand === 'changes' && (optionBoolean(options, 'ack') || optionBoolean(options, 'ack_gap'))) {
+      await core.work.ack({
+        repoId: snapshot.repoId, epoch: snapshot.eventCursor.epoch,
+        eventIds: optionBoolean(options, 'ack') ? snapshot.events.map((event) => event.id) : [],
+        ...(optionBoolean(options, 'ack_gap') && snapshot.gap ? { gapThrough: snapshot.gap.to } : {}),
+      });
+    }
+    return;
+  }
+  if (subcommand === 'watch') {
+    assertOptions(options, ['interval', 'sync', 'sync_interval', 'once', 'ack', 'no_heartbeat']);
+    ensureNoExtra(rest, 'hnd work watch [--sync] [--once] [--ack]');
+    const controller = new AbortController();
+    // A watcher has its own observation cursor, including in a plain terminal.
+    // It must never consume the LLM session's still-undelivered work events.
+    const observer = createCore({ env, cwd, sessionId: `watch:${randomUUID()}`, agent: 'manual' });
+    const cancel = () => controller.abort();
+    if (!signal) {
+      process.once('SIGINT', cancel);
+      process.once('SIGTERM', cancel);
+    }
+    try {
+      for await (const update of watchWork({
+        core: observer, heartbeatCore: core, env, signal: signal ?? controller.signal,
+        intervalMs: Number(optionString(options, 'interval', 1_000)),
+        syncIntervalMs: Number(optionString(options, 'sync_interval', 10_000)),
+        sync: optionBoolean(options, 'sync'), once: optionBoolean(options, 'once'),
+        heartbeat: Boolean(sessionKey) && !optionBoolean(options, 'no_heartbeat'),
+      })) {
+        if (!await writeWatchUpdate(stdout, update, { signal: signal ?? controller.signal })) break;
+        if (optionBoolean(options, 'ack') && update.events.length) {
+          await observer.work.ack({ repoId: update.repoId, epoch: update.eventCursor.epoch, eventIds: update.events.map((event) => event.id) });
+        }
+      }
+    } finally {
+      process.off('SIGINT', cancel);
+      process.off('SIGTERM', cancel);
+    }
+    return;
+  }
   if (subcommand === 'start') {
     assertOptions(options, handoffWriteOptions);
     const task = requireValue(rest.shift(), 'Task');
@@ -588,6 +653,7 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     const fields = handoffFields(options);
     const result = await core.handoff.start({
       task,
+      allowSensitive: optionBoolean(options, 'allow_sensitive'),
       objective: requireValue(objective, '--goal'),
       ...fields,
       staleHours: staleHoursOption(options),
@@ -610,7 +676,7 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
     if (fields.currentState !== undefined) patch.currentState = fields.currentState;
     for (const key of [
       'priority', 'workflowStatus', 'parentId', 'claimedBy',
-      'blockedReason', 'unblockCriteria',
+      'blockedReason', 'unblockCriteria', 'plannedFiles',
     ]) {
       if (fields[key] !== undefined) patch[key] = fields[key];
     }
@@ -631,6 +697,7 @@ async function handleHandoff({ subcommand, rest, options, core, refreshCursor, s
       task,
       patch,
       append,
+      allowSensitive: optionBoolean(options, 'allow_sensitive'),
     });
     await refreshCursor();
     if (jsonOutput) writeJson(result, stdout);
@@ -756,10 +823,60 @@ function knowledgeLocation(entry) {
 }
 
 async function handleKnowledge({ subcommand, rest, options, core, refreshCursor, stdin, stdout, jsonOutput, cwd }) {
+  if (subcommand === 'search-config') {
+    assertOptions(options, ['model', 'endpoint', 'timeout']);
+    const action = rest.shift() ?? 'status';
+    ensureNoExtra(rest, 'hnd know search-config <status|on|off> [--model NAME]');
+    if (!['status', 'on', 'off'].includes(action)) throw new UsageError('Use search-config status, on, or off.');
+    if (action === 'status' && ['model', 'endpoint', 'timeout'].some((key) => options[key] !== undefined)) {
+      throw new UsageError('Search configuration options require on or off.');
+    }
+    writeJson(action === 'status' ? await core.knowledge.semanticConfig.get() : await core.knowledge.semanticConfig.set({
+      enabled: action === 'on',
+      ...(options.model !== undefined ? { model: optionString(options, 'model') } : {}),
+      ...(options.endpoint !== undefined ? { endpoint: optionString(options, 'endpoint') } : {}),
+      ...(options.timeout !== undefined ? { timeoutMs: Number(optionString(options, 'timeout')) } : {}),
+    }), stdout);
+    return;
+  }
+  if (subcommand === 'branch') {
+    const action = rest.shift();
+    if (action === 'new') {
+      assertOptions(options, ['work', 'from', 'title', 'text', 'file', 'stdin', 'tag']);
+      const name = requireValue(rest.shift(), 'Branch name');
+      ensureNoExtra(rest, 'hnd know branch new NAME --work ID [--from KNOWLEDGE_ID]');
+      const result = await core.knowledge.branch.create({
+        name, workId: requireValue(optionString(options, 'work'), '--work'),
+        sourceId: optionString(options, 'from'), title: optionString(options, 'title'),
+        body: hasTextInput(options) ? await readTextInput(options, { stream: stdin }) : undefined,
+        tags: options.tag === undefined ? undefined : listStrings(options, 'tag'),
+      });
+      await refreshCursor();
+      writeJson(result, stdout);
+      return;
+    }
+    if (action === 'list') {
+      assertOptions(options, ['work', 'name']);
+      ensureNoExtra(rest, 'hnd know branch list [--work ID] [--name NAME]');
+      writeJson(await core.knowledge.branch.list({ workId: optionString(options, 'work'), name: optionString(options, 'name') }), stdout);
+      return;
+    }
+    if (action === 'diff' || action === 'adopt') {
+      assertOptions(options, action === 'adopt' ? ['expect'] : []);
+      const id = requireValue(rest.shift(), 'Experiment ID');
+      ensureNoExtra(rest, `hnd know branch ${action} ID`);
+      const result = action === 'diff' ? await core.knowledge.branch.diff({ id })
+        : await core.knowledge.branch.adopt({ id, expectedRevision: requireValue(optionString(options, 'expect'), '--expect (from branch diff)') });
+      if (action === 'adopt') await refreshCursor();
+      writeJson(result, stdout);
+      return;
+    }
+    throw new UsageError('Use know branch new, list, diff, or adopt.');
+  }
   if (subcommand === 'add') {
     assertOptions(options, [
       'text', 'file', 'stdin', 'tag', 'scope', 'repo_id', 'environment',
-      'type', 'state', 'pinned',
+      'type', 'state', 'pinned', 'allow_sensitive',
     ]);
     const title = requireValue(rest.shift(), 'Title');
     ensureNoExtra(rest, 'hnd know add TITLE [--scope all|repo|env] [--environment LABEL]');
@@ -767,6 +884,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     const result = await core.knowledge.add({
       title,
       body,
+      allowSensitive: optionBoolean(options, 'allow_sensitive'),
       tags: listStrings(options, 'tag'),
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
@@ -781,17 +899,21 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     return;
   }
   if (subcommand === 'find') {
-    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment', 'limit']);
+    assertOptions(options, ['tag', 'scope', 'repo_id', 'environment', 'limit', 'mode']);
     const query = requireValue(rest.shift(), 'Search query');
     ensureNoExtra(rest, 'hnd know find QUERY [--scope all|repo|env] [--environment LABEL]');
-    const result = await core.knowledge.search({
+    const searchOptions = {
       query,
       tag: optionString(options, 'tag'),
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
       limit: Number(optionString(options, 'limit', 100)),
-    });
+    };
+    const detailed = options.mode === undefined ? null : await core.knowledge.searchDetailed({ ...searchOptions, mode: optionString(options, 'mode') });
+    const result = detailed ? detailed.items : await core.knowledge.search(searchOptions);
+    if (detailed && jsonOutput) { writeJson(detailed, stdout); return; }
+    if (detailed?.fallback) writeText(stdout, `Search fallback: ${detailed.reason} (${detailed.mode}).`);
     if (jsonOutput) writeJson(result, stdout);
     else if (result.length === 0) writeText(stdout, 'No knowledge found.');
     else writeText(stdout, result.map((item) => `[${knowledgeLocation(item)}]\t${item.title}\t${item.id}\t${item.tags.join(',')}`).join('\n'));
@@ -828,7 +950,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     assertOptions(options, [
       'title', 'text', 'file', 'stdin', 'tag', 'clear_tags',
       'scope', 'repo_id', 'environment',
-      'type', 'state', 'pinned', 'approval',
+      'type', 'state', 'pinned', 'approval', 'allow_sensitive',
     ]);
     const id = requireValue(rest.shift(), 'Knowledge ID');
     ensureNoExtra(rest, 'hnd know edit ID [--title TITLE] [--text TEXT | --file PATH | --stdin] [--tag TAG]');
@@ -837,6 +959,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     }
     const patch = {
       id,
+      allowSensitive: optionBoolean(options, 'allow_sensitive'),
       title: optionString(options, 'title'),
       body: hasTextInput(options) ? await readTextInput(options, { stream: stdin }) : undefined,
       tags: optionBoolean(options, 'clear_tags')
@@ -929,6 +1052,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
   if (subcommand === 'import' || subcommand === 'import-session') {
     assertOptions(options, ['apply', 'scope', 'environment']);
     if (rest.length === 0) throw new UsageError(`Usage: hnd know ${subcommand} PATH... [--apply]`);
+    const importEnvironment = optionString(options, 'environment');
     const candidates = [];
     for (const source of rest) {
       const absolute = path.resolve(cwd, source);
@@ -939,9 +1063,11 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
         ? relative.replaceAll('\\', '/')
         : absolute;
       const requestedScope = knowledgeScopeOption(options);
-      candidates.push(...(subcommand === 'import-session'
+      const imported = subcommand === 'import-session'
         ? [create(absolute, content, { scope: requestedScope ?? 'repo', sourceRef })]
-        : importKnowledgeFile(absolute, content, { scope: requestedScope, sourceRef })));
+        : importKnowledgeFile(absolute, content, { scope: requestedScope, sourceRef });
+      candidates.push(...imported.map((candidate) => importEnvironment === undefined
+        ? candidate : { ...candidate, environment: importEnvironment }));
     }
     if (!optionBoolean(options, 'apply')) {
       writeJson({ preview: true, candidates }, stdout);
@@ -949,7 +1075,7 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     }
     const saved = [];
     for (const candidate of candidates) {
-      saved.push(await core.knowledge.add({ ...candidate, environment: optionString(options, 'environment') }));
+      saved.push(await core.knowledge.add(candidate));
     }
     await refreshCursor();
     if (jsonOutput) writeJson(saved, stdout);
@@ -957,18 +1083,18 @@ async function handleKnowledge({ subcommand, rest, options, core, refreshCursor,
     return;
   }
   if (subcommand === 'export') {
-    assertOptions(options, ['format', 'output', 'scope', 'repo_id', 'environment']);
+    assertOptions(options, ['format', 'output', 'scope', 'repo_id', 'environment', 'allow_sensitive']);
     ensureNoExtra(rest, 'hnd know export [--format json|markdown|okf] [--output FILE]');
     const entries = await core.knowledge.list({
       scope: knowledgeScopeOption(options),
       repoId: optionString(options, 'repo_id'),
       environment: optionString(options, 'environment'),
     });
-    const rendered = exportKnowledge(entries, { format: optionString(options, 'format', 'json') });
+    const rendered = exportKnowledge(entries, { format: optionString(options, 'format', 'json'), allowSensitive: optionBoolean(options, 'allow_sensitive') });
     const output = optionString(options, 'output');
     if (output) {
       const absoluteOutput = path.resolve(cwd, output);
-      await writeFile(absoluteOutput, rendered, { encoding: 'utf8', mode: 0o600 });
+      await applyOperations([{ kind: 'write', path: absoluteOutput, content: rendered, mode: 0o600 }]);
       if (jsonOutput) writeJson({ output: absoluteOutput, entries: entries.length }, stdout);
       else writeText(stdout, `Exported ${entries.length} knowledge entries to ${absoluteOutput}.`);
     } else stdout.write(rendered);
@@ -1049,6 +1175,52 @@ async function handleRemote(context) {
   return remoteMain(context);
 }
 
+async function handlePrivacy({ rest, options, core, stdin, stdout }) {
+  const action = rest.shift() ?? 'show';
+  if (action === 'show') {
+    assertOptions(options, []);
+    ensureNoExtra(rest, 'hnd privacy show');
+    writeJson(await core.privacy.get(), stdout);
+    return;
+  }
+  if (action === 'scan') {
+    assertOptions(options, ['text', 'file', 'stdin']);
+    ensureNoExtra(rest, 'hnd privacy scan --text TEXT | --file PATH | --stdin');
+    const findings = scanSensitive(await readTextInput(options, { stream: stdin }));
+    writeJson({ sensitive: findings.length > 0, findings }, stdout);
+    return;
+  }
+  if (action === 'set') {
+    assertOptions(options, ['scope', 'enabled', 'exclude_path', 'exclude_source', 'clear_exclusions', 'retention_days']);
+    ensureNoExtra(rest, 'hnd privacy set [--scope project|session] [--enabled true|false]');
+    if (optionBoolean(options, 'clear_exclusions') && (options.exclude_path !== undefined || options.exclude_source !== undefined)) {
+      throw new UsageError('Use --clear-exclusions or exclusion values, not both.');
+    }
+    const policy = {};
+    if (options.enabled !== undefined) policy.enabled = optionBoolean(options, 'enabled');
+    if (options.exclude_path !== undefined) policy.excludePaths = listStrings(options, 'exclude_path');
+    if (options.exclude_source !== undefined) policy.excludeSources = listStrings(options, 'exclude_source');
+    if (optionBoolean(options, 'clear_exclusions')) Object.assign(policy, { excludePaths: [], excludeSources: [] });
+    if (options.retention_days !== undefined) {
+      const days = optionString(options, 'retention_days');
+      policy.retentionDays = days === 'forever' ? null : Number(days);
+    }
+    if (!Object.keys(policy).length) throw new UsageError('Provide at least one privacy setting.');
+    writeJson(await core.privacy.set({ scope: optionString(options, 'scope', 'project'), policy }), stdout);
+    return;
+  }
+  if (action === 'retention') {
+    assertOptions(options, ['apply', 'project']);
+    ensureNoExtra(rest, 'hnd privacy retention [--project] [--apply PREVIEW_ID]');
+    const target = optionBoolean(options, 'project') ? { sessionKey: null } : {};
+    const previewId = optionString(options, 'apply');
+    writeJson(previewId === undefined ? await core.privacy.preview(target)
+      : await core.privacy.apply({ ...target, previewId }), stdout);
+    return;
+  }
+  throw new UsageError('Use privacy show, set, scan, or retention.');
+}
+
 async function runHookAutomaticSync({ core, agent, phase, payload, env, stderr }) {
   try {
     if (!await core.sync.get()) {
@@ -1076,6 +1248,31 @@ async function runHookAutomaticSync({ core, agent, phase, payload, env, stderr }
   }
 }
 
+async function acknowledgeHookWork({ composition, sessionKey, cwd, env, agent, stderr }) {
+  const snapshot = composition?.coordination;
+  if (!sessionKey || snapshot?.omitted || !snapshot?.deliveredEventIds?.length) return;
+  try {
+    await createCore({ env, cwd, sessionKey, agent }).work.ack({
+      repoId: snapshot.repoId, epoch: snapshot.eventCursor.epoch, eventIds: snapshot.deliveredEventIds,
+    });
+  } catch (error) {
+    // Output has already been emitted. Retry these events on a later hook.
+    writeText(stderr, `hnd hook: work acknowledgement deferred (${error.code || error.name || 'ERROR'}).`);
+  }
+}
+
+async function renewHookWork({ cwd, env, sessionKey, agent, stderr }) {
+  if (!sessionKey) return;
+  try {
+    const result = await createCore({ env, cwd, sessionKey, agent }).work.heartbeat();
+    if (result.lost.length) writeText(stderr, 'hnd hook: work ownership expired or was taken over; inspect hnd work session before saving.');
+  } catch (error) {
+    if (!optionalMaterializationErrors.has(error?.code)) {
+      writeText(stderr, `hnd hook: work heartbeat unavailable (${error.code || error.name || 'ERROR'}).`);
+    }
+  }
+}
+
 function hookKnowledgeQuery(payload) {
   for (const value of [payload?.prompt, payload?.user_prompt, payload?.userPrompt, payload?.message]) {
     if (typeof value === 'string' && value.trim()) return value.slice(0, 2_000);
@@ -1086,19 +1283,14 @@ function hookKnowledgeQuery(payload) {
   return '';
 }
 
-async function suggestKnowledgeFromSession({ core, agent, phase, payload, cwd, env, stderr }) {
+async function suggestKnowledgeFromSession({ core, agent, phase, payload, cwd, env, stderr, sessionKey }) {
   if (!['end', 'precompact'].includes(phase)) return null;
-  const config = await core.config.get();
-  if (config.knowledgeSuggestions !== true) return null;
   const sessionId = [payload?.session_id, payload?.sessionId, payload?.conversation_id]
     .find((value) => typeof value === 'string' && value.trim());
-  const candidate = automaticSessionCandidate(payload, { agent, sessionId });
-  if (!candidate) return null;
   try {
-    const hookCore = createCore({ env, cwd });
-    const pending = await hookCore.knowledge.list({ scope: 'repo', approval: 'pending' });
-    if (pending.some((entry) => entry.body === candidate.body)) return null;
-    const saved = await hookCore.knowledge.add(candidate);
+    const hookCore = createCore({ env, cwd, sessionKey, agent });
+    const saved = await hookCore.auto.suggest({ payload, agent, sourceSessionId: sessionId });
+    if (!saved) return null;
     writeText(stderr, `hnd: saved a knowledge candidate for review (${saved.id}).`);
     return saved;
   } catch (error) {
@@ -1166,6 +1358,7 @@ async function mainImpl(argv = process.argv.slice(2), {
   stderr = process.stderr,
   execPath = process.execPath,
   binPath = defaultBinPath,
+  signal,
 } = {}) {
   const { positionals, options } = parseArgs(argv);
   const command = resolveAlias(positionals.shift(), commandAliases);
@@ -1217,7 +1410,7 @@ async function mainImpl(argv = process.argv.slice(2), {
   };
   // Hook payloads have their own authoritative identity. Setup, sync, and
   // other project-neutral commands must also work without a shell identity.
-  const workSession = ['handoff', 'context'].includes(command)
+  const workSession = ['handoff', 'context', 'privacy'].includes(command)
     ? resolveWorkSession(sessionOptions)
     : { sessionKey: command === 'hook' ? null : workSessionKey(sessionOptions) };
   const sessionKey = workSession.sessionKey;
@@ -1335,6 +1528,10 @@ async function mainImpl(argv = process.argv.slice(2), {
     return;
   }
 
+  if (command === 'privacy') {
+    return handlePrivacy({ rest: positionals, options, core, stdin, stdout });
+  }
+
   if (command === 'repo') {
     const subcommand = positionals.shift();
     if (subcommand === 'list') {
@@ -1439,6 +1636,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       env: runtimeEnv,
       sessionKey,
       sessionSource: workSession.source,
+      signal,
       refreshCursor,
       stdout,
       jsonOutput,
@@ -1561,11 +1759,14 @@ async function mainImpl(argv = process.argv.slice(2), {
       agent === 'cursor' ? runtimeEnv.CURSOR_PROJECT_DIR : undefined,
     );
     if (!['start', 'prompt'].includes(phase)) {
+      if (phase === 'stop' || phase === 'precompact') {
+        for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr });
+      }
       try {
         if (await core.auto.get()) {
           for (const hookCwd of hookCwds) {
             try {
-              const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd });
+              const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
               await hookCore.auto.capture({ agent });
             } catch (error) {
               if (!optionalMaterializationErrors.has(error?.code)) {
@@ -1591,6 +1792,7 @@ async function mainImpl(argv = process.argv.slice(2), {
         cwd: hookCwds[0],
         env: runtimeEnv,
         stderr,
+        sessionKey: hookSessionKey,
       });
       await runHookAutomaticSync({
         core,
@@ -1630,6 +1832,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     let content = '';
     let contextAvailable = false;
     let primaryError = null;
+    await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr });
     try {
       const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
       composition = await hookCore.compose({
@@ -1698,13 +1901,16 @@ async function mainImpl(argv = process.argv.slice(2), {
         stdout.write('{"continue":true}\n');
         return;
       }
-      if (!delivery?.changed) {
+      // A previous stdout/ack failure may have recorded this revision without
+      // consuming its events. Pending rendered IDs must retry even unchanged.
+      if (!delivery?.changed && !composition?.coordination?.deliveredEventIds?.length) {
         stdout.write('{}\n');
         return;
       }
       const eventName = 'UserPromptSubmit';
-      const rendered = renderHookOutput(agent, delivery?.content ?? content, eventName);
+      const rendered = renderHookOutput(agent, delivery?.changed ? delivery.content : content, eventName);
       stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
+      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
       return;
     }
     if (agent === 'cursor' && delivery?.sessionKey) {
@@ -1714,10 +1920,12 @@ async function mainImpl(argv = process.argv.slice(2), {
         [WORK_SESSION_ENV]: delivery.sessionKey,
       };
       stdout.write(`${JSON.stringify(rendered)}\n`);
+      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
       return;
     }
     const rendered = renderHookOutput(agent, content);
     stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
+    await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
     return;
   }
 

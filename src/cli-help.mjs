@@ -12,6 +12,8 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
   hnd env set LABEL                  현재 체크아웃의 환경 선택
   hnd work list                      진행 중 작업 확인
   hnd know find QUERY                오래 남긴 지식 검색
+  hnd work watch --sync              작업 변경 구독
+  hnd privacy show                  수집 제외·보존 정책 확인
   hnd lang show                      현재 언어 확인
 
 프로젝트를 지금 직접 등록하려면 Git 저장소에서 hnd init을 실행합니다.
@@ -22,6 +24,7 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
   hnd rule help      전체·프로젝트·환경·PC 룰
   hnd work help      작업 인계
   hnd know help      장기 지식
+  hnd privacy help   수집·민감정보·보존
   hnd sync help      자동 동기화·복구
   hnd setup help     PC 연결·에이전트 설정
   hnd advanced help  진단·내부·이전 호환 명령
@@ -45,6 +48,8 @@ Everyday commands:
   hnd env set LABEL                  Select an environment for this checkout
   hnd work list                      Show active work
   hnd know find QUERY                Search long-term knowledge
+  hnd work watch --sync              Subscribe to work changes
+  hnd privacy show                  Show capture and retention policy
   hnd lang show                      Show the current language
 
 Run hnd init in a Git repository to register it immediately.
@@ -55,6 +60,7 @@ Topic help:
   hnd rule help      Account, project, environment, and PC rules
   hnd work help      Work handoff
   hnd know help      Long-term knowledge
+  hnd privacy help   Collection, secrets, and retention
   hnd sync help      Automatic sync and recovery
   hnd setup help     PC connection and agent setup
   hnd advanced help  Diagnostics, internals, and legacy commands
@@ -442,7 +448,98 @@ const TOPICS = Object.freeze({
   setup: SETUP_HELP,
   advanced: ADVANCED_HELP,
   lang: LANG_HELP,
+  privacy: `hnd privacy — 자동 수집·민감정보·보존
+
+  hnd privacy show
+  hnd privacy set [--scope project|session] [--enabled true|false]
+      [--exclude-path 'secret/**']... [--exclude-source session|file|checkpoint]...
+      [--clear-exclusions] [--retention-days N|forever]
+  hnd privacy scan (--text TEXT | --file PATH | --stdin)
+  hnd privacy retention [--project]                  삭제 미리보기
+  hnd privacy retention [--project] --apply PREVIEW_ID  확인한 항목만 로컬 삭제
+
+기본 보존은 무기한입니다. 프로젝트 제한은 세션 설정으로 완화할 수 없습니다.
+설정은 기기 로컬이며 수동 저장과 정책을 자동으로 지우지 않습니다.
+로컬 삭제는 서버 이력·다른 기기·백업의 영구 삭제를 보장하지 않습니다.
+고신뢰 credential은 기본 저장 거절, 자동 수집 시 가림 처리합니다.
+명시 저장/내보내기의 --allow-sensitive는 보호 우회이며 자동 문맥에는 전달하지 않습니다.
+`,
 });
+
+const EXTRA_HELP = {
+  ko: {
+    work: `
+동시 세션 협업:
+  hnd work plan [TASK] [--id ID] --file PATH... | --clear
+  hnd work new TASK --goal TEXT [--planned-file PATH]...
+  hnd work conflicts
+  hnd work changes [--limit 20] [--ack] [--ack-gap]
+  hnd work heartbeat
+  hnd work watch [--sync] [--once] [--ack] [--no-heartbeat]
+      [--interval 1000] [--sync-interval 10000]   시간 단위: ms
+
+계획 파일 겹침은 사전 경고이며 실제 파일 잠금이 아닙니다.
+시작·입력·Stop 훅과 watch는 본인 유효 담당만 만료 근처에서 연장합니다.
+watch는 JSON Lines를 출력하며 기본적으로 전달 확인을 하지 않습니다.
+changes --ack는 출력한 이벤트만 확인합니다. --ack-gap은 소실 구간 확인입니다.
+`,
+    know: `
+선택형 로컬 의미 검색:
+  hnd know search-config <status|on|off> [--model NAME] [--endpoint LOOPBACK_URL]
+  hnd know find QUERY --mode keyword|semantic|hybrid [--json]
+Ollama와 embedding 모델은 사용자가 준비합니다. 기본 검색은 FTS이며 실패 시 FTS로 돌아갑니다.
+
+실험 지식 (기본 공유 검색·문맥에서 제외):
+  hnd know branch new NAME --work WORK_ID --from KNOWLEDGE_ID
+  hnd know branch new NAME --work WORK_ID --title TITLE --text TEXT
+  hnd know branch list [--work WORK_ID]
+  hnd know edit EXPERIMENT_ID --text TEXT
+  hnd know branch diff EXPERIMENT_ID
+  hnd know branch adopt EXPERIMENT_ID --expect DIFF_REVISION
+채택은 명시 검토 후 수행하며 기준 변경을 거절합니다. Git branch를 조작하지 않습니다.
+`,
+  },
+  en: {
+    work: `
+Concurrent sessions:
+  hnd work plan [TASK] [--id ID] --file PATH... | --clear
+  hnd work conflicts
+  hnd work changes [--limit 20] [--ack] [--ack-gap]
+  hnd work heartbeat
+  hnd work watch [--sync] [--once] [--ack] [--no-heartbeat]
+      [--interval 1000] [--sync-interval 10000]  milliseconds
+File overlaps are advisory, not filesystem locks. Hooks and watch only renew your own active claims.
+Watch emits JSON Lines without acknowledging by default; --ack acknowledges only emitted events.
+`,
+    know: `
+Optional local semantic search:
+  hnd know search-config <status|on|off> [--model NAME] [--endpoint LOOPBACK_URL]
+  hnd know find QUERY --mode keyword|semantic|hybrid [--json]
+Supply a local Ollama embedding model yourself. Default/fallback search remains FTS.
+
+Experimental knowledge (excluded from shared search/context until adopted):
+  hnd know branch new NAME --work WORK_ID [--from KNOWLEDGE_ID | --title TITLE --text TEXT]
+  hnd know branch list [--work WORK_ID]
+  hnd know edit EXPERIMENT_ID --text TEXT
+  hnd know branch diff EXPERIMENT_ID
+  hnd know branch adopt EXPERIMENT_ID --expect DIFF_REVISION
+Adoption rejects changed bases. No Git branches are created or modified.
+`,
+    privacy: `hnd privacy — collection, sensitive data, and retention
+
+  hnd privacy show
+  hnd privacy set [--scope project|session] [--enabled true|false]
+      [--exclude-path 'secret/**']... [--exclude-source session|file|checkpoint]...
+      [--clear-exclusions] [--retention-days N|forever]
+  hnd privacy scan (--text TEXT | --file PATH | --stdin)
+  hnd privacy retention [--project]
+  hnd privacy retention [--project] --apply PREVIEW_ID
+Retention is unlimited by default. Apply only deletes reviewed local records, not server revisions or backups.
+Session settings cannot relax project exclusions. Settings stay local to this device.
+Explicit --allow-sensitive storage/export bypasses scanning; automatic context still screens secrets.
+`,
+  },
+};
 
 const TOPIC_ALIASES = Object.freeze({
   init: 'project',
@@ -470,5 +567,7 @@ export function helpFor(topic, language = 'ko') {
   if (topic === undefined || topic === null || topic === '') return language === 'en' ? HELP_EN : HELP;
   const normalized = String(topic).trim().toLowerCase();
   const selected = TOPIC_ALIASES[normalized] || normalized;
-  return (language === 'en' ? TOPICS_EN : TOPICS)[selected] || null;
+  const base = (language === 'en' ? TOPICS_EN : TOPICS)[selected];
+  const extra = EXTRA_HELP[language === 'en' ? 'en' : 'ko'][selected] ?? '';
+  return base ? base + extra : extra || null;
 }

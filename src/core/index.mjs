@@ -2,6 +2,10 @@ import { composeEffectiveContext } from './compose.mjs';
 import { captureCheckpoint, getCheckpoint } from './checkpoints.mjs';
 import { withStateLock } from './mutation-lock.mjs';
 import { workSessionKey } from './work-session.mjs';
+import { inspectWorkCoordination, acknowledgeWorkEvents, heartbeatWorkSession } from './work-coordination.mjs';
+import { getPrivacyPolicy, setPrivacyPolicy, previewRetention, applyRetention, collectionAllowed } from './privacy.mjs';
+import { automaticSessionCandidate } from './knowledge-transfer.mjs';
+import { getSemanticSearchConfig, configureSemanticSearch } from './semantic-search.mjs';
 import {
   closeHandoff,
   HANDOFF_ARRAY_FIELDS,
@@ -28,6 +32,11 @@ import {
   relevantKnowledge,
   removeKnowledge,
   searchKnowledge,
+  searchKnowledgeDetailed,
+  createKnowledgeExperiment,
+  listKnowledgeExperiments,
+  diffKnowledgeExperiment,
+  adoptKnowledgeExperiment,
   updateKnowledge,
 } from './knowledge.mjs';
 import {
@@ -69,7 +78,7 @@ function mutationOptions(options, defaults) {
   for (const field of [
     'objective', 'currentState', 'staleHours', 'priority', 'workflowStatus',
     'dependencies', 'parentId', 'claimedBy', 'claimExpiresAt',
-    'blockedReason', 'unblockCriteria',
+    'blockedReason', 'unblockCriteria', 'plannedFiles',
   ]) {
     if (source[field] !== undefined) patch[field] = source[field];
     delete source[field];
@@ -148,6 +157,17 @@ async function validateHandoffCandidate(candidate, defaults) {
 export function createCore({ env = process.env, cwd = process.cwd(), clock = Date, sessionKey, sessionId, agent } = {}) {
   const defaults = { env, cwd, clock, agent, sessionKey: workSessionKey({ sessionKey, sessionId, agent, env }) };
   const locked = (callback) => withStateLock(callback, { env });
+  const workMutation = (callback) => locked(async () => {
+    const result = await callback();
+    try {
+      await inspectWorkCoordination({ repoId: result.repoId, sessionKey: defaults.sessionKey, env, clock });
+    } catch (error) {
+      // Work is already committed. Do not report it as failed or encourage a
+      // duplicate mutation when the optional event cache is unavailable.
+      return { ...result, warnings: [{ code: 'WORK_EVENT_RECORDING_DEFERRED', reason: error.code ?? error.name }] };
+    }
+    return result;
+  });
   return Object.freeze({
     init: () => initializeState({ env, clock }),
     config: Object.freeze({
@@ -157,11 +177,25 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
     auto: Object.freeze({
       get: () => locked(() => getAutoSave({ env, clock })),
       set: (enabled) => locked(() => setAutoSave(enabled, { env, clock })),
+      suggest: ({ payload, agent: sourceAgent, sourceSessionId } = {}) => locked(async () => {
+        if ((await readConfig({ env, clock })).knowledgeSuggestions !== true) return null;
+        // A transcript's raw ID is provenance only. The bound agent session
+        // controls collection policy; sourceSessionId must never reroute it.
+        const policy = await getPrivacyPolicy({ cwd, env, clock, sessionKey: defaults.sessionKey });
+        if (!collectionAllowed({ policy, sourceKind: 'session' })) return null;
+        const candidate = automaticSessionCandidate(payload, {
+          agent: sourceAgent ?? defaults.agent ?? 'unknown',
+          sessionId: sourceSessionId,
+          sessionKey: defaults.sessionKey,
+        });
+        if (!candidate) return null;
+        const pending = await listKnowledge({ scope: 'repo', repoId: policy.repoId, approval: 'pending', env, clock });
+        if (pending.some((entry) => entry.body === candidate.body)) return null;
+        return addKnowledge({ ...candidate, repoId: policy.repoId, actor: 'hook', env, clock });
+      }),
       capture: (options = {}) => locked(() => captureCheckpoint({
-        ...options,
-        cwd: options.cwd ?? cwd,
-        env,
-        clock,
+        ...withDefaults(options, defaults, { cwd: true }),
+        agent: options.agent ?? defaults.agent ?? 'unknown',
       })),
       show: (options = {}) => locked(async () => {
         const resolved = await resolveRepositoryBinding({
@@ -169,7 +203,7 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
           env,
           clock,
         });
-        return getCheckpoint({ repoId: resolved.repository.id, git: resolved.git, env });
+        return getCheckpoint({ ...withDefaults(options, defaults), repoId: resolved.repository.id, git: resolved.git });
       }),
     }),
     sync: Object.freeze({
@@ -246,12 +280,23 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
       remove: (options = {}) => locked(() => removeRuleRecord(withDefaults(options, defaults))),
       invoke: (id, enabled = true) => locked(() => setManualRule({ id, enabled, env, clock })),
     }),
+    work: Object.freeze({
+      inspect: (options = {}) => locked(() => inspectWorkCoordination(withDefaults(options, defaults, { cwd: true }))),
+      ack: (options = {}) => locked(() => acknowledgeWorkEvents(withDefaults(options, defaults))),
+      heartbeat: (options = {}) => locked(() => heartbeatWorkSession(withDefaults(options, defaults, { cwd: true }))),
+    }),
+    privacy: Object.freeze({
+      get: (options = {}) => locked(() => getPrivacyPolicy(withDefaults(options, defaults, { cwd: true }))),
+      set: (options = {}) => locked(() => setPrivacyPolicy(withDefaults(options, defaults, { cwd: true }))),
+      preview: (options = {}) => locked(() => previewRetention(withDefaults(options, defaults, { cwd: true }))),
+      apply: (options = {}) => locked(() => applyRetention(withDefaults(options, defaults, { cwd: true }))),
+    }),
     handoff: Object.freeze({
-      start: (options = {}) => locked(() => startHandoff({
+      start: (options = {}) => workMutation(() => startHandoff({
         ...withDefaults({ actor: 'cli', ...options }, defaults, { cwd: true }),
         validate: (candidate) => validateHandoffCandidate(candidate, defaults),
       })),
-      update: (options = {}) => locked(() => updateHandoff({
+      update: (options = {}) => workMutation(() => updateHandoff({
         ...mutationOptions({ actor: 'cli', ...options }, defaults),
         validate: (candidate) => validateHandoffCandidate(candidate, defaults),
       })),
@@ -259,7 +304,7 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
         locked(() => showHandoff(
           withDefaults(options, defaults, { cwd: options.repoId === undefined }),
         )),
-      close: (options = {}) => locked(
+      close: (options = {}) => workMutation(
         () => closeHandoff(mutationOptions({ actor: 'cli', ...options }, defaults)),
       ),
       select: (options = {}) =>
@@ -280,6 +325,19 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
         )),
     }),
     knowledge: Object.freeze({
+      // Embedding requests must not hold the global generation lock. Detailed
+      // search snapshots/rechecks knowledge under its own lock around I/O.
+      searchDetailed: (options = {}) => searchKnowledgeDetailed(knowledgeOptions(options, defaults, { currentRepository: true })),
+      semanticConfig: Object.freeze({
+        get: () => getSemanticSearchConfig({ env }),
+        set: (options = {}) => configureSemanticSearch({ ...options, env }),
+      }),
+      branch: Object.freeze({
+        create: (options = {}) => locked(() => createKnowledgeExperiment(withDefaults(options, defaults, { cwd: true }))),
+        list: (options = {}) => locked(() => listKnowledgeExperiments(withDefaults(options, defaults, { cwd: true }))),
+        diff: (options = {}) => locked(() => diffKnowledgeExperiment(withDefaults(options, defaults))),
+        adopt: (options = {}) => locked(() => adoptKnowledgeExperiment(withDefaults({ actor: 'cli', ...options }, defaults))),
+      }),
       add: (options = {}) => locked(() => addKnowledge(
         knowledgeOptions({ actor: 'cli', ...options }, defaults, { currentRepository: true }),
       )),
@@ -287,9 +345,9 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
       list: (options = {}) => locked(() => listKnowledge(
         knowledgeOptions(options, defaults, { currentRepository: true }),
       )),
-      search: (options = {}) => locked(() => searchKnowledge(
-        knowledgeOptions(options, defaults, { currentRepository: true }),
-      )),
+      search: (options = {}) => options.mode && options.mode !== 'keyword'
+        ? searchKnowledgeDetailed(knowledgeOptions(options, defaults, { currentRepository: true })).then((result) => result.items)
+        : locked(() => searchKnowledge(knowledgeOptions(options, defaults, { currentRepository: true }))),
       relevant: (options = {}) => locked(() => relevantKnowledge(
         knowledgeOptions(options, defaults, { currentRepository: false }),
       )),

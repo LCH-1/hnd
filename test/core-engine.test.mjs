@@ -478,6 +478,44 @@ test('regular guard and recovery generation churn is retried safely', async (t) 
   }
 });
 
+test('stale guard recovery retains its lease until asynchronous guard deletion completes', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-recovery-order-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const lockFile = path.join(directory, 'state.lock');
+  const guardFile = `${lockFile}.delete`;
+  const recoveryFile = `${guardFile}.recovery`;
+  const old = new Date(0);
+  for (const [file, owner] of [[lockFile, 'orphaned-lock'], [guardFile, 'orphaned-guard']]) {
+    await fs.writeFile(file, `${JSON.stringify({ owner, pid: process.pid })}\n`);
+    await fs.utimes(file, old, old);
+  }
+
+  const originalUnlink = fs.unlink;
+  let deletionStarted = false;
+  let deletionCompleted = false;
+  let recoveryReleasedEarly = false;
+  fs.unlink = async function delayOrphanedGuardDeletion(file, ...args) {
+    if (file === guardFile && !deletionStarted) {
+      deletionStarted = true;
+      // Model slow filesystem completion: the recovery owner must stay live
+      // until this unlink finishes, even after verification already passed.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const result = await originalUnlink.call(this, file, ...args);
+      deletionCompleted = true;
+      return result;
+    }
+    if (file === recoveryFile && !deletionCompleted) recoveryReleasedEarly = true;
+    return originalUnlink.call(this, file, ...args);
+  };
+  try {
+    await withFileLock(lockFile, async () => {}, { timeoutMs: 2_000, staleMs: 1 });
+  } finally {
+    fs.unlink = originalUnlink;
+  }
+  assert.equal(deletionCompleted, true);
+  assert.equal(recoveryReleasedEarly, false);
+});
+
 test('competing waiters recover stale lock leases without violating mutual exclusion', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-lock-waiters-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

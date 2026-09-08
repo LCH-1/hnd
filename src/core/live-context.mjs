@@ -9,6 +9,7 @@ const SCHEMA_VERSION = 2;
 const KERNEL_VERSION = 1;
 const MAX_SESSIONS = 512;
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_ID_FIELDS = ['session_id', 'sessionId', 'conversation_id', 'conversationId', 'thread_id', 'threadId'];
 export const CURSOR_LIVE_CONTEXT_SESSION_ENV = 'HND_CURSOR_RULE_SESSION';
 
 function deliveryPath(env) {
@@ -24,14 +25,7 @@ function sha256(value) {
 }
 
 function payloadSessionId(payload) {
-  return [
-    payload?.session_id,
-    payload?.sessionId,
-    payload?.conversation_id,
-    payload?.conversationId,
-    payload?.thread_id,
-    payload?.threadId,
-  ].find((value) => (
+  return SESSION_ID_FIELDS.map((field) => payload?.[field]).find((value) => (
     typeof value === 'string'
     && value.trim().length > 0
     && value.length <= 512
@@ -45,6 +39,9 @@ export function liveContextSessionKey(agent, payload = {}, env = process.env) {
   }
   const sessionId = payloadSessionId(payload);
   if (sessionId) return workSessionKey({ sessionId, agent, env: {} });
+  // An explicitly malformed identity is not a missing vendor field. Falling
+  // back here can bind a broken child/fork hook to its parent's environment.
+  if (SESSION_ID_FIELDS.some((field) => Object.hasOwn(payload ?? {}, field))) return null;
   if (
     agent === 'cursor'
     && /^[a-f0-9]{64}$/.test(env[CURSOR_LIVE_CONTEXT_SESSION_ENV] || '')
@@ -148,11 +145,13 @@ async function readState(env) {
   }
 }
 
-function prunedSessions(sessions, now) {
+function prunedSessions(sessions, now, currentSessionKey) {
   const cutoff = now.getTime() - SESSION_MAX_AGE_MS;
   return Object.fromEntries(Object.entries(sessions)
     .filter(([, entry]) => Date.parse(entry.recordedAt) >= cutoff)
-    .sort((left, right) => Date.parse(right[1].recordedAt) - Date.parse(left[1].recordedAt))
+    .sort((left, right) => Number(right[0] === currentSessionKey) - Number(left[0] === currentSessionKey)
+      || Date.parse(right[1].recordedAt) - Date.parse(left[1].recordedAt)
+      || left[0].localeCompare(right[0]))
     .slice(0, MAX_SESSIONS));
 }
 
@@ -205,7 +204,7 @@ export async function recordLiveContextDelivery({
       };
       await writeJsonAtomic(deliveryPath(env), {
         schemaVersion: SCHEMA_VERSION,
-        sessions: prunedSessions(sessions, now),
+        sessions: prunedSessions(sessions, now, sessionKey),
       });
     }
     return Object.freeze({ changed, revision, content, sessionKey });

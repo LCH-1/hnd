@@ -25,6 +25,13 @@ import {
   validatePortableEnvironmentLabel,
 } from './state.mjs';
 import { searchKnowledgeIndex } from './knowledge-index.mjs';
+import { searchSemanticIndex, semanticContentDigest } from './semantic-search.mjs';
+import { listHandoffs } from './handoffs.mjs';
+import {
+  adoptedKnowledgeId, experimentSource, EXPERIMENT_SOURCE_PREFIX,
+  isKnowledgeExperiment, knowledgeExperimentMetadata, knowledgeRevision,
+} from './knowledge-branches.mjs';
+import { assertNoSensitive, scanSensitive } from './privacy.mjs';
 
 const MAX_TITLE_CHARS = 200;
 const MAX_TAGS = 20;
@@ -109,7 +116,7 @@ function normalizeSources(value = []) {
     return {
       kind,
       ref: requireText(source.ref, `sources[${index}].ref`, { maxChars: 1000 }),
-      label: source.label === undefined
+      label: source.label === undefined || source.label === null
         ? null
         : requireText(source.label, `sources[${index}].label`, { maxChars: 200 }),
       hash: source.hash === undefined || source.hash === null
@@ -434,6 +441,7 @@ export async function addKnowledge({
   sources = [],
   relationships = [],
   approval = 'approved',
+  allowSensitive = false,
   actor,
   deviceId,
   agent,
@@ -450,6 +458,10 @@ export async function addKnowledge({
     clock,
   });
   const now = isoNow(clock);
+  assertNoSensitive({ title, body, tags, sources }, { allowSensitive });
+  if (isKnowledgeExperiment({ sources })) {
+    throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'Use know branch new to create experimental knowledge');
+  }
   const entry = {
     schemaVersion: STATE_SCHEMA_VERSION,
     id: randomUUID(),
@@ -489,6 +501,7 @@ async function listKnowledgeUnlocked({
   state: knowledgeState,
   approval,
   pinned,
+  includeExperiments = false,
   env = process.env,
   clock = Date,
 }, state) {
@@ -506,6 +519,7 @@ async function listKnowledgeUnlocked({
     ? null
     : validateEnvironmentLabel(environment);
   return entries
+    .filter((entry) => includeExperiments || !isKnowledgeExperiment(entry))
     .filter((entry) => requestedScope === null || entry.scope === requestedScope)
     .filter((entry) => requestedRepoId === null || entry.repoId === requestedRepoId)
     .filter((entry) => requestedEnvironment === null || entry.environment === requestedEnvironment)
@@ -541,17 +555,22 @@ async function searchKnowledgeUnlocked({
   repoId,
   cwd,
   environment,
+  type,
+  state: knowledgeState,
+  approval,
+  pinned,
   env = process.env,
   clock = Date,
   limit = 100,
 }, state) {
   const normalizedQuery = requireText(query, 'query', { maxChars: 500 });
   const entries = await listKnowledgeUnlocked(
-    { tag, scope, repoId, cwd, environment, env, clock },
+    { tag, scope, repoId, cwd, environment, type, state: knowledgeState, approval, pinned, env, clock },
     state,
   );
   const allEntries = await readAllUnlocked(state);
-  const allowed = new Map(entries.map((entry) => [entry.id, entry]));
+  const safeEntries = entries.filter((entry) => scanSensitive(entry).length === 0);
+  const allowed = new Map(safeEntries.map((entry) => [entry.id, entry]));
   let matches;
   try {
     matches = searchKnowledgeIndex({ entries: allEntries, query: normalizedQuery, env, limit: Math.max(limit * 4, 100) });
@@ -566,7 +585,7 @@ async function searchKnowledgeUnlocked({
   // FTS is token based. Keep a portable substring fallback for unsegmented CJK
   // phrases and for hosts where a damaged derived index had to be ignored.
   const terms = searchable(normalizedQuery).split(/\s+/u).filter(Boolean);
-  return entries.map((entry) => {
+  return safeEntries.map((entry) => {
     const title = searchable(entry.title);
     const body = searchable(entry.body);
     const tags = searchable(entry.tags.join(' '));
@@ -579,6 +598,9 @@ async function searchKnowledgeUnlocked({
 }
 
 export async function searchKnowledge(options = {}) {
+  if (options.mode && options.mode !== 'keyword') {
+    return (await searchKnowledgeDetailed(options)).items;
+  }
   const env = options.env === undefined ? process.env : options.env;
   const clock = options.clock === undefined ? Date : options.clock;
   const state = await initializeState({ env, clock });
@@ -588,12 +610,61 @@ export async function searchKnowledge(options = {}) {
   );
 }
 
+export async function searchKnowledgeDetailed({ mode = 'keyword', ...options } = {}) {
+  if (!['keyword', 'semantic', 'hybrid'].includes(mode)) {
+    throw new CoreError('INVALID_KNOWLEDGE', 'Search mode must be keyword, semantic, or hybrid');
+  }
+  const env = options.env ?? process.env;
+  const clock = options.clock ?? Date;
+  const limit = options.limit ?? 100;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+    throw new CoreError('INVALID_KNOWLEDGE', 'Search limit must be an integer from 1 to 500');
+  }
+  const query = requireText(options.query, 'query', { maxChars: 500 });
+  const state = await initializeState({ env, clock });
+  const snapshot = await withKnowledgeLock(state, async () => ({
+    entries: (await listKnowledgeUnlocked({ ...options, env, clock }, state))
+      .filter((entry) => !isKnowledgeExperiment(entry) && scanSensitive(entry).length === 0),
+    keyword: (await searchKnowledgeUnlocked({ ...options, query, env, clock, limit }, state))
+      .filter((entry) => scanSensitive(entry).length === 0),
+  }));
+  if (mode === 'keyword') return { items: snapshot.keyword, requestedMode: mode, mode, fallback: false, reason: null };
+  const semantic = await searchSemanticIndex({ entries: snapshot.entries, query, env, limit });
+  const byId = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
+  let ranked;
+  if (semantic.fallback) ranked = snapshot.keyword;
+  else if (mode === 'semantic') ranked = semantic.items.map((item) => ({ ...byId.get(item.id), score: item.score }));
+  else {
+    const scores = new Map();
+    for (const list of [snapshot.keyword, semantic.items]) {
+      list.forEach((item, index) => scores.set(item.id, (scores.get(item.id) ?? 0) + 1 / (60 + index + 1)));
+    }
+    ranked = [...scores].map(([id, score]) => ({ ...byId.get(id), score }))
+      .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
+  }
+  // Embedding HTTP calls happen outside knowledge/state locks. Recheck the
+  // live records before returning so a concurrent deletion/edit cannot revive
+  // stale text from the vector cache or leak a newly restricted record.
+  const items = await withKnowledgeLock(state, async () => {
+    const current = new Map((await listKnowledgeUnlocked({ ...options, env, clock }, state))
+      .filter((entry) => !isKnowledgeExperiment(entry) && scanSensitive(entry).length === 0)
+      .map((entry) => [entry.id, entry]));
+    return ranked.filter((entry) => current.has(entry.id)
+      && semanticContentDigest(current.get(entry.id)) === semanticContentDigest(entry))
+      .slice(0, limit).map((entry) => ({ ...current.get(entry.id), score: entry.score }));
+  });
+  return { items, requestedMode: mode, mode: semantic.fallback ? 'keyword' : mode,
+    fallback: semantic.fallback, reason: semantic.reason };
+}
+
 async function relevantKnowledgeUnlocked({
   query = '', repoId, environment, limit = 5, env = process.env, clock = Date,
 }, state) {
   const entries = await readAllUnlocked(state);
   const applicable = entries.filter((entry) => (
     entry.approval === 'approved'
+    && !isKnowledgeExperiment(entry)
+    && scanSensitive(entry).length === 0
     && !['contradicted', 'retired', 'superseded'].includes(entry.state)
     && (
       entry.scope === 'global'
@@ -761,6 +832,19 @@ async function normalizeKnowledgeUpdate(current, patch, { env, clock }) {
     ...location,
     updatedAt: isoNow(clock),
   };
+  if (isKnowledgeExperiment(current)) {
+    if (current.state === 'superseded') {
+      throw new CoreError('EXPERIMENT_ALREADY_ADOPTED', 'Adopted experimental knowledge is immutable; create a new experiment');
+    }
+    if (entry.approval !== 'pending' || JSON.stringify(knowledgeExperimentMetadata(entry)) !== JSON.stringify(knowledgeExperimentMetadata(current))) {
+      throw new CoreError('EXPERIMENT_ADOPTION_REQUIRED', 'Use know branch diff/adopt to approve experimental knowledge');
+    }
+    if (entry.scope !== current.scope || entry.repoId !== current.repoId || entry.environment !== current.environment) {
+      throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'Experimental knowledge cannot change project or environment');
+    }
+  } else if (isKnowledgeExperiment(entry)) {
+    throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'Use know branch new to create experimental knowledge');
+  }
   if (feedbackKind !== undefined) {
     const key = enumValue(feedbackKind, ['helpful', 'wrong', 'irrelevant'], 'feedbackKind');
     entry.feedback = { ...entry.feedback, [key]: entry.feedback[key] + 1 };
@@ -796,6 +880,7 @@ export async function updateKnowledge({
   approval,
   feedback,
   feedbackKind,
+  allowSensitive = false,
   actor,
   deviceId,
   agent,
@@ -826,6 +911,7 @@ export async function updateKnowledge({
       deviceId,
       agent,
     }, { env, clock });
+    assertNoSensitive({ title: entry.title, body: entry.body, tags: entry.tags, sources: entry.sources }, { allowSensitive });
     await writeJsonAtomic(notePath(state.knowledge, id), entry);
     return publicEntry(entry);
   });
@@ -858,7 +944,7 @@ async function findKnowledgeDuplicatesUnlocked({
     throw new CoreError('INVALID_KNOWLEDGE', 'threshold must be between 0 and 1');
   }
   const entries = (await readAllUnlocked(state)).filter((entry) => (
-    entry.approval === 'approved' && !['retired', 'superseded'].includes(entry.state)
+    entry.approval === 'approved' && !isKnowledgeExperiment(entry) && !['retired', 'superseded'].includes(entry.state)
   ));
   const sets = new Map(entries.map((entry) => [entry.id, similarityTokens(entry)]));
   const matches = [];
@@ -899,6 +985,9 @@ export async function mergeKnowledge({
       getKnowledgeUnlocked(state, targetId),
       getKnowledgeUnlocked(state, sourceId),
     ]);
+    if (isKnowledgeExperiment(target) || isKnowledgeExperiment(source)) {
+      throw new CoreError('EXPERIMENT_ADOPTION_REQUIRED', 'Experimental knowledge must be reviewed with know branch diff/adopt');
+    }
     const mergedBody = target.body.includes(source.body)
       ? target.body
       : [target.body, source.body].filter(Boolean).join('\n\n---\n\n');
@@ -918,6 +1007,7 @@ export async function mergeKnowledge({
       relationships: relationshipsWithRequiredLink(source.relationships, sourceRelationship),
       actor,
     }, { env, clock });
+    assertNoSensitive({ title: updatedTarget.title, body: updatedTarget.body, tags: updatedTarget.tags, sources: updatedTarget.sources });
     const journalFile = knowledgeMergeJournalPath(state);
     const journal = {
       schemaVersion: KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION,
@@ -943,5 +1033,154 @@ export async function mergeKnowledge({
     await writeJsonAtomic(notePath(state.knowledge, source.id), updatedSource);
     await removeFile(journalFile);
     return publicEntry(updatedTarget);
+  });
+}
+
+async function experimentWork({ workId, repoId, cwd, env, clock }) {
+  if (!isUuid(workId)) throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'workId must be a UUID');
+  const work = (await listHandoffs({ repoId, cwd, status: 'all', env, clock })).find((entry) => entry.id === workId);
+  if (!work) throw new CoreError('HANDOFF_NOT_FOUND', 'Experiment work was not found in this project');
+  return work;
+}
+
+export async function createKnowledgeExperiment({
+  name, workId, sourceId, title, body, tags, repoId, cwd,
+  actor, agent, env = process.env, clock = Date,
+} = {}) {
+  const normalizedName = requireText(name, 'name', { maxChars: 80 });
+  if (/[\r\n]/.test(normalizedName)) throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'Experiment name must be a single line');
+  const state = await initializeState({ env, clock });
+  const work = await experimentWork({ workId, repoId, cwd, env, clock });
+  return withKnowledgeLock(state, async () => {
+    const base = sourceId ? await getKnowledgeUnlocked(state, sourceId) : null;
+    if (base && (isKnowledgeExperiment(base) || base.repoId !== work.repoId || base.approval !== 'approved'
+      || ['contradicted', 'retired', 'superseded'].includes(base.state))) {
+      throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'Source must be approved shared knowledge from the work project');
+    }
+    const existing = (await readAllUnlocked(state)).find((entry) => {
+      if (!isKnowledgeExperiment(entry)) return false;
+      const metadata = knowledgeExperimentMetadata(entry);
+      return entry.repoId === work.repoId && metadata.workId === workId && metadata.name === normalizedName
+        && metadata.baseId === (sourceId ?? null);
+    });
+    if (existing) return { created: false, entry: publicEntry(existing), experiment: knowledgeExperimentMetadata(existing) };
+    const experiment = {
+      name: normalizedName, workId, baseId: base?.id ?? null,
+      baseDigest: base ? knowledgeRevision(base) : null,
+    };
+    const now = isoNow(clock);
+    const entry = {
+      schemaVersion: STATE_SCHEMA_VERSION, id: randomUUID(),
+      title: requireText(title ?? base?.title ?? normalizedName, 'title', { maxChars: MAX_TITLE_CHARS }),
+      body: requireText(body ?? base?.body ?? '', 'body', { maxBytes: MAX_BODY_BYTES, allowEmpty: true }),
+      tags: normalizeTags(tags ?? base?.tags ?? []),
+      scope: base?.scope ?? 'repo', repoId: work.repoId, environment: base?.environment ?? null,
+      type: base?.type ?? 'note', state: 'review_needed', pinned: false,
+      sources: normalizeSources([...(base?.sources ?? []), experimentSource(experiment)]),
+      relationships: base ? [{ type: 'related', targetId: base.id }] : [],
+      feedback: normalizeFeedback(), approval: 'pending', createdAt: now, updatedAt: now,
+      history: [historyRecord({ at: now, action: 'experiment-created', actor, agent })],
+    };
+    assertNoSensitive({ title: entry.title, body: entry.body, tags: entry.tags, sources: entry.sources });
+    await writeJsonAtomic(notePath(state.knowledge, entry.id), entry, { overwrite: false });
+    return { created: true, entry: publicEntry(entry), experiment };
+  });
+}
+
+export async function listKnowledgeExperiments({ name, workId, repoId, cwd, env = process.env, clock = Date } = {}) {
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(state, async () => {
+    const entries = await listKnowledgeUnlocked({ repoId, cwd, includeExperiments: true, env, clock }, state);
+    const groups = new Map();
+    for (const entry of entries) {
+      if (!isKnowledgeExperiment(entry)) continue;
+      const metadata = knowledgeExperimentMetadata(entry);
+      if ((name !== undefined && name !== metadata.name) || (workId !== undefined && workId !== metadata.workId)) continue;
+      const key = JSON.stringify([entry.repoId, metadata.workId, metadata.name]);
+      if (!groups.has(key)) groups.set(key, { name: metadata.name, workId: metadata.workId, repoId: entry.repoId, items: [] });
+      groups.get(key).items.push({ id: entry.id, title: entry.title, baseId: metadata.baseId,
+        status: entry.state === 'superseded' ? 'adopted' : 'experimental', updatedAt: entry.updatedAt });
+    }
+    return [...groups.values()];
+  });
+}
+
+async function experimentDiffUnlocked(state, id) {
+  const proposed = await getKnowledgeUnlocked(state, id);
+  const experiment = knowledgeExperimentMetadata(proposed);
+  if (!experiment) throw new CoreError('INVALID_KNOWLEDGE_EXPERIMENT', 'This knowledge entry is not experimental');
+  let currentShared = null;
+  if (experiment.baseId) {
+    try { currentShared = await getKnowledgeUnlocked(state, experiment.baseId); } catch (error) {
+      if (error?.code !== 'KNOWLEDGE_NOT_FOUND') throw error;
+    }
+  }
+  const changes = ['title', 'body', 'tags', 'type'].filter((field) => (
+    JSON.stringify(currentShared?.[field] ?? null) !== JSON.stringify(proposed[field])
+  )).map((field) => ({ field, before: currentShared?.[field] ?? null, after: proposed[field] }));
+  const currentDigest = currentShared ? knowledgeRevision(currentShared) : null;
+  const revision = createHash('sha256').update(JSON.stringify([knowledgeRevision(proposed), currentDigest])).digest('hex');
+  return { id, experiment, currentShared, proposed, changes,
+    baseChanged: experiment.baseDigest !== currentDigest, revision };
+}
+
+export async function diffKnowledgeExperiment({ id, env = process.env, clock = Date } = {}) {
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(state, () => experimentDiffUnlocked(state, id));
+}
+
+export async function adoptKnowledgeExperiment({ id, expectedRevision, actor, agent, env = process.env, clock = Date } = {}) {
+  if (typeof expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(expectedRevision)) {
+    throw new CoreError('EXPERIMENT_REVIEW_REQUIRED', 'Review know branch diff and pass its revision before adoption');
+  }
+  const state = await initializeState({ env, clock });
+  return withKnowledgeLock(state, async () => {
+    const diff = await experimentDiffUnlocked(state, id);
+    const { proposed, experiment, currentShared } = diff;
+    const targetId = experiment.baseId ?? adoptedKnowledgeId(id);
+    if (proposed.state === 'superseded') {
+      const target = await getKnowledgeUnlocked(state, targetId);
+      if (!target.relationships.some((item) => item.type === 'supersedes' && item.targetId === id)) {
+        throw new CoreError('EXPERIMENT_ADOPTION_CONFLICT', 'Previously adopted knowledge no longer matches its source');
+      }
+      return { adopted: false, target, sourceId: id };
+    }
+    if (diff.revision !== expectedRevision || diff.baseChanged) {
+      throw new CoreError('EXPERIMENT_REVISION_CONFLICT', 'Experimental or shared knowledge changed; review again and create a fresh experiment if the shared base changed');
+    }
+    if (currentShared && (isKnowledgeExperiment(currentShared) || currentShared.repoId !== proposed.repoId)) {
+      throw new CoreError('EXPERIMENT_ADOPTION_CONFLICT', 'Shared source no longer belongs to this project');
+    }
+    if (!experiment.baseId && (await readAllUnlocked(state)).some((entry) => entry.id === targetId)) {
+      throw new CoreError('EXPERIMENT_ADOPTION_CONFLICT', 'Adoption target already exists');
+    }
+    const now = isoNow(clock);
+    const sources = proposed.sources.filter((source) => !(source.kind === 'import' && source.ref.startsWith(EXPERIMENT_SOURCE_PREFIX)));
+    const origin = { kind: 'import', ref: `hnd:experiment-adopted:${id}`, label: `Adopted experiment: ${experiment.name}`, hash: expectedRevision, commit: null };
+    const target = {
+      ...proposed, id: targetId, state: 'verified', approval: 'approved',
+      pinned: currentShared?.pinned ?? false,
+      sources: normalizeSources([...sources, origin]),
+      relationships: relationshipsWithRequiredLink((currentShared?.relationships ?? []).filter((item) => item.targetId !== targetId), { type: 'supersedes', targetId: id }),
+      feedback: currentShared?.feedback ?? normalizeFeedback(),
+      createdAt: currentShared?.createdAt ?? now, updatedAt: now,
+      history: [...(currentShared?.history ?? []), historyRecord({ at: now, action: 'experiment-adopted', actor, agent,
+        before: currentShared ? historySnapshot(currentShared) : null })].slice(-MAX_HISTORY),
+    };
+    assertNoSensitive({ title: target.title, body: target.body, tags: target.tags, sources: target.sources });
+    const archived = { ...proposed, state: 'superseded', updatedAt: now,
+      relationships: relationshipsWithRequiredLink(proposed.relationships, { type: 'related', targetId }),
+      history: [...proposed.history, historyRecord({ at: now, action: 'experiment-adopted', actor, agent,
+        before: historySnapshot(proposed) })].slice(-MAX_HISTORY) };
+    const journal = { schemaVersion: KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION, kind: 'knowledge-merge', target, source: archived };
+    if (!validKnowledgeMergeJournal(journal)) throw new CoreError('STATE_CORRUPT', 'Experimental adoption journal is inconsistent');
+    const journalFile = knowledgeMergeJournalPath(state);
+    if (!await writeJsonAtomic(journalFile, journal, { overwrite: false })) {
+      throw new CoreError('STATE_CORRUPT', 'Knowledge recovery journal already exists');
+    }
+    await writeJsonAtomic(notePath(state.knowledge, target.id), target);
+    await writeJsonAtomic(notePath(state.knowledge, archived.id), archived);
+    await removeFile(journalFile);
+    return { adopted: true, target: publicEntry(target), sourceId: id };
   });
 }

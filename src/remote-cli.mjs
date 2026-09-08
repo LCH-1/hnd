@@ -1239,6 +1239,7 @@ export async function reconcileRemoteAutomatically({
       return Object.freeze({
         status: 'synced',
         changed: pushed.pushed,
+        snapshotDigest: pushed.snapshotDigest,
         attempts,
         conflicts: 0,
       });
@@ -1268,6 +1269,7 @@ export async function reconcileRemoteAutomatically({
         return Object.freeze({
           status: 'synced',
           changed: true,
+          snapshotDigest: pushed.snapshotDigest,
           attempts,
           conflicts: conflictCount,
           pushed: pushed.pushed,

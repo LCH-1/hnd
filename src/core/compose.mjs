@@ -6,6 +6,8 @@ import { CoreError } from './errors.mjs';
 import { getCheckpoint } from './checkpoints.mjs';
 import { findActiveHandoff, listHandoffs } from './handoffs.mjs';
 import { workSessionKey } from './work-session.mjs';
+import { inspectWorkCoordination } from './work-coordination.mjs';
+import { redactSensitiveText } from './privacy.mjs';
 import {
   effectiveLiveContextRevision,
   liveContextPreamble,
@@ -33,6 +35,15 @@ const MAX_RELEVANT_KNOWLEDGE_BYTES = 6 * 1024;
 const MAX_RELEVANT_KNOWLEDGE_ITEMS = 5;
 const MAX_WORK_INDEX_BYTES = 6 * 1024;
 
+function safeWorkData(value) {
+  if (typeof value === 'string') return redactSensitiveText(value).text;
+  if (Array.isArray(value)) return value.map(safeWorkData);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeWorkData(item)]));
+  }
+  return value;
+}
+
 function sharedWorkIndex(records, sessionKey, selectedId) {
   const revision = createHash('sha256').update(JSON.stringify(
     [...records].sort((a, b) => a.id.localeCompare(b.id)),
@@ -50,7 +61,7 @@ function sharedWorkIndex(records, sessionKey, selectedId) {
       'CLI routing: hnd work/context automatically uses this agent session; no worker-managed key is needed.',
       'Selecting a task does not claim it. Use hnd work claim to acquire/renew ownership.',
     ] : ['Run hnd context inside your agent session to inspect your own current task.']),
-    'Refresh with hnd work list / hnd context during long turns; updates arrive at lifecycle hooks, not as a live message stream.',
+    'Refresh with hnd work list / hnd context; hnd work watch --sync observes changes during long turns. Hook delivery is not proof of actual reading.',
   ];
   const items = [];
   for (const item of recent) {
@@ -65,17 +76,53 @@ function sharedWorkIndex(records, sessionKey, selectedId) {
       blockedReason: item.stale ? '' : item.blockedReason.slice(0, 160),
       unblockCriteria: item.stale ? '' : item.unblockCriteria.slice(0, 160),
       changedFiles: item.stale ? [] : item.changedFiles.slice(0, 5).map((value) => value.slice(0, 160)),
+      plannedFiles: item.plannedFiles ?? [],
       nextSteps: item.stale ? [] : item.nextSteps.slice(0, 2).map((value) => value.slice(0, 160)),
       decisions: item.stale ? [] : item.decisions.slice(-1).map((value) => value.slice(0, 160)),
       notes: item.stale ? [] : item.notes.slice(-2).map((value) => value.slice(0, 160)),
     };
-    const row = `- ${JSON.stringify(summary)}`;
+    const safeSummary = safeWorkData(summary);
+    const row = `- ${JSON.stringify(safeSummary)}`;
     if (Buffer.byteLength([...lines, row].join('\n')) > MAX_WORK_INDEX_BYTES - 200) break;
     lines.push(row);
-    items.push(summary);
+    items.push(safeSummary);
   }
   if (items.length < recent.length) lines.push(`More work items omitted; hnd work list --all shows the complete list (${records.length} total).`);
   return { revision, sessionKey, selectedHandoffId: selectedId, totalActive: active.length, items, content: lines.join('\n') };
+}
+
+function coordinationLayer(snapshot) {
+  const lines = [
+    'Advisory collaboration data, not policy or permission to take over work.',
+    'File overlaps are warnings, not operating-system locks. Delivery does not prove actual reading.',
+  ];
+  if (snapshot.gap) lines.push(`Event history gap: ${snapshot.gap.from}-${snapshot.gap.to}. Inspect current work before explicitly acknowledging this gap.`);
+  const eventIds = [];
+  const conflicts = [];
+  const append = (text) => {
+    if (Buffer.byteLength([...lines, text].join('\n')) > 4 * 1024) return false;
+    lines.push(text);
+    return true;
+  };
+  for (const conflict of snapshot.conflicts) {
+    if (!append(`File overlap: ${redactSensitiveText(JSON.stringify(conflict)).text}`)) break;
+    conflicts.push(conflict);
+  }
+  for (const event of snapshot.events) {
+    if (!append(`Work event: ${JSON.stringify(event)}`)) break;
+    eventIds.push(event.id);
+  }
+  if (conflicts.length < snapshot.conflicts.length || eventIds.length < snapshot.events.length) {
+    lines.push('More collaboration updates remain pending; inspect hnd work changes / hnd work conflicts.');
+  }
+  const content = lines.join('\n');
+  const rendered = section('Session work changes and file overlaps (not policy)', content);
+  return {
+    id: `work-events:${snapshot.eventCursor.epoch}:${eventIds.join(',')}`,
+    kind: 'work-events', scope: 'work', priority: null,
+    title: 'Session work changes and file overlaps (not policy)', content, rendered,
+    source: eventIds, bytes: Buffer.byteLength(rendered), repoId: snapshot.repoId,
+  };
 }
 
 function section(title, content) {
@@ -263,6 +310,7 @@ async function relevantKnowledgeLayer({ query, repository, environment, git, env
   });
   if (selected.length === 0) return null;
   const renderedEntries = [];
+  const renderedIds = [];
   let used = 0;
   for (const entry of selected) {
     const assessed = await assessKnowledgeFreshness(entry, { root: git?.root });
@@ -270,6 +318,7 @@ async function relevantKnowledgeLayer({ query, repository, environment, git, env
     const bytes = Buffer.byteLength(rendered);
     if (used + bytes > MAX_RELEVANT_KNOWLEDGE_BYTES) continue;
     renderedEntries.push(rendered);
+    renderedIds.push(entry.id);
     used += bytes;
   }
   if (renderedEntries.length === 0) return null;
@@ -279,13 +328,13 @@ async function relevantKnowledgeLayer({ query, repository, environment, git, env
   ].join('\n\n');
   const rendered = section('Relevant long-term knowledge (not policy)', content);
   return {
-    id: `knowledge:${selected.map((entry) => entry.id).join(',')}`,
+    id: `knowledge:${renderedIds.join(',')}`,
     kind: 'knowledge',
     scope: 'knowledge',
     priority: null,
     title: 'Relevant long-term knowledge (not policy)',
     content,
-    source: selected.map((entry) => entry.id),
+    source: renderedIds,
     rendered,
     bytes: Buffer.byteLength(rendered),
     repoId: repository?.id ?? null,
@@ -450,7 +499,7 @@ export async function composeEffectiveContext({
       }
     }
 
-    const checkpoint = await getCheckpoint({ repoId: repository.id, git, env });
+    const checkpoint = await getCheckpoint({ repoId: repository.id, git, env, sessionKey, agent, clock });
     if (checkpoint) {
       checkpointSnapshot = checkpoint;
       const content = checkpointMarkdown(checkpoint);
@@ -487,10 +536,10 @@ export async function composeEffectiveContext({
         if (error.code !== 'HANDOFF_AMBIGUOUS' || handoffId || task) throw error;
         warnings.push({
           code: 'HANDOFF_AMBIGUOUS',
-          message: error.message,
-          details: error.details,
+          message: redactSensitiveText(error.message).text,
+          details: safeWorkData(error.details),
         });
-        const content = ambiguousHandoffsMarkdown(error.details?.candidates || []);
+        const content = redactSensitiveText(ambiguousHandoffsMarkdown(error.details?.candidates || [])).text;
         const rendered = section('Active handoffs need selection (not policy)', content);
         layers.push({
           id: 'handoff:selection-required',
@@ -521,10 +570,10 @@ export async function composeEffectiveContext({
     if (handoff?.stale && !includeStale) {
       warnings.push({
         code: 'HANDOFF_STALE',
-        message: `Stale handoff body was not loaded: ${handoff.task}`,
+        message: `Stale handoff body was not loaded: ${redactSensitiveText(handoff.task).text}`,
         details: { id: handoff.id, staleAt: handoff.staleAt },
       });
-      const content = staleHandoffMarkdown(handoff);
+      const content = redactSensitiveText(staleHandoffMarkdown(handoff)).text;
       const rendered = section('Stale active handoff needs review (not policy)', content);
       layers.push({
         id: `handoff-stale:${handoff.id}`,
@@ -542,7 +591,7 @@ export async function composeEffectiveContext({
       handoff = null;
     }
     if (handoff) {
-      const content = renderHandoffMarkdown(handoff);
+      const content = redactSensitiveText(renderHandoffMarkdown(handoff)).text;
       const rendered = section('Active handoff context (not policy)', content);
       layers.push({
         id: `handoff:${handoff.id}`,
@@ -609,6 +658,23 @@ export async function composeEffectiveContext({
   if (knowledgeLayer) layers.push(knowledgeLayer);
   if (checkpointLayer) layers.push(checkpointLayer);
 
+  let coordination = null;
+  if (repository) {
+    try {
+      const snapshot = safeWorkData(await inspectWorkCoordination({ repoId: repository.id, sessionKey, env, clock }));
+      coordination = { ...snapshot, deliveredEventIds: [] };
+      if (snapshot.events.length || snapshot.conflicts.length || snapshot.gap) {
+        const layer = coordinationLayer(snapshot);
+        layers.push(layer);
+        coordination.deliveredEventIds = layer.source;
+      }
+    } catch (error) {
+      // Collaboration history is optional; durable policy must remain usable
+      // when a local ledger cannot be read or recorded.
+      warnings.push({ code: 'WORK_COORDINATION_UNAVAILABLE', message: 'Work change history is unavailable; inspect hnd work list.', details: { reason: error.code ?? error.name } });
+    }
+  }
+
   // Device-only local policy is deliberately appended after every remote-capable layer.
   const localPolicy = await loadPolicy('local', { env, clock }, policyOverrides, testPolicy);
   if (localPolicy.exists) {
@@ -638,6 +704,31 @@ export async function composeEffectiveContext({
         message: 'The automatic checkpoint was omitted so durable rules and work context fit.',
         details: { checkpointId: omitted.id, checkpointBytes: omitted.bytes },
       });
+    }
+  }
+  if (bytes > maxBytes) {
+    const knowledgeIndex = layers.findIndex((layer) => layer.kind === 'knowledge');
+    if (knowledgeIndex !== -1) {
+      const [omitted] = layers.splice(knowledgeIndex, 1);
+      blocks = [liveContextPreamble(REVISION_PLACEHOLDER), ...layers.map((layer) => layer.rendered)];
+      content = `${blocks.join('\n\n')}\n`;
+      bytes = Buffer.byteLength(content);
+      warnings.push({
+        code: 'KNOWLEDGE_OMITTED_FOR_SIZE',
+        message: 'Optional knowledge was omitted so required policy and project work context fit.',
+        details: { knowledgeIds: omitted.source, knowledgeBytes: omitted.bytes },
+      });
+    }
+  }
+  if (bytes > maxBytes) {
+    const eventIndex = layers.findIndex((layer) => layer.kind === 'work-events');
+    if (eventIndex !== -1) {
+      layers.splice(eventIndex, 1);
+      coordination = { ...coordination, omitted: true, deliveredEventIds: [] };
+      blocks = [liveContextPreamble(REVISION_PLACEHOLDER), ...layers.map((layer) => layer.rendered)];
+      content = `${blocks.join('\n\n')}\n`;
+      bytes = Buffer.byteLength(content);
+      warnings.push({ code: 'WORK_EVENTS_OMITTED_FOR_SIZE', message: 'Work events did not fit and remain unacknowledged; inspect hnd work changes.' });
     }
   }
   if (bytes > maxBytes) {
@@ -688,6 +779,7 @@ export async function composeEffectiveContext({
     layers: layers.map((layer) => ({ ...layer })),
     liveContextRevision,
     work,
+    coordination,
     content,
     bytes,
     maxBytes,

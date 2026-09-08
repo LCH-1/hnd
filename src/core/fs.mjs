@@ -601,7 +601,10 @@ async function reclaimDeletionGuard(guardFile, staleMs) {
     ) {
       return false;
     }
-    return removeLockSnapshot(guardFile, current);
+    // Await before finally releases the recovery lease. Returning the promise
+    // directly would let another waiter replace this guard while its verified
+    // inode is still being asynchronously removed.
+    return await removeLockSnapshot(guardFile, current);
   } finally {
     if (recoveryHandle) {
       const recoveryIdentity = await recoveryHandle.stat().catch(() => null);

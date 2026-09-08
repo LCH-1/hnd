@@ -113,6 +113,10 @@ async function replacePending({ env, clock, kind, reason, conflicts }) {
     // This file contains status only. Replace a malformed status envelope with
     // a safe attention marker without copying its contents into output/logs.
   }
+  // Checking whether a conflict was reviewed can itself hit a busy manual
+  // sync lock. That transient failure must not turn a review barrier into a
+  // retry; handleAttention explicitly clears barriers when retry is allowed.
+  if (current?.kind === 'attention') return Object.freeze(current);
   const timestamp = isoNow(clock);
   const next = {
     schemaVersion: AUTO_SYNC_PENDING_SCHEMA_VERSION,
@@ -219,6 +223,26 @@ async function persistFailure(error, options) {
   }
 }
 
+async function reportUnlockedFailure(error, { env }) {
+  // A caller that never acquired the lock must not overwrite the owner's
+  // result or downgrade an unresolved conflict/authentication barrier.
+  let pending = null;
+  try {
+    pending = await readAutoSyncPending({ env });
+  } catch {
+    // Reading status is best effort here; only a lock owner may repair it.
+  }
+  if (pending?.kind === 'attention') return pendingResult(pending, { blocked: true });
+  const classification = classifyFailure(error);
+  return Object.freeze({
+    status: classification.kind === 'attention' ? 'needs_attention' : 'deferred',
+    synced: false,
+    pending: Boolean(pending),
+    reason: classification.reason,
+    ...(pending ? { attempts: pending.attempts } : {}),
+  });
+}
+
 async function handleAttention(pending, { env, retryAttention, lockTimeoutMs }) {
   if (!pending || pending.kind !== 'attention') return { blocked: false, retried: Boolean(pending) };
   if (retryAttention) {
@@ -238,8 +262,9 @@ async function handleAttention(pending, { env, retryAttention, lockTimeoutMs }) 
 /**
  * Bitwarden-style best-effort synchronization for lifecycle hooks.
  *
- * The function never throws: transient failures become an atomic retry marker,
- * while conflicts and trust/integrity failures become a blocking attention
+ * The function never throws: a lock owner records transient failures in an
+ * atomic retry marker, while competing callers defer without writing status.
+ * Conflicts and trust/integrity failures become a blocking attention
  * marker. A conflict marker cannot publish on a later automatic invocation;
  * it clears only after a reviewed manual sync makes local state clean, or an
  * explicit caller passes retryAttention.
@@ -256,69 +281,75 @@ export async function autoSync({
 } = {}) {
   const failureOptions = { env, clock };
   try {
-    if (!await remoteSyncConfigured(env)) {
-      await clearAutoSyncPending({ env });
-      return Object.freeze({
-        status: 'not_configured',
-        synced: false,
-        pending: false,
-      });
-    }
-
     return await withFileLock(
       lockPath(env),
       async () => {
-        const pending = await readAutoSyncPending({ env });
-        const attention = await handleAttention(pending, {
-          env,
-          retryAttention,
-          lockTimeoutMs: Math.min(lockTimeoutMs, 2_000),
-        });
-        if (attention.blocked) return attention.result;
+        try {
+          if (!await remoteSyncConfigured(env)) {
+            await clearAutoSyncPending({ env });
+            return Object.freeze({
+              status: 'not_configured',
+              synced: false,
+              pending: false,
+            });
+          }
+          const pending = await readAutoSyncPending({ env });
+          const attention = await handleAttention(pending, {
+            env,
+            retryAttention,
+            lockTimeoutMs: Math.min(lockTimeoutMs, 2_000),
+          });
+          if (attention.blocked) return attention.result;
 
-        const result = await reconcile({
-          env,
-          timeoutMs,
-          lockTimeoutMs,
-          maxConflictRetries,
-          fetchImpl,
-        });
-        if (result?.status === 'not_configured') {
+          const result = await reconcile({
+            env,
+            timeoutMs,
+            lockTimeoutMs,
+            maxConflictRetries,
+            fetchImpl,
+          });
+          if (result?.status === 'not_configured') {
+            await clearAutoSyncPending({ env });
+            return Object.freeze({
+              status: 'not_configured',
+              synced: false,
+              pending: false,
+            });
+          }
+          if (result?.status === 'needs_attention') {
+            const recorded = await replacePending({
+              env,
+              clock,
+              kind: 'attention',
+              reason: result.reason === 'conflict' ? 'conflict' : 'remote_error',
+              conflicts: result.conflicts,
+            });
+            return pendingResult(recorded);
+          }
+          if (result?.status !== 'synced') {
+            throw new TypeError('Automatic sync returned an invalid status');
+          }
+
           await clearAutoSyncPending({ env });
           return Object.freeze({
-            status: 'not_configured',
-            synced: false,
+            status: 'synced',
+            synced: true,
             pending: false,
+            retried: attention.retried,
+            changed: result.changed === true,
+            attempts: Number.isSafeInteger(result.attempts) ? result.attempts : 1,
+            conflicts: Number.isSafeInteger(result.conflicts) ? result.conflicts : 0,
+            ...(result.snapshotDigest ? { snapshotDigest: result.snapshotDigest } : {}),
           });
+        } catch (error) {
+          // Persist before releasing the same lock used for successful state
+          // transitions, so a later caller cannot publish past this failure.
+          return persistFailure(error, failureOptions);
         }
-        if (result?.status === 'needs_attention') {
-          const recorded = await replacePending({
-            env,
-            clock,
-            kind: 'attention',
-            reason: result.reason === 'conflict' ? 'conflict' : 'remote_error',
-            conflicts: result.conflicts,
-          });
-          return pendingResult(recorded);
-        }
-        if (result?.status !== 'synced') {
-          throw new TypeError('Automatic sync returned an invalid status');
-        }
-
-        await clearAutoSyncPending({ env });
-        return Object.freeze({
-          status: 'synced',
-          synced: true,
-          pending: false,
-          retried: attention.retried,
-          changed: result.changed === true,
-          attempts: Number.isSafeInteger(result.attempts) ? result.attempts : 1,
-          conflicts: Number.isSafeInteger(result.conflicts) ? result.conflicts : 0,
-        });
       },
       { timeoutMs: lockTimeoutMs, staleMs: 5 * 60_000 },
     );
   } catch (error) {
-    return persistFailure(error, failureOptions);
+    return reportUnlockedFailure(error, failureOptions);
   }
 }

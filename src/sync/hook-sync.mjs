@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
-import { readJson, removeFile, writeJsonAtomic } from '../core/fs.mjs';
+import { readJson, removeFile, withFileLock, writeJsonAtomic } from '../core/fs.mjs';
 import { withStateLock } from '../core/mutation-lock.mjs';
 import { statePaths } from '../paths.mjs';
 import { snapshotDigest } from '../remote-cli.mjs';
 import { captureSyncSnapshot } from './capture.mjs';
-import { autoSync } from './auto.mjs';
+import { autoSync, readAutoSyncPending } from './auto.mjs';
 
 const MARKER_SCHEMA_VERSION = 1;
 const MARKER_FILENAME = 'auto-sync-hook.json';
@@ -72,33 +72,42 @@ export async function readHookSyncMarker({ env = process.env } = {}) {
   return readJson(markerPath(env), { optional: true, validate: validMarker });
 }
 
-async function endAlreadyCovered({ agent, payload, env, clock }) {
-  let marker;
+async function endAlreadyCovered({ agent, payload, env, clock, lockTimeoutMs }) {
   try {
-    marker = await readHookSyncMarker({ env });
+    return await withFileLock(
+      path.join(statePaths(env).locks, 'auto-sync.lock'),
+      async () => {
+        // A later hook can fail without changing the snapshot bytes. Serialize
+        // this shortcut with sync results so an old Stop cannot hide a pending
+        // retry or attention barrier, or skip an operation still in flight.
+        if (await readAutoSyncPending({ env })) return false;
+        const marker = await readHookSyncMarker({ env });
+        if (!marker) return false;
+        const age = nowDate(clock).getTime() - Date.parse(marker.succeededAt);
+        if (!Number.isFinite(age) || age < 0) return false;
+        const currentSessionHash = sessionHash(agent, payload);
+        if (currentSessionHash && marker.sessionHash !== currentSessionHash) return false;
+        const maxAge = currentSessionHash ? SAME_SESSION_MAX_AGE_MS : ANONYMOUS_END_MAX_AGE_MS;
+        if (age > maxAge) return false;
+        return await currentSnapshotDigest(env) === marker.snapshotDigest;
+      },
+      { timeoutMs: lockTimeoutMs, staleMs: 5 * 60_000 },
+    );
   } catch {
-    return false;
-  }
-  if (!marker) return false;
-  const age = nowDate(clock).getTime() - Date.parse(marker.succeededAt);
-  if (!Number.isFinite(age) || age < 0) return false;
-  const currentSessionHash = sessionHash(agent, payload);
-  if (currentSessionHash && marker.sessionHash !== currentSessionHash) return false;
-  const maxAge = currentSessionHash ? SAME_SESSION_MAX_AGE_MS : ANONYMOUS_END_MAX_AGE_MS;
-  if (age > maxAge) return false;
-  try {
-    return await currentSnapshotDigest(env) === marker.snapshotDigest;
-  } catch {
+    // Damaged status, a busy sync, or unavailable state must retry the normal
+    // synchronization path instead of fabricating a successful shortcut.
     return false;
   }
 }
 
-async function rememberSuccessfulStop({ agent, payload, env, clock }) {
+async function rememberSuccessfulStop({ agent, payload, env, clock, acknowledgedDigest }) {
   try {
     await writeJsonAtomic(markerPath(env), {
       schemaVersion: MARKER_SCHEMA_VERSION,
       sessionHash: sessionHash(agent, payload),
-      snapshotDigest: await currentSnapshotDigest(env),
+      // Never recapture here: another session may have saved new, unpublished
+      // changes since the sync completed. Only the acknowledged bytes count.
+      snapshotDigest: acknowledgedDigest,
       succeededAt: nowDate(clock).toISOString(),
     });
   } catch {
@@ -129,7 +138,7 @@ export async function syncForHook({
   if (!['start', 'prompt', 'stop', 'end'].includes(phase)) {
     throw new TypeError(`Unsupported hook phase: ${phase}`);
   }
-  if (phase === 'end' && await endAlreadyCovered({ agent, payload, env, clock })) {
+  if (phase === 'end' && await endAlreadyCovered({ agent, payload, env, clock, lockTimeoutMs })) {
     return Object.freeze({
       status: 'skipped',
       synced: true,
@@ -147,11 +156,17 @@ export async function syncForHook({
     reconcile,
     fetchImpl,
   });
-  if (phase === 'stop' && result.status === 'synced') {
-    await rememberSuccessfulStop({ agent, payload, env, clock });
+  if (
+    phase === 'stop'
+    && result.status === 'synced'
+    && /^[a-f0-9]{64}$/.test(result.snapshotDigest ?? '')
+  ) {
+    await rememberSuccessfulStop({
+      agent, payload, env, clock, acknowledgedDigest: result.snapshotDigest,
+    });
   } else if (phase === 'stop') {
     // A stale success marker must never suppress SessionEnd's fallback retry
-    // after this Stop was deferred or required attention.
+    // after this Stop was deferred, required attention, or supplied no digest.
     await removeFile(markerPath(env)).catch(() => {});
   }
   return result;

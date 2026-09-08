@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { createCore } from '../src/core/index.mjs';
 import { exportKnowledge, importKnowledgeFile } from '../src/core/knowledge-transfer.mjs';
 import { main } from '../src/cli.mjs';
+import { workSessionKey } from '../src/core/work-session.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -213,7 +214,9 @@ test('opt-in Claude PreCompact stores only a review candidate and never injects 
   });
   const pending = await core.knowledge.list({ approval: 'pending' });
   assert.equal(pending.length, 1);
-  assert.equal(pending[0].sources[0].ref, 'session-precompact');
+  assert.equal(pending[0].sources[0].ref, `hnd-session:${workSessionKey({
+    agent: 'claude', sessionId: 'session-precompact', env: {},
+  })}`);
   assert.match(stderr, /knowledge candidate/u);
   assert.doesNotMatch((await core.compose({ knowledgeQuery: 'refresh token' })).content, /five minutes/u);
 });

@@ -326,6 +326,30 @@ test('hook payload identity wins over inherited keys, with only same-agent nativ
   assert.equal(liveContextSessionKey('claude', {}, env), null);
 });
 
+test('malformed hook identities never fall back to an inherited session selection', () => {
+  const env = { CODEX_THREAD_ID: 'parent-codex', HND_CURSOR_RULE_SESSION: 'a'.repeat(64) };
+  for (const invalid of ['', ' ', 'broken\nidentity', 'a'.repeat(513), 123, ['child']]) {
+    assert.equal(liveContextSessionKey('codex', { session_id: invalid }, env), null);
+    assert.equal(liveContextSessionKey('cursor', { conversation_id: invalid }, env), null);
+  }
+  // A valid vendor alias in the same payload is still an authoritative ID.
+  assert.equal(liveContextSessionKey('cursor', { session_id: null, conversation_id: 'child' }, env),
+    workSessionKey({ agent: 'cursor', sessionId: 'child', env: {} }));
+});
+
+test('claim expiry rejects coercible non-timestamps without changing ownership or work state', async (t) => {
+  const { core } = await fixture(t);
+  const owner = core('owner');
+  const task = await owner.handoff.start({ task: 'claimed', objective: 'Retain the valid lease' });
+  for (const invalid of [0, 2026, ['2026-09-07'], new Date('2026-09-07T00:00:00.000Z')]) {
+    await assert.rejects(owner.handoff.update({ claimExpiresAt: invalid }), { code: 'INVALID_HANDOFF' });
+    const unchanged = await owner.handoff.show();
+    assert.equal(unchanged.claimExpiresAt, task.claimExpiresAt);
+    assert.equal(unchanged.claimSessionKey, task.claimSessionKey);
+    assert.equal(unchanged.history.length, task.history.length);
+  }
+});
+
 test('an unidentified agent never mutates the shared legacy selection; ordinary terminals remain compatible', async (t) => {
   const { run } = await fixture(t);
   const created = JSON.parse((await run(['work', 'new', 'legacy', '--goal', 'Legacy', '--json'])).stdout);

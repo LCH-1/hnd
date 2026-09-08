@@ -19,15 +19,19 @@ src/core/fs.mjs
 src/core/git.mjs
 src/core/handoffs.mjs
 src/core/index.mjs
+src/core/knowledge-branches.mjs
 src/core/knowledge-index.mjs
 src/core/knowledge-transfer.mjs
 src/core/knowledge.mjs
 src/core/live-context.mjs
 src/core/mutation-lock.mjs
 src/core/policies.mjs
+src/core/privacy.mjs
 src/core/repositories.mjs
 src/core/rule-records.mjs
+src/core/semantic-search.mjs
 src/core/state.mjs
+src/core/work-coordination.mjs
 src/core/work-session.mjs
 src/fs-operations.mjs
 src/input.mjs
@@ -44,3 +48,4 @@ src/sync/etag.mjs
 src/sync/hook-sync.mjs
 src/sync/io.mjs
 src/sync/merge.mjs
+src/work-watch.mjs
