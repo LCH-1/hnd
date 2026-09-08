@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createProjectPicker } from '../src/web/project-picker.js';
+import { createSelectPicker } from '../src/web/select-picker.js';
 import { t as translate } from '../src/web/i18n.js';
 
 class MockElement {
@@ -47,6 +47,11 @@ class MockElement {
       node.parentElement = this;
       this.children.push(node);
     }
+  }
+  after(...nodes) {
+    const index = this.parentElement.children.indexOf(this);
+    for (const node of nodes) node.parentElement = this.parentElement;
+    this.parentElement.children.splice(index + 1, 0, ...nodes);
   }
   replaceChildren(...nodes) {
     for (const child of this.children) child.parentElement = null;
@@ -124,6 +129,7 @@ function fixture(t) {
   }
   document.defaultView = document;
   document.innerHeight = 900;
+  document.innerWidth = 1440;
   document.Event = Event;
   document.MutationObserver = MockMutationObserver;
   Object.defineProperties(globalThis, {
@@ -163,7 +169,7 @@ function fixture(t) {
   );
   const changes = [];
   form.addEventListener('change', change => changes.push({ value: select.value, target: change.target }));
-  const picker = createProjectPicker(select);
+  const picker = createSelectPicker(select, { label: '프로젝트 필터' });
   t.after(() => { try { picker.destroy(); } finally { restoreGlobals(); } });
   const key = (value, extras = {}) => {
     const current = event('keydown', { key: value, ...extras });
@@ -194,10 +200,10 @@ test('project picker retains a hidden form value and uses safe, separately style
   assert.equal(view.select.value, '');
   assert.equal(view.options().length, 4);
   assert.equal(view.selected().length, 1);
-  const names = view.options().map(node => node.querySelector('.project-picker-option-title').textContent);
+  const names = view.options().map(node => node.querySelector('.select-picker-option-title').textContent);
   assert.deepEqual(names, [translate('모든 프로젝트'), 'backend', 'backend', '<img src=x onerror=alert(1)>']);
-  assert.equal(view.options()[1].querySelector('.project-picker-option-detail').textContent, 'example/education-backend');
-  assert.equal(view.options()[2].querySelector('.project-picker-option-detail').textContent, 'example/calendar-backend');
+  assert.equal(view.options()[1].querySelector('.select-picker-option-detail').textContent, 'example/education-backend');
+  assert.equal(view.options()[2].querySelector('.select-picker-option-detail').textContent, 'example/calendar-backend');
   assert.equal(view.listbox.querySelector('img'), null);
 });
 
@@ -262,7 +268,7 @@ test('typeahead matches repository names and remotes without committing or inter
   const view = fixture(t);
   view.click(view.trigger);
   view.key('b');
-  assert.equal(view.active()?.querySelector('.project-picker-option-title').textContent, 'backend');
+  assert.equal(view.active()?.querySelector('.select-picker-option-title').textContent, 'backend');
   assert.equal(view.select.value, '');
   assert.equal(view.key('Enter', { isComposing: true }).defaultPrevented, false);
   assert.equal(view.key('x', { ctrlKey: true }).defaultPrevented, false);
@@ -334,7 +340,7 @@ test('popup height follows the visual viewport and opens above the control when 
   assert.equal(view.listbox.classList.contains('opens-above'), true);
   assert.ok(Number.parseFloat(view.listbox.style.maxHeight) <= 360);
   view.close();
-  view.document.visualViewport = { offsetTop: 0, height: 380 };
+  view.document.visualViewport = { offsetTop: 0, height: 380, addEventListener() {}, removeEventListener() {} };
   view.trigger.rect = { top: 120, bottom: 164, height: 44, left: 16, right: 304, width: 288 };
   view.click(view.trigger);
   assert.ok(Number.parseFloat(view.listbox.style.maxHeight) <= 380 - 164 - 24);
@@ -347,4 +353,75 @@ test('destroy removes custom UI and observers and restores the native select', t
   assert.equal(view.wrapper.contains(view.trigger), false);
   assert.equal(view.wrapper.contains(view.listbox), false);
   assert.ok(view.observers.every(observer => observer.disconnected));
+});
+
+test('shared picker hides unavailable options and preserves the real form value', t => {
+  const view = fixture(t);
+  view.select.options[1].hidden = true;
+  view.mutation();
+  assert.deepEqual(view.options().map(node => node.dataset.value), ['', 'b', 'c']);
+  view.key('Enter');
+  view.key('ArrowDown');
+  view.key('Enter');
+  assert.equal(view.select.value, 'b');
+});
+
+test('required native validation focuses the visible control and clears after a valid choice', t => {
+  const view = fixture(t);
+  view.select.required = true;
+  view.select.validity = { valid: false };
+  view.select.validationMessage = 'Choose a project.';
+  view.refresh();
+  assert.equal(view.trigger.getAttribute('aria-required'), 'true');
+  const invalid = event('invalid');
+  view.select.dispatchEvent(invalid);
+  assert.equal(invalid.defaultPrevented, true);
+  assert.equal(view.document.activeElement, view.trigger);
+  assert.equal(view.trigger.getAttribute('aria-invalid'), 'true');
+  assert.equal(view.wrapper.querySelector('[role="alert"]').textContent, 'Choose a project.');
+  view.select.validity.valid = true;
+  view.select.value = 'a';
+  view.select.dispatchEvent(event('change'));
+  assert.equal(view.trigger.getAttribute('aria-invalid'), null);
+  assert.equal(view.wrapper.querySelector('[role="alert"]').hidden, true);
+});
+
+test('opening a second picker closes the first without changing either value', t => {
+  const view = fixture(t);
+  const wrapper = view.document.createElement('label');
+  const select = view.document.createElement('select');
+  select.append(view.option('', 'All scopes'), view.option('repo', 'Repository'));
+  wrapper.append(select);
+  view.form.append(wrapper);
+  const other = createSelectPicker(select, { label: 'Scope' });
+  t.after(() => other.destroy());
+  assert.ok(select.id);
+  assert.notEqual(other.trigger.id, view.trigger.id);
+  view.click(view.trigger);
+  view.key('End');
+  view.click(other.trigger);
+  assert.equal(view.listbox.hidden, true);
+  assert.equal(other.listbox.hidden, false);
+  assert.equal(view.select.value, '');
+  assert.equal(select.value, '');
+});
+
+test('popup clamps to the right edge without horizontal overflow', t => {
+  const view = fixture(t);
+  view.document.innerWidth = 320;
+  view.trigger.rect = { top: 120, bottom: 160, height: 40, left: 210, right: 310, width: 100 };
+  view.click(view.trigger);
+  assert.ok(Number.parseFloat(view.listbox.style.left) >= 16);
+  assert.ok(Number.parseFloat(view.listbox.style.left) + Number.parseFloat(view.listbox.style.width) <= 304);
+});
+
+test('scrollable dialogs keep the open popup anchored instead of dismissing it', t => {
+  const view = fixture(t);
+  view.click(view.trigger);
+  view.trigger.rect = { top: 80, bottom: 120, height: 40, left: 24, right: 256, width: 232 };
+  view.document.dispatchEvent(event('scroll'));
+  assert.equal(view.listbox.hidden, false);
+  assert.equal(view.listbox.style.top, '128px');
+  assert.equal(view.listbox.style.left, '24px');
+  assert.equal(view.changes.length, 0);
 });

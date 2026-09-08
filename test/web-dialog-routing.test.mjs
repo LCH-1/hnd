@@ -77,6 +77,7 @@ function fixture(kind) {
     $: (selector, root) => root?.querySelector(selector),
     showNotice: (target, message = '') => { if (target) target.textContent = message; },
     populateRepositoryFields() {},
+    refreshSelectPickers() {},
     initializeRuleEditor() {},
     updateRuleScopeFields: updateScope,
     updateKnowledgeScopeFields: updateScope,

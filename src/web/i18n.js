@@ -1,6 +1,7 @@
 const STORAGE_KEY = "hnd:language";
 
 const EN = Object.freeze({
+  "선택 안 됨": "Not selected",
   "차단 작업": "Blocked work",
   "지식 검토": "Knowledge review",
   "초안 룰": "Draft rules",

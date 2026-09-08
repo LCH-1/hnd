@@ -7,7 +7,7 @@ import {
   t,
 } from "./i18n.js";
 import { CONNECTOR_PACKAGE_SPEC } from "./connector-release.js";
-import { createProjectPicker } from "./project-picker.js";
+import { createSelectPicker } from "./select-picker.js";
 import {
   beginBrowserWorkspaceReset,
   disableOfflineWorkspace,
@@ -48,8 +48,11 @@ import {
   toast,
 } from "./ui.js";
 
+const selectPickers = $$("select").map((select) => createSelectPicker(select));
 startI18n();
-createProjectPicker($("#work-project-filter"));
+function refreshSelectPickers() {
+  for (const picker of selectPickers) picker.refresh();
+}
 
 const viewMeta = Object.freeze({
   home: ["내 작업 공간", "홈"],
@@ -1668,6 +1671,7 @@ async function loadSettings() {
   }
   if (userCanManageAccounts()) await loadAccountManagement();
   else setHidden($("#account-management"), true);
+  refreshSelectPickers();
 }
 
 const dialogFormStates = new WeakMap();
@@ -1709,6 +1713,7 @@ function openDialog(id, item) {
   if (formId === "project-form") {
     $(".dialog-head h2", form).textContent = "프로젝트 설정";
   }
+  refreshSelectPickers();
   dialog.showModal();
   if (formId === "rule-form") initializeRuleEditor(form);
 }
@@ -1884,7 +1889,11 @@ function populateRepositoryFields(form) {
       workSelect.append(
         element("option", {
           text: repositoryOptionLabel(repository),
-          attrs: { value: repository.id },
+          attrs: {
+            value: repository.id,
+            "data-title": repository.name || repository.id || "이름 없는 저장소",
+            "data-detail": projectRemote(repository),
+          },
         }),
       );
     }
@@ -1988,6 +1997,7 @@ function fillForm(form, item) {
     else if (value !== undefined)
       field.value = Array.isArray(value) ? value.join(", ") : value;
   }
+  refreshSelectPickers();
 }
 
 function formObject(form) {
@@ -2294,12 +2304,14 @@ async function handleAction(button) {
     form.elements.namedItem("scope").value = "repo";
     form.elements.namedItem("repository").value = state.selectedProjectId;
     updateRuleScopeFields(form);
+    refreshSelectPickers();
     return;
   }
   if (action === "new-project-work") {
     state.returnAfterDialog = window.location.hash;
     openDialog("work-dialog");
     $("#work-form").elements.namedItem("repository").value = state.selectedProjectId;
+    refreshSelectPickers();
     return;
   }
   if (action === "new-project-knowledge") {
@@ -2309,6 +2321,7 @@ async function handleAction(button) {
     form.elements.namedItem("scope").value = "repo";
     form.elements.namedItem("repository").value = state.selectedProjectId;
     updateKnowledgeScopeFields(form);
+    refreshSelectPickers();
     return;
   }
   if (action === "copy-restore") {

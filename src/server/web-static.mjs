@@ -13,7 +13,7 @@ const ASSETS = new Map([
   ['/web/entry.js', ['entry.js', 'text/javascript; charset=utf-8']],
   ['/web/setup.js', ['setup.js', 'text/javascript; charset=utf-8']],
   ['/web/app.js', ['app.js', 'text/javascript; charset=utf-8']],
-  ['/web/project-picker.js', ['project-picker.js', 'text/javascript; charset=utf-8']],
+  ['/web/select-picker.js', ['select-picker.js', 'text/javascript; charset=utf-8']],
   ['/web/connector-release.js', ['connector-release.js', 'text/javascript; charset=utf-8']],
   ['/web/snapshot-data.js', ['snapshot-data.js', 'text/javascript; charset=utf-8']],
   ['/web/hnd-icon.png', ['hnd-icon.png', 'image/png']],

@@ -16,7 +16,7 @@ test('web assets resolve only the entry, setup, app shell, and fixed same-origin
   assert.equal(resolveWebAsset('/setup').file, 'setup.html');
   assert.equal(resolveWebAsset('/app/knowledge').file, 'app.html');
   assert.equal(resolveWebAsset('/web/app.js').file, 'app.js');
-  assert.equal(resolveWebAsset('/web/project-picker.js').file, 'project-picker.js');
+  assert.equal(resolveWebAsset('/web/select-picker.js').file, 'select-picker.js');
   assert.equal(resolveWebAsset('/web/i18n.js').file, 'i18n.js');
   assert.equal(resolveWebAsset('/web/connector-release.js').file, 'connector-release.js');
   assert.equal(resolveWebAsset('/web/snapshot-data.js').source, 'web');

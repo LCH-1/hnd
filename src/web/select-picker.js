@@ -2,43 +2,63 @@ import { t } from "./i18n.js";
 import { element } from "./ui.js";
 
 // The native select remains the form's source of truth. This enhancement only
-// replaces its presentation; filtering still uses the existing change handler.
-export function createProjectPicker(select, { label = "프로젝트 필터" } = {}) {
+// replaces its presentation; form values and change handlers remain native.
+let pickerId = 0;
+
+export function createSelectPicker(select, { label } = {}) {
+  const originalId = select.id;
+  if (!select.id) select.id = `hnd-select-${++pickerId}`;
+  const labels = [...(select.labels || [])];
+  label ||= select.getAttribute("aria-label") || labels.map((node) =>
+    [...node.childNodes].filter((child) => child.nodeType === 3 || child.classList?.contains("sr-only"))
+      .map((child) => child.textContent).join("")
+  ).join(" ").trim() || select.name;
   const root = select.parentElement;
   const doc = select.ownerDocument;
   const win = doc.defaultView;
   const wasHidden = select.hidden;
   const trigger = element("button", {
-    className: "project-picker-trigger",
+    className: "select-picker-trigger",
     attrs: {
       id: `${select.id}-trigger`, type: "button", role: "combobox",
       "aria-haspopup": "listbox", "aria-expanded": "false",
       "aria-controls": `${select.id}-listbox`,
     },
   });
-  const value = element("span", { className: "project-picker-value" });
-  const valueTitle = element("span", { className: "project-picker-value-title" });
-  const valueDetail = element("span", { className: "project-picker-value-detail" });
+  const value = element("span", { className: "select-picker-value" });
+  const valueTitle = element("span", { className: "select-picker-value-title" });
+  const valueDetail = element("span", { className: "select-picker-value-detail" });
   value.append(valueTitle, valueDetail);
   const chevron = element("span", {
-    className: "project-picker-chevron", attrs: { "aria-hidden": "true" },
+    className: "select-picker-chevron", attrs: { "aria-hidden": "true" },
   });
   trigger.append(value, chevron);
   const listbox = element("div", {
-    className: "project-picker-listbox",
+    className: "select-picker-listbox",
     attrs: { id: `${select.id}-listbox`, role: "listbox" },
   });
   listbox.hidden = true;
-  root.append(trigger, listbox);
-  root.classList.add("project-picker");
+  // A popover lives above dialog overflow while staying inside its focus scope.
+  const usesPopover = typeof listbox.showPopover === "function";
+  if (usesPopover) listbox.setAttribute("popover", "manual");
+  const error = element("span", {
+    className: "select-picker-error",
+    attrs: { id: `${select.id}-error`, role: "alert" },
+  });
+  error.hidden = true;
+  // Keep helper text after the control, matching the native field's order.
+  select.after(trigger, listbox, error);
+  root.classList.add("select-picker");
   select.hidden = true;
 
   let entries = [];
   let activeIndex = -1;
   let typed = "";
   let typedAt = 0;
+  let validationTimer;
 
   function close() {
+    if (usesPopover && !listbox.hidden) listbox.hidePopover();
     listbox.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
     trigger.removeAttribute("aria-activedescendant");
@@ -67,51 +87,70 @@ export function createProjectPicker(select, { label = "프로젝트 필터" } = 
 
   function refresh() {
     const activeValue = entries[activeIndex]?.value;
-    entries = [...select.options].map((option, index) => {
-      const title = t(option.dataset.title || option.textContent);
+    entries = [...select.options].filter((option) => !option.hidden
+      && !(option.parentElement.tagName === "OPTGROUP" && option.parentElement.hidden)).map((option, index) => {
+      const title = t(option.dataset.title || option.label || option.textContent);
       const detail = option.dataset.detail ? t(option.dataset.detail) : "";
+      const disabled = option.disabled || (option.parentElement.tagName === "OPTGROUP" && option.parentElement.disabled);
       const node = element("div", {
-        className: "project-picker-option",
+        className: "select-picker-option",
         attrs: {
           id: `${select.id}-option-${index}`, role: "option",
           "data-value": option.value,
           "aria-selected": String(option.value === select.value),
-          "aria-disabled": String(option.disabled),
+          "aria-disabled": String(disabled),
         },
       });
-      if (!option.value) node.classList.add("project-picker-all");
-      const copy = element("span", { className: "project-picker-option-copy" });
-      copy.append(element("span", { className: "project-picker-option-title", text: title }));
-      if (detail) copy.append(element("span", { className: "project-picker-option-detail", text: detail }));
+      const copy = element("span", { className: "select-picker-option-copy" });
+      copy.append(element("span", { className: "select-picker-option-title", text: title }));
+      if (detail) copy.append(element("span", { className: "select-picker-option-detail", text: detail }));
       node.append(copy, element("span", {
-        className: "project-picker-check", attrs: { "aria-hidden": "true" },
+        className: "select-picker-check", attrs: { "aria-hidden": "true" },
       }));
-      return { node, value: option.value, title, detail, disabled: option.disabled };
+      return { node, value: option.value, title, detail, disabled };
     });
     listbox.replaceChildren(...entries.map((entry) => entry.node));
     const selected = entries.find((entry) => entry.value === select.value);
     const summary = selected
       ? [selected.title, selected.detail].filter(Boolean).join(" · ")
       : "";
-    valueTitle.textContent = selected?.title || t("모든 프로젝트");
+    valueTitle.textContent = selected?.title || t("선택 안 됨");
     valueDetail.textContent = selected?.detail || "";
     valueDetail.hidden = !selected?.detail;
     trigger.title = summary;
     trigger.setAttribute("aria-label", `${t(label)}: ${summary}`);
     trigger.disabled = select.disabled;
     listbox.setAttribute("aria-label", t(label));
-    root.classList.toggle("has-project", Boolean(select.value));
+    root.classList.toggle("has-detail", Boolean(selected?.detail));
+    trigger.setAttribute("aria-required", String(Boolean(select.required)));
+    if (!select.validity || select.validity.valid || select.disabled) {
+      error.hidden = true;
+      error.textContent = "";
+      trigger.removeAttribute("aria-invalid");
+    }
+    const description = [select.getAttribute("aria-describedby"), error.hidden ? null : error.id].filter(Boolean).join(" ");
+    if (description) trigger.setAttribute("aria-describedby", description);
+    else trigger.removeAttribute("aria-describedby");
     if (select.disabled) close();
     const previous = entries.findIndex((entry) => entry.value === activeValue && !entry.disabled);
     const current = entries.findIndex((entry) => entry.value === select.value && !entry.disabled);
     highlight(!listbox.hidden && previous >= 0 ? previous : current, { scroll: !listbox.hidden });
+    if (!listbox.hidden) position();
   }
 
   function open() {
     if (select.disabled) return;
+    trigger.dispatchEvent(new win.Event("hnd:select-open", { bubbles: true }));
     refresh();
     listbox.hidden = false;
+    if (usesPopover) listbox.showPopover();
     trigger.setAttribute("aria-expanded", "true");
+    position();
+    const selected = entries.findIndex((entry) => entry.value === select.value && !entry.disabled);
+    highlight(selected >= 0 ? selected : entries.findIndex((entry) => !entry.disabled));
+  }
+
+  function position() {
     const bounds = trigger.getBoundingClientRect();
     const viewport = win.visualViewport;
     const viewportTop = viewport?.offsetTop || 0;
@@ -121,8 +160,12 @@ export function createProjectPicker(select, { label = "프로젝트 필터" } = 
     const opensAbove = below < 240 && above > below;
     listbox.classList.toggle("opens-above", opensAbove);
     listbox.style.maxHeight = `${Math.max(48, Math.min(360, opensAbove ? above : below))}px`;
-    const selected = entries.findIndex((entry) => entry.value === select.value && !entry.disabled);
-    highlight(selected >= 0 ? selected : entries.findIndex((entry) => !entry.disabled));
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportWidth = viewport?.width || win.innerWidth;
+    const width = Math.min(Math.max(bounds.width, entries.some((entry) => entry.detail) ? 340 : 180), viewportWidth - 32);
+    listbox.style.width = `${width}px`;
+    listbox.style.left = `${Math.max(viewportLeft + 16, Math.min(bounds.left, viewportLeft + viewportWidth - width - 16))}px`;
+    listbox.style.top = `${opensAbove ? bounds.top - listbox.getBoundingClientRect().height - 8 : bounds.bottom + 8}px`;
   }
 
   function choose(index) {
@@ -133,7 +176,10 @@ export function createProjectPicker(select, { label = "프로젝트 필터" } = 
     close();
     refresh();
     trigger.focus({ preventScroll: true });
-    if (changed) select.dispatchEvent(new win.Event("change", { bubbles: true }));
+    if (changed) {
+      select.dispatchEvent(new win.Event("input", { bubbles: true }));
+      select.dispatchEvent(new win.Event("change", { bubbles: true }));
+    }
   }
 
   function onClick() {
@@ -191,6 +237,7 @@ export function createProjectPicker(select, { label = "프로젝트 필터" } = 
   }
 
   function onOptionClick(event) {
+    event.preventDefault();
     const option = event.target.closest('[role="option"]');
     if (option && listbox.contains(option)) choose(entries.findIndex((entry) => entry.node === option));
   }
@@ -205,34 +252,94 @@ export function createProjectPicker(select, { label = "프로젝트 필터" } = 
     if (event.target.closest('[role="option"]')) event.preventDefault();
   }
 
+  function onInvalid(event) {
+    // Hidden native fields still validate, but the visible control owns focus.
+    event.preventDefault();
+    error.textContent = select.validationMessage;
+    error.hidden = false;
+    trigger.setAttribute("aria-invalid", "true");
+    trigger.setAttribute("aria-describedby", [select.getAttribute("aria-describedby"), error.id].filter(Boolean).join(" "));
+    const firstInvalid = select.form?.querySelector(":invalid");
+    if (firstInvalid && firstInvalid !== select) return;
+    trigger.focus();
+    // The browser can focus the next native invalid field after this handler.
+    // Restore the first invalid control once native validation has finished.
+    clearTimeout(validationTimer);
+    validationTimer = setTimeout(() => {
+      if (select.isConnected && !select.disabled && !select.validity.valid) trigger.focus();
+    }, 0);
+  }
+
+  function onLabelClick(event) {
+    if (trigger.contains(event.target) || listbox.contains(event.target)) return;
+    event.preventDefault();
+    trigger.focus();
+  }
+
+  function onReset() {
+    close();
+    queueMicrotask(refresh);
+  }
+
+  function onOtherOpen(event) {
+    if (event.target !== trigger) close();
+  }
+
+  function onScroll(event) {
+    // Opening/focusing a field in a scrollable dialog can queue a scroll event.
+    // Track the control instead of dismissing a popup that has just opened.
+    if (!listbox.hidden && !listbox.contains(event.target)) position();
+  }
+
   trigger.addEventListener("click", onClick);
   trigger.addEventListener("keydown", onKeyDown);
   trigger.addEventListener("blur", close);
   listbox.addEventListener("click", onOptionClick);
   listbox.addEventListener("pointerdown", keepFocus);
   select.addEventListener("change", refresh);
+  select.addEventListener("invalid", onInvalid);
+  select.form?.addEventListener("reset", onReset);
+  const dialog = select.closest("dialog");
+  dialog?.addEventListener("close", close);
+  for (const node of labels) node.addEventListener("click", onLabelClick);
   doc.addEventListener("pointerdown", onOutsidePointer);
+  doc.addEventListener("hnd:select-open", onOtherOpen);
+  doc.addEventListener("scroll", onScroll, true);
   win.addEventListener("resize", close);
+  win.addEventListener("hashchange", close);
+  win.visualViewport?.addEventListener("resize", close);
   win.addEventListener("hnd:language", refresh);
   const observer = new win.MutationObserver(refresh);
   observer.observe(select, {
     childList: true, subtree: true, characterData: true, attributes: true,
-    attributeFilter: ["disabled", "label", "data-title", "data-detail"],
+    attributeFilter: ["disabled", "required", "hidden", "selected", "value", "aria-describedby", "label", "data-title", "data-detail"],
   });
   refresh();
 
   return {
     trigger, listbox, refresh, close,
     destroy() {
+      clearTimeout(validationTimer);
+      close();
       observer.disconnect();
       select.removeEventListener("change", refresh);
+      select.removeEventListener("invalid", onInvalid);
+      select.form?.removeEventListener("reset", onReset);
+      dialog?.removeEventListener("close", close);
+      for (const node of labels) node.removeEventListener("click", onLabelClick);
       doc.removeEventListener("pointerdown", onOutsidePointer);
+      doc.removeEventListener("hnd:select-open", onOtherOpen);
+      doc.removeEventListener("scroll", onScroll, true);
       win.removeEventListener("resize", close);
+      win.removeEventListener("hashchange", close);
+      win.visualViewport?.removeEventListener("resize", close);
       win.removeEventListener("hnd:language", refresh);
       trigger.remove();
       listbox.remove();
-      root.classList.remove("project-picker", "has-project");
+      error.remove();
+      root.classList.remove("select-picker", "has-detail");
       select.hidden = wasHidden;
+      if (!originalId) select.removeAttribute("id");
     },
   };
 }
