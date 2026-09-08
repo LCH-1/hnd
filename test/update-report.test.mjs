@@ -25,15 +25,15 @@ function result(overrides = {}) {
 test('update report describes a verified matching client as current, without exposing hashes', () => {
   const input = result();
   assert.deepEqual(describeClientUpdate(input), { status: 'current', needsUpdate: false, reason: 'current' });
-  for (const action of ['status', 'check', 'apply']) {
+  for (const action of ['status', 'check']) {
     const text = formatUpdateReport(input, { action, ko: true });
     assert.equal(text, [
-      '클라이언트 (npm)\n로컬 버전: 0.2.2\n최신 버전: 0.2.2\n업데이트 상태: 최신',
-      '클라이언트 기능\n로컬 버전: 1.3.0\n최신 버전: 1.3.0\n업데이트 상태: 최신',
-      '서버\n설치 버전: 1.0.0\n최신 버전: 1.0.0\n업데이트 상태: 최신',
+      'npm 패키지\n로컬 버전: 0.2.2\n최신 버전: 0.2.2\n업데이트 상태: 최신',
+      'HND 실행 버전\n로컬 버전: 1.3.0\n최신 버전: 1.3.0\n업데이트 상태: 최신',
     ].join('\n\n'));
     assert.doesNotMatch(text, /일치함|변경 없음|aaaaaaaaaaaa/);
   }
+  assert.equal(formatUpdateReport(input, { action: 'apply', ko: true }), '모두 최신 버전입니다.');
 });
 
 test('update report recognizes a new release with the same semantic version', () => {
@@ -61,9 +61,8 @@ test('a successful apply ignores the stale pre-install available flag', () => {
   const input = result({ available: true, installed: true });
   assert.equal(describeClientUpdate(input).status, 'current');
   const text = formatUpdateReport(input, { action: 'apply', ko: true });
-  assert.equal(text.split('\n\n')[1], '클라이언트 기능\n로컬 버전: 1.3.0\n최신 버전: 1.3.0\n업데이트 상태: 업데이트 완료');
-  assert.doesNotMatch(text.split('\n\n')[0], /업데이트 완료/);
-  assert.doesNotMatch(text.split('\n\n')[2], /업데이트 완료/);
+  assert.equal(text, 'HND 실행 버전 업데이트 완료: 1.3.0');
+  assert.doesNotMatch(text, /모두 최신|npm 패키지 업데이트 완료/);
 });
 
 test('matching digests plus available means damaged installation requiring repair', () => {
@@ -95,7 +94,8 @@ test('disconnected and failed checks never claim current and include recovery st
 
 test('normal output always shows every component but omits internal update metadata', () => {
   const text = formatUpdateReport(result(), { ko: true });
-  assert.equal(text.split('\n\n').length, 3);
+  assert.equal(text.split('\n\n').length, 2);
+  assert.doesNotMatch(text, /서버|Server/);
   assert.doesNotMatch(text, /런타임|릴리스|릴리즈|최근|이전|일치|aaaaaaaa/);
 });
 
@@ -139,27 +139,25 @@ test('English reports have the same actionable states and no Korean text', () =>
     result({ serverReleaseError: 'offline' }),
   ];
   for (const input of inputs) {
-    const text = formatUpdateReport(input, { action: 'apply', ko: false });
+    const text = formatUpdateReport(input, { ko: false });
     assert.doesNotMatch(text, /[가-힣]/);
     assert.match(text, /Local version:/);
     assert.match(text, /Latest version:/);
     assert.match(text, /Update status:/);
     assert.doesNotMatch(text, /release \d|runtime|Installed server program version/);
+    assert.doesNotMatch(formatUpdateReport(input, { action: 'apply', ko: false }), /[가-힣]|Local version:|Latest version:|Update status:/);
   }
 });
 
-test('npm and server updates are independent of the signed client feature release', () => {
+test('server diagnostics remain independent but never appear in human update output', () => {
   const input = result({ launcherLatestVersion: '0.3.0', serverLatestVersion: '2.0.0' });
   assert.equal(describeClientUpdate(input).needsUpdate, false);
   assert.equal(describeLauncherUpdate(input).needsUpdate, true);
   assert.equal(describeServerUpdate(input).needsUpdate, true);
-  const [npm, features, server] = formatUpdateReport(input, { action: 'apply', ko: true }).split('\n\n');
+  const [npm, features, server] = formatUpdateReport(input, { ko: true }).split('\n\n');
   assert.match(npm, /npm install --global @lch-1\/hnd@latest/);
   assert.doesNotMatch(features, /업데이트 완료|업데이트 가능/);
-  assert.match(server, /서버\n설치 버전: 1\.0\.0\n최신 버전: 2\.0\.0/);
-  assert.match(server, /git pull --ff-only && docker compose up -d --build hnd-server/);
-  assert.match(server, /DB·키 백업/);
-  assert.doesNotMatch(server, /1\.3\.0|0\.2\.2|hnd update apply/);
+  assert.equal(server, undefined);
 });
 
 test('unknown or unsupported server versions are never inferred from client versions', () => {
@@ -172,11 +170,35 @@ test('unknown or unsupported server versions are never inferred from client vers
   ]) {
     const input = result(overrides);
     assert.equal(describeServerUpdate(input).needsUpdate, null);
-    const server = formatUpdateReport(input, { ko: true }).split('\n\n')[2];
-    assert.doesNotMatch(server, /업데이트 상태: 최신|1\.3\.0|0\.2\.2/);
-    assert.match(server, /확인 불가/);
+    assert.equal(formatUpdateReport(input, { ko: true }).split('\n\n')[2], undefined);
     assert.equal(describeClientUpdate(input).status, 'current');
   }
+});
+
+test('apply shows only actual changes, including npm-only updates and skill repairs', () => {
+  assert.equal(formatUpdateReport(result({
+    launcherVersion: '0.3.0', launcherLatestVersion: '0.3.0',
+    npmInstall: { status: 'updated', previousVersion: '0.2.2', version: '0.3.0' },
+  }), { action: 'apply', ko: true }), 'npm 패키지 업데이트 완료: 0.3.0');
+  assert.equal(formatUpdateReport(result({ refreshedSkills: [{ agent: 'claude' }] }), { action: 'apply', ko: true }), '에이전트 스킬을 갱신했습니다.');
+});
+
+test('apply never says everything is current when checks fail, updates are blocked, or npm cannot update', () => {
+  for (const overrides of [
+    { serverError: 'offline' }, { configured: false }, { quarantined: true },
+    { available: true }, { launcherCheckError: 'offline' }, { launcherLatestVersion: null },
+    { skillsRefreshError: 'permission' },
+    { launcherLatestVersion: '0.3.0', npmInstall: { status: 'failed', reason: 'permission' } },
+  ]) {
+    const text = formatUpdateReport(result(overrides), { action: 'apply', ko: true });
+    assert.doesNotMatch(text, /모두 최신|로컬 버전:|최신 버전:|업데이트 상태:/);
+    assert.ok(text.length > 0);
+  }
+  const failed = formatUpdateReport(result({
+    launcherLatestVersion: '0.3.0', npmInstall: { status: 'failed', reason: 'permission' },
+  }), { action: 'apply', ko: true });
+  assert.match(failed, /권한 부족/);
+  assert.match(failed, /npm install --global @lch-1\/hnd@latest/);
 });
 
 test('formatting is pure and does not mutate result records', () => {

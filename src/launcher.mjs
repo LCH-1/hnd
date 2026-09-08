@@ -21,6 +21,7 @@ import {
 } from './update/state.mjs';
 import { refreshManagedSkillsAfterUpdate } from './update/integration.mjs';
 import { checkLauncherRelease, checkServerRelease } from './update/registry.mjs';
+import { applyNpmUpdate } from './update/npm.mjs';
 import { describeClientUpdate, describeServerUpdate, describeLauncherUpdate, formatUpdateReport } from './update/report.mjs';
 import './update/worker.mjs';
 
@@ -118,7 +119,7 @@ function updateOptions(env, overrides = {}) {
   };
 }
 
-async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }) {
+async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch, execPath, npmUpdate = applyNpmUpdate }) {
   const { language } = await useCliLanguage(env);
   const ko = language === 'ko';
   const args = argv.slice(1);
@@ -129,24 +130,24 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   if (action === 'help' || action === '--help' || action === '-h') {
     writeText(stdout, ko ? [
       '사용법:',
-      '  hnd update           클라이언트·서버 버전과 업데이트 상태 확인',
-      '  hnd update check     클라이언트·서버 최신 버전 확인',
-      '  hnd update apply     클라이언트 기능 업데이트',
-      '  hnd update rollback  클라이언트 기능을 이전 버전으로 복구',
+      '  hnd update           npm 패키지·HND 실행 버전과 업데이트 상태 확인',
+      '  hnd update check     최신 버전 확인',
+      '  hnd update apply     HND 실행 버전·npm 패키지 업데이트',
+      '  hnd update rollback  HND 실행 버전을 이전 버전으로 복구',
       '  hnd update --json    상세 진단 정보',
-      '  npm install --global @lch-1/hnd@latest    클라이언트(npm) 업데이트',
+      '  npm install --global @lch-1/hnd@latest    npm 패키지 수동 업데이트',
       '',
-      '클라이언트 기능은 연결된 서버 기준입니다. 서버는 관리자가 별도로 배포합니다.',
+      'npm 자동 업데이트가 불가능하면 수동 명령을 안내합니다.',
     ].join('\n') : [
       'Usage:',
-      '  hnd update           Show client and server versions and update status',
-      '  hnd update check     Check client and server versions',
-      '  hnd update apply     Update client features',
-      '  hnd update rollback  Restore the previous client features',
+      '  hnd update           Show npm package and HND execution versions and update status',
+      '  hnd update check     Check for updates',
+      '  hnd update apply     Update HND execution code and the npm package',
+      '  hnd update rollback  Restore the previous HND execution version',
       '  hnd update --json    Detailed diagnostics',
-      '  npm install --global @lch-1/hnd@latest    Update the npm client',
+      '  npm install --global @lch-1/hnd@latest    Update the npm package manually',
       '',
-      'Client features come from the connected server. An administrator deploys the server separately.',
+      'If automatic npm updating is unavailable, a manual command is shown.',
     ].join('\n'));
     return;
   }
@@ -161,8 +162,10 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     // present an unavailable/quarantined release as already up to date.
     result = await connectorUpdateStatus(env);
     const launcherCheck = checkLauncherRelease({ fetchImpl });
-    const serverVersionCheck = checkServerVersion({ env, fetchImpl });
-    const serverReleaseCheck = checkServerRelease({ fetchImpl });
+    // Server diagnostics stay opt-in for JSON compatibility, not on the normal
+    // update path. A PC update no longer waits for GitHub server metadata.
+    const serverVersionCheck = json ? checkServerVersion({ env, fetchImpl }) : {};
+    const serverReleaseCheck = json ? checkServerRelease({ fetchImpl }) : {};
     try {
       const checked = action === 'apply'
         ? await applyConnectorUpdate(updateOptions(env, { fetchImpl }))
@@ -193,11 +196,17 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
       }
     }
     result = { ...result, ...await launcherCheck, ...await serverVersionCheck, ...await serverReleaseCheck };
+    if (action === 'apply' && describeLauncherUpdate({ ...result, launcherVersion: LAUNCHER_VERSION }).needsUpdate) {
+      if (!json) writeText(stderr, ko ? 'npm 패키지를 업데이트하고 있습니다…' : 'Updating the npm package…');
+      result.npmInstall = await npmUpdate({
+        latestVersion: result.launcherLatestVersion, packageRoot, env, execPath,
+      });
+    }
   }
   const activeRelease = action === 'apply' && result.pointer ? result.pointer : result.current;
   result = {
     ...result,
-    launcherVersion: LAUNCHER_VERSION,
+    launcherVersion: result.npmInstall?.version ?? LAUNCHER_VERSION,
     clientRelease: releaseDescriptor(
       activeRelease ?? { version: FALLBACK_RUNTIME_VERSION },
       { builtIn: !activeRelease },
@@ -207,7 +216,7 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   if (action !== 'rollback') {
     result.clientUpdate = describeClientUpdate(result);
     result.launcherUpdate = describeLauncherUpdate(result);
-    result.serverUpdate = describeServerUpdate(result);
+    if (json) result.serverUpdate = describeServerUpdate(result);
   }
   if (json) {
     const safe = { ...result };
@@ -220,8 +229,8 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   }
   if (action === 'rollback') {
     writeText(stdout, ko
-      ? `클라이언트 기능\n로컬 버전: ${result.current.version}\n복구 상태: 이전 버전으로 복구 완료`
-      : `Client features\nLocal version: ${result.current.version}\nRecovery status: previous version restored`);
+      ? `HND 실행 버전\n로컬 버전: ${result.current.version}\n복구 상태: 이전 버전으로 복구 완료`
+      : `HND execution version\nLocal version: ${result.current.version}\nRecovery status: previous version restored`);
   } else {
     writeText(stdout, formatUpdateReport(result, { action, ko }));
     if (result.skillsRefreshError) writeText(stderr, ko
@@ -259,9 +268,10 @@ export async function launcherMain(argv = process.argv.slice(2), {
   execPath = process.execPath,
   binPath = defaultBinPath,
   fetchImpl = fetch,
+  npmUpdate = applyNpmUpdate,
 } = {}) {
   if (argv[0] === 'update') {
-    await runUpdateCommand(argv, { env, stdout, stderr, fetchImpl });
+    await runUpdateCommand(argv, { env, stdout, stderr, fetchImpl, execPath, npmUpdate });
     return;
   }
   const runtime = await selectRuntime(env);

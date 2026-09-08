@@ -199,10 +199,10 @@ test('update help lists concise actions and keeps detailed diagnostics opt-in', 
   const stderr = outputStream();
   await launcherMain(['update', 'help'], { env, stdout, stderr });
   const help = stdout.text();
-  assert.match(help, /hnd update\s+클라이언트·서버 버전과 업데이트 상태/u);
+  assert.match(help, /hnd update\s+npm 패키지·HND 실행 버전과 업데이트 상태/u);
   assert.match(help, /hnd update --json\s+상세 진단 정보/u);
-  assert.match(help, /클라이언트 기능은 연결된 서버 기준/u);
-  assert.match(help, /서버는 관리자가 별도로 배포/u);
+  assert.match(help, /npm 자동 업데이트가 불가능하면 수동 명령/u);
+  assert.doesNotMatch(help, /서버/);
   assert.doesNotMatch(help, /런타임|릴리스|릴리즈|최근 확인/u);
   assert.equal(stderr.text(), '');
 });
@@ -272,9 +272,15 @@ test('failed update checks retain installed versions, give recovery steps, and p
     if (action === 'status') await pending;
     else await assert.rejects(pending, /HTTP 503/);
     const text = stdout.text();
-    assert.match(text, /로컬 버전: \d+\.\d+\.\d+/u);
-    assert.match(text, /업데이트 상태: 확인 실패/u);
-    assert.match(text, /다시 확인: hnd update check/u);
+    if (action === 'apply') {
+      assert.match(text, /HND 실행 버전 업데이트에 실패/u);
+      assert.match(text, /다시 시도: hnd update apply/u);
+      assert.doesNotMatch(text, /로컬 버전:|최신 버전:|모두 최신/u);
+    } else {
+      assert.match(text, /로컬 버전: \d+\.\d+\.\d+/u);
+      assert.match(text, /업데이트 상태: 확인 실패/u);
+      assert.match(text, /다시 확인: hnd update check/u);
+    }
     assert.match(text, /npm install --global @lch-1\/hnd@latest/u);
     assert.doesNotMatch(text, /업데이트 완료|일치함|적용 상태/u);
   }
@@ -287,6 +293,55 @@ test('failed update checks retain installed versions, give recovery steps, and p
   assert.equal(result.serverRelease, null);
   assert.equal(Object.hasOwn(result, 'remote'), false);
   assert.ok(!stdout.text().includes('hndd_'));
+});
+
+test('only explicit apply updates npm; normal commands never query server program versions', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  env.LANG = 'ko_KR.UTF-8';
+  let installs = 0;
+  for (const action of ['status', 'check', 'apply']) {
+    const stdout = outputStream();
+    await launcherMain(['update', action], {
+      env, stdout, stderr: outputStream(),
+      fetchImpl: async (url) => {
+        assert.equal(String(url), 'https://registry.npmjs.org/@lch-1%2fhnd/latest');
+        return Response.json({ name: '@lch-1/hnd', version: '9.0.0' });
+      },
+      npmUpdate: async (options) => {
+        installs++;
+        assert.equal(action, 'apply');
+        assert.equal(options.latestVersion, '9.0.0');
+        return { status: 'updated', version: '9.0.0', previousVersion: LAUNCHER_VERSION };
+      },
+    });
+    assert.doesNotMatch(stdout.text(), /서버\n|Server\n/);
+    if (action === 'apply') assert.match(stdout.text(), /npm 패키지 업데이트 완료: 9\.0\.0/);
+    else assert.match(stdout.text(), /npm 패키지\n로컬 버전:/);
+  }
+  assert.equal(installs, 1);
+});
+
+test('npm update failure falls back to instructions and unknown/current registry versions never install', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  env.LANG = 'ko_KR.UTF-8';
+  let installs = 0;
+  for (const version of ['9.0.0', LAUNCHER_VERSION, null]) {
+    const stdout = outputStream();
+    await launcherMain(['update', 'apply'], {
+      env, stdout, stderr: outputStream(),
+      fetchImpl: async () => Response.json({ name: '@lch-1/hnd', version }),
+      npmUpdate: async () => {
+        installs++;
+        return { status: 'failed', reason: 'permission' };
+      },
+    });
+    if (version === '9.0.0') {
+      assert.match(stdout.text(), /권한 부족/);
+      assert.match(stdout.text(), /npm install --global @lch-1\/hnd@latest/);
+    }
+    assert.doesNotMatch(stdout.text(), /모두 최신/);
+  }
+  assert.equal(installs, 1);
 });
 
 test('connector manifests verify Ed25519 signatures and reject tampering, rollback, and old launchers', () => {
