@@ -1,4 +1,4 @@
-const CACHE_NAME = "hnd-app-shell-v33";
+const CACHE_NAME = "hnd-app-shell-v34";
 const APP_DOCUMENT = "/app";
 const APP_ASSETS = Object.freeze([
   APP_DOCUMENT,
@@ -9,6 +9,7 @@ const APP_ASSETS = Object.freeze([
   "/web/vault.js",
   "/web/ui.js",
   "/web/app.js",
+  "/web/project-picker.js",
   "/web/connector-release.js",
   "/web/snapshot-data.js",
   "/web/hnd-icon.png",

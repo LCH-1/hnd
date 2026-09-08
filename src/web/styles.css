@@ -2848,10 +2848,203 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
+#work-filter .project-picker {
+  position: relative;
+  flex: 0 1 232px;
+  min-width: 180px;
+}
+
+.project-picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl);
+  background: var(--white);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.55;
+  text-align: left;
+}
+
+.project-picker-trigger:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.project-picker-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--white);
+}
+
+.project-picker-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.project-picker-trigger:disabled {
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.project-picker-value {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-picker-value-title,
+.project-picker-value-detail {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-picker-value-title {
+  line-height: 16px;
+}
+
+.project-picker-value-detail {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 14px;
+}
+
+.project-picker.has-project .project-picker-trigger {
+  padding-block: 4px;
+}
+
+.project-picker-chevron {
+  flex: 0 0 6px;
+  height: 6px;
+  margin: -3px 2px 0;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--muted);
+  transform: rotate(45deg);
+}
+
+.project-picker-trigger[aria-expanded="true"] .project-picker-chevron {
+  margin-top: 3px;
+  transform: rotate(225deg);
+}
+
+.project-picker-listbox {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 340px;
+  min-width: 100%;
+  max-width: calc(100vw - 32px);
+  max-height: min(360px, 55vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--white);
+  box-shadow: var(--shadow);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) var(--white);
+}
+
+.project-picker-listbox.opens-above {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+.project-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-radius: var(--r-ctl);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.project-picker-option-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-picker-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.project-picker-option-detail {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.project-picker-option:hover,
+.project-picker-option.is-active {
+  background: var(--surface-subtle);
+}
+
+.project-picker-option[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.project-picker-option[aria-selected="true"] .project-picker-option-detail {
+  color: var(--accent-ink);
+}
+
+.project-picker-option.is-active {
+  outline: 1px solid var(--border-strong);
+  outline-offset: -1px;
+}
+
+.project-picker-option[aria-disabled="true"] {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.project-picker-all {
+  min-height: 40px;
+  margin-bottom: 4px;
+}
+
+.project-picker-check {
+  flex: 0 0 7px;
+  height: 11px;
+  margin: -3px 4px 0;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  visibility: hidden;
+}
+
+.project-picker-option[aria-selected="true"] .project-picker-check {
+  visibility: visible;
+}
+
 @media (max-width: 620px) {
   #work-filter .filter-select {
     /* On the column layout, a 180px flex basis would become empty height. */
     flex: 0 0 auto;
+  }
+
+  #work-filter .project-picker-trigger,
+  #work-filter .project-picker-all {
+    min-height: 44px;
   }
 }
 

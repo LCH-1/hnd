@@ -7,6 +7,7 @@ import {
   t,
 } from "./i18n.js";
 import { CONNECTOR_PACKAGE_SPEC } from "./connector-release.js";
+import { createProjectPicker } from "./project-picker.js";
 import {
   beginBrowserWorkspaceReset,
   disableOfflineWorkspace,
@@ -48,6 +49,7 @@ import {
 } from "./ui.js";
 
 startI18n();
+createProjectPicker($("#work-project-filter"));
 
 const viewMeta = Object.freeze({
   home: ["내 작업 공간", "홈"],
@@ -1116,7 +1118,11 @@ function populateWorkProjectFilter(form = $("#work-filter")) {
   for (const repository of repositories) {
     select.append(element("option", {
       text: repositoryOptionLabel(repository),
-      attrs: { value: repository.id },
+      attrs: {
+        value: repository.id,
+        "data-title": repository.name || repository.id || "이름 없는 저장소",
+        "data-detail": projectRemote(repository),
+      },
     }));
   }
   // Keep an explicit filter if a refreshed snapshot no longer has its metadata.
