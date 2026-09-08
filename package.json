@@ -1,6 +1,6 @@
 {
   "name": "hnd",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Self-hosted rules, automatic progress, and work handoff for coding agents",
   "type": "module",

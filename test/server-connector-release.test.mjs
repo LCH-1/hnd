@@ -12,7 +12,8 @@ import {
 } from '../src/server/connector-release.mjs';
 import { createSyncServer, serverMain } from '../src/sync/server.mjs';
 import { CONNECTOR_RELEASE_KEY_ID } from '../src/update/manifest.mjs';
-import { applyConnectorUpdate } from '../src/update/client.mjs';
+import { applyConnectorUpdate, checkServerVersion } from '../src/update/client.mjs';
+import { SERVER_VERSION } from '../src/server/version.mjs';
 import { readRuntimePointer, runtimeReady } from '../src/update/state.mjs';
 
 async function temporaryDirectory(t) {
@@ -156,6 +157,29 @@ test('connector routes return 404 when no release directory is available', async
   }
 });
 
+test('server version is authenticated, independent of the client release, and available without a bundle', async (t) => {
+  const root = await temporaryDirectory(t);
+  const { address, token, device } = await enrolledServer(t, root, path.join(root, 'missing-release'));
+  const url = `${address.url}/v1/connector/server`;
+  assert.equal((await fetch(url)).status, 401);
+  const response = await fetch(url, authenticated(token));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(await response.json(), { schemaVersion: 1, version: SERVER_VERSION });
+  const head = await fetch(url, authenticated(token, { method: 'HEAD' }));
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get('content-length'), response.headers.get('content-length'));
+  assert.equal(await head.text(), '');
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const denied = await fetch(url, authenticated(token, { method }));
+    assert.equal(denied.status, 405);
+    assert.equal(denied.headers.get('allow'), 'GET, HEAD');
+  }
+  assert.equal((await fetch(`${url}?version=1`, authenticated(token))).status, 400);
+  await fetch(`${address.url}/v1/devices/${device.id}/revoke`, authenticated(token, { method: 'POST' }));
+  assert.equal((await fetch(url, authenticated(token))).status, 401);
+});
+
 test('the updater installs a release from the real authenticated server routes', async (t) => {
   const root = await temporaryDirectory(t);
   const release = await releaseFixture(t, root);
@@ -186,6 +210,9 @@ test('the updater installs a release from the real authenticated server routes',
   const current = await readRuntimePointer('current', env);
   assert.deepEqual(current, result.pointer);
   assert.equal(await runtimeReady(current, env), true);
+  assert.deepEqual(await checkServerVersion({ env }), {
+    serverVersion: SERVER_VERSION, serverVersionStatus: 'available', serverVersionError: null,
+  });
 });
 
 test('server refuses altered or symlinked connector release artifacts', async (t) => {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { readJson, withFileLock } from '../core/fs.mjs';
 import { statePaths } from '../paths.mjs';
 import { installConnectorBundle } from './install.mjs';
+import { fetchVersionMetadata, isVersion } from './registry.mjs';
 import {
   CONNECTOR_RELEASE_KEY_ID,
   MAX_CONNECTOR_BUNDLE_BYTES,
@@ -148,6 +149,29 @@ function sameRuntimePointer(left, right) {
     && left.version === right.version
     && left.sha256 === right.sha256
   );
+}
+
+export async function checkServerVersion({ env = process.env, fetchImpl = fetch, timeoutMs = 3_000 } = {}) {
+  try {
+    const remote = await readEnrolledRemote(env);
+    if (!remote) return { serverVersion: null, serverVersionStatus: 'not_connected', serverVersionError: null };
+    // A fixed path on the enrolled origin, never a URL from public metadata.
+    const target = new URL('/v1/connector/server', `${remote.baseUrl}/`);
+    const metadata = await fetchVersionMetadata(target, {
+      fetchImpl, timeoutMs, source: 'HND server version',
+      headers: { Accept: 'application/json', Authorization: `Bearer ${remote.deviceToken}` },
+    });
+    if (metadata?.schemaVersion !== 1 || !isVersion(metadata.version)) {
+      throw new Error('HND server returned invalid version metadata');
+    }
+    return { serverVersion: metadata.version, serverVersionStatus: 'available', serverVersionError: null };
+  } catch (error) {
+    return {
+      serverVersion: null,
+      serverVersionStatus: error.status === 404 ? 'unsupported' : 'check_failed',
+      serverVersionError: error.message,
+    };
+  }
 }
 
 export async function checkConnectorUpdate({

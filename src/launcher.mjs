@@ -9,6 +9,7 @@ import { LAUNCHER_VERSION } from './launcher-version.mjs';
 import {
   applyConnectorUpdate,
   checkConnectorUpdate,
+  checkServerVersion,
   connectorUpdateStatus,
   rollbackConnectorUpdate,
   updateDue,
@@ -19,8 +20,8 @@ import {
   runtimeReady,
 } from './update/state.mjs';
 import { refreshManagedSkillsAfterUpdate } from './update/integration.mjs';
-import { checkLauncherRelease } from './update/registry.mjs';
-import { describeClientUpdate, formatUpdateReport } from './update/report.mjs';
+import { checkLauncherRelease, checkServerRelease } from './update/registry.mjs';
+import { describeClientUpdate, describeServerUpdate, describeLauncherUpdate, formatUpdateReport } from './update/report.mjs';
 import './update/worker.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -128,24 +129,24 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   if (action === 'help' || action === '--help' || action === '-h') {
     writeText(stdout, ko ? [
       '사용법:',
-      '  hnd update           로컬 버전·최신 버전·업데이트 상태 확인',
-      '  hnd update check     최신 버전 확인',
-      '  hnd update apply     업데이트 적용',
-      '  hnd update rollback  이전 버전으로 복구',
+      '  hnd update           클라이언트·서버 버전과 업데이트 상태 확인',
+      '  hnd update check     클라이언트·서버 최신 버전 확인',
+      '  hnd update apply     클라이언트 기능 업데이트',
+      '  hnd update rollback  클라이언트 기능을 이전 버전으로 복구',
       '  hnd update --json    상세 진단 정보',
-      '  npm install --global @lch-1/hnd@latest    npm 런처 업데이트',
+      '  npm install --global @lch-1/hnd@latest    클라이언트(npm) 업데이트',
       '',
-      '최신 버전은 연결된 서버 기준입니다. 서버 자체는 별도로 배포합니다.',
+      '클라이언트 기능은 연결된 서버 기준입니다. 서버는 관리자가 별도로 배포합니다.',
     ].join('\n') : [
       'Usage:',
-      '  hnd update           Show local version, latest version, and update status',
-      '  hnd update check     Check for updates',
-      '  hnd update apply     Apply the update',
-      '  hnd update rollback  Restore the previous version',
+      '  hnd update           Show client and server versions and update status',
+      '  hnd update check     Check client and server versions',
+      '  hnd update apply     Update client features',
+      '  hnd update rollback  Restore the previous client features',
       '  hnd update --json    Detailed diagnostics',
-      '  npm install --global @lch-1/hnd@latest    Update the npm launcher',
+      '  npm install --global @lch-1/hnd@latest    Update the npm client',
       '',
-      'The latest version comes from the connected server. Deploy the server separately.',
+      'Client features come from the connected server. An administrator deploys the server separately.',
     ].join('\n'));
     return;
   }
@@ -160,6 +161,8 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     // present an unavailable/quarantined release as already up to date.
     result = await connectorUpdateStatus(env);
     const launcherCheck = checkLauncherRelease({ fetchImpl });
+    const serverVersionCheck = checkServerVersion({ env, fetchImpl });
+    const serverReleaseCheck = checkServerRelease({ fetchImpl });
     try {
       const checked = action === 'apply'
         ? await applyConnectorUpdate(updateOptions(env, { fetchImpl }))
@@ -189,7 +192,7 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
         result.skillsRefreshError = error?.message || String(error);
       }
     }
-    result = { ...result, ...await launcherCheck };
+    result = { ...result, ...await launcherCheck, ...await serverVersionCheck, ...await serverReleaseCheck };
   }
   const activeRelease = action === 'apply' && result.pointer ? result.pointer : result.current;
   result = {
@@ -201,7 +204,11 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
     ),
     serverRelease: result.serverRelease ?? result.manifest ?? null,
   };
-  if (action !== 'rollback') result.clientUpdate = describeClientUpdate(result);
+  if (action !== 'rollback') {
+    result.clientUpdate = describeClientUpdate(result);
+    result.launcherUpdate = describeLauncherUpdate(result);
+    result.serverUpdate = describeServerUpdate(result);
+  }
   if (json) {
     const safe = { ...result };
     delete safe.remote;
@@ -213,8 +220,8 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   }
   if (action === 'rollback') {
     writeText(stdout, ko
-      ? `로컬 버전: ${result.current.version}\n복구 상태: 이전 버전으로 복구 완료`
-      : `Local version: ${result.current.version}\nRecovery status: previous version restored`);
+      ? `클라이언트 기능\n로컬 버전: ${result.current.version}\n복구 상태: 이전 버전으로 복구 완료`
+      : `Client features\nLocal version: ${result.current.version}\nRecovery status: previous version restored`);
   } else {
     writeText(stdout, formatUpdateReport(result, { action, ko }));
     if (result.skillsRefreshError) writeText(stderr, ko

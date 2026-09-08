@@ -23,6 +23,7 @@ import {
 } from '../server/connector-release.mjs';
 import { WebAuthService } from '../server/web-auth.mjs';
 import { WebApiRouter } from '../server/web-api.mjs';
+import { SERVER_VERSION } from '../server/version.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIRECTORY = path.resolve(moduleDirectory, '..', 'web');
@@ -361,6 +362,16 @@ export class OpaqueSyncServer {
     if (!pathname.startsWith('/v1/')) throw new HttpError(404, 'Not found');
 
     const device = await this.#authenticate(req);
+
+    if (pathname === '/v1/connector/server') {
+      if (!['GET', 'HEAD'].includes(req.method)) {
+        throw new HttpError(405, 'Method not allowed', { Allow: 'GET, HEAD' });
+      }
+      sendJson(res, 200, { schemaVersion: 1, version: SERVER_VERSION }, {
+        'Cache-Control': 'private, no-store',
+      });
+      return;
+    }
 
     const connectorReleasePath = pathname === '/v1/connector/manifest'
       || /^\/v1\/connector\/releases\/[a-f0-9]{64}\.hndb$/.test(pathname);

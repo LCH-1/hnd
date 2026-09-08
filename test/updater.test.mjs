@@ -199,9 +199,10 @@ test('update help lists concise actions and keeps detailed diagnostics opt-in', 
   const stderr = outputStream();
   await launcherMain(['update', 'help'], { env, stdout, stderr });
   const help = stdout.text();
-  assert.match(help, /hnd update\s+로컬 버전·최신 버전·업데이트 상태/u);
+  assert.match(help, /hnd update\s+클라이언트·서버 버전과 업데이트 상태/u);
   assert.match(help, /hnd update --json\s+상세 진단 정보/u);
-  assert.match(help, /최신 버전은 연결된 서버 기준/u);
+  assert.match(help, /클라이언트 기능은 연결된 서버 기준/u);
+  assert.match(help, /서버는 관리자가 별도로 배포/u);
   assert.doesNotMatch(help, /런타임|릴리스|릴리즈|최근 확인/u);
   assert.equal(stderr.text(), '');
 });
@@ -252,6 +253,9 @@ test('update keeps human output concise and detailed versions in JSON', async (t
   assert.equal(json.serverRelease, null);
   assert.equal(json.launcherLatestVersion, LAUNCHER_VERSION);
   assert.equal(json.clientUpdate.status, 'not_connected');
+  assert.equal(json.launcherUpdate.status, 'current');
+  assert.equal(json.serverVersion, null);
+  assert.equal(json.serverUpdate.status, 'not_connected');
 });
 
 test('failed update checks retain installed versions, give recovery steps, and preserve failure exit semantics', async (t) => {
