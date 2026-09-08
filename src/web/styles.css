@@ -5577,3 +5577,197 @@ td {
 .notice {
   margin-bottom: 16px;
 }
+
+/* Rule editing: the text leads; scope and delivery settings support it. */
+#rule-dialog {
+  width: min(1120px, calc(100% - 48px));
+  height: min(820px, calc(100dvh - 48px));
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
+}
+
+#rule-dialog .dialog-close-form button {
+  width: 44px;
+  height: 44px;
+  margin: 16px;
+  border-radius: var(--r-ctl);
+}
+
+#rule-form {
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+}
+
+#rule-form > .dialog-head {
+  padding: 24px 80px 24px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+#rule-form .rule-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#rule-form .rule-editor-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px;
+  overflow-y: auto;
+  scroll-padding-block: 24px;
+}
+
+#rule-form .rule-editor-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 240px;
+}
+
+#rule-form [name="content"] {
+  flex: 1;
+  min-height: 200px;
+  resize: none;
+  padding: 16px;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.6;
+  caret-color: var(--accent);
+}
+
+#rule-form .field-help {
+  color: var(--muted);
+}
+
+#rule-form input::placeholder,
+#rule-form textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+#rule-form .rule-editor-settings {
+  min-width: 0;
+  padding: 16px 24px 24px;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  scroll-padding-block: 24px;
+}
+
+#rule-form .rule-editor-settings > summary {
+  min-height: 44px;
+  padding-block: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#rule-settings-summary {
+  display: none;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+#rule-form .rule-editor-setting-fields {
+  display: grid;
+  gap: 16px;
+  padding-top: 8px;
+}
+
+#rule-form .field-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#rule-form .form-details summary {
+  min-height: 44px;
+}
+
+#rule-form .form-details .field-help {
+  display: block;
+  margin-top: 8px;
+}
+
+#rule-form .rule-editor-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--white);
+}
+
+#rule-form .rule-editor-footer .notice {
+  max-height: 96px;
+  margin: 0 0 12px;
+  overflow: auto;
+}
+
+#rule-form .form-actions {
+  margin: 0;
+}
+
+#rule-form .form-actions .button {
+  min-height: 44px;
+}
+
+@media (max-width: 840px) {
+  #rule-dialog {
+    width: calc(100% - 24px);
+    height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+
+  #rule-dialog .dialog-close-form button {
+    margin: 12px;
+  }
+
+  #rule-form > .dialog-head {
+    padding: 20px 72px 20px 16px;
+  }
+
+  #rule-form .rule-editor-layout {
+    display: block;
+    overflow-y: auto;
+    scroll-padding-block: 16px;
+  }
+
+  #rule-form .rule-editor-main {
+    padding: 16px;
+    overflow: visible;
+  }
+
+  #rule-form .rule-editor-content {
+    min-height: 0;
+  }
+
+  #rule-form [name="content"] {
+    flex: none;
+    height: clamp(240px, 44dvh, 440px);
+    padding: 12px;
+    font-size: 16px;
+    resize: vertical;
+  }
+
+  #rule-form .rule-editor-settings {
+    padding: 8px 16px 16px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+    overflow: visible;
+  }
+
+  #rule-settings-summary {
+    display: block;
+  }
+
+  #rule-form .rule-editor-footer {
+    padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+  }
+}

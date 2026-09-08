@@ -1704,6 +1704,7 @@ function openDialog(id, item) {
     $(".dialog-head h2", form).textContent = "프로젝트 설정";
   }
   dialog.showModal();
+  if (formId === "rule-form") initializeRuleEditor(form);
 }
 
 async function returnAfterResourceSave(defaultView) {
@@ -1766,12 +1767,47 @@ function updateRuleScopeFields(form = $("#rule-form")) {
     if (editing) help.textContent += " 수정 중에는 범위를 바꿀 수 없습니다.";
   }
   updateRuleEnvironmentCommand(form);
+  updateRuleSettingsSummary(form);
 }
 
 function updateRuleEnvironmentCommand(form = $("#rule-form")) {
   const output = $("#rule-environment-command");
   const environment = form.elements.namedItem("environment")?.value.trim();
   if (output) output.textContent = `hnd env set ${environment || "이름"}`;
+}
+
+function updateRuleSettingsSummary(form = $("#rule-form")) {
+  const summary = $("#rule-settings-summary", form);
+  if (!summary) return;
+  const value = (name) => form.elements.namedItem(name).value;
+  const scope = { all: "전체", repo: "저장소", env: "환경" }[value("scope")] || "전체";
+  const legacy = form.elements.namedItem("title").disabled;
+  const parts = legacy ? [scope, "원문 유지"] : [
+    scope,
+    value("status") === "draft" ? "초안" : "사용 중",
+    value("activation") === "manual" ? "필요할 때 수동" : "자동",
+  ];
+  summary.textContent = parts.map((part) => t(part)).join(" · ");
+}
+
+function initializeRuleEditor(form) {
+  $("#rule-settings", form).open = window.matchMedia("(min-width: 841px)").matches;
+  $(".form-details", form).open = ["paths", "files"].some(
+    (name) => form.elements.namedItem(name).value.trim(),
+  );
+  for (const selector of [".rule-editor-layout", ".rule-editor-main", "#rule-settings"]) {
+    $(selector, form).scrollTop = 0;
+  }
+  const title = form.elements.namedItem("title");
+  (title.disabled ? form.elements.namedItem("content") : title).focus({ preventScroll: true });
+}
+
+function revealRuleInvalidField(event) {
+  // Native validation focuses after firing invalid. Reveal every disclosure
+  // synchronously so a required project/environment can receive that focus.
+  for (let node = event.target.parentElement; node && node !== event.currentTarget; node = node.parentElement) {
+    if (node.tagName === "DETAILS") node.open = true;
+  }
 }
 
 function updateKnowledgeScopeFields(form = $("#knowledge-form")) {
@@ -3237,6 +3273,13 @@ $('#knowledge-filter [name="scope"]').addEventListener("change", (event) => {
   updateKnowledgeFilterFields(form);
 });
 $("#rule-form").addEventListener("submit", submitRule);
+$("#rule-form").addEventListener("invalid", revealRuleInvalidField, true);
+$("#rule-form").addEventListener("change", (event) =>
+  updateRuleSettingsSummary(event.currentTarget),
+);
+window.matchMedia("(min-width: 841px)").addEventListener("change", (event) => {
+  if ($("#rule-dialog").open) $("#rule-settings").open = event.matches;
+});
 $('#rule-form [name="scope"]').addEventListener("change", (event) =>
   updateRuleScopeFields(event.currentTarget.form),
 );
