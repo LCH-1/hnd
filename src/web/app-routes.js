@@ -13,13 +13,14 @@ export const APP_ROUTES = Object.freeze({
 export function routePath(view, id = null) {
   const base = APP_ROUTES[view];
   if (!base) throw new TypeError("Unknown app view");
-  return view === "projects" && id ? `${base}/${encodeURIComponent(id)}` : base;
+  return (view === "projects" || (view === "settings" && id === "admin")) && id
+    ? `${base}/${encodeURIComponent(id)}` : base;
 }
 
 function parseParts(value) {
   const [name, encodedId, ...rest] = value.replace(/^\//, "").replace(/\/$/, "").split("/");
   const view = Object.keys(APP_ROUTES).find((key) => key === name || APP_ROUTES[key] === `/${name}`);
-  if (!view || rest.length || (encodedId && view !== "projects")) return null;
+  if (!view || rest.length || (encodedId && view !== "projects" && !(view === "settings" && encodedId === "admin"))) return null;
   let id = null;
   try {
     id = encodedId ? decodeURIComponent(encodedId) : null;

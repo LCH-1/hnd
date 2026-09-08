@@ -1453,6 +1453,82 @@ export class AccountStore {
     return Boolean(owner && owner.value === userId);
   }
 
+  requireServerOwner(userId) {
+    const actor = this.getDatabase().prepare('SELECT status FROM users WHERE id = ?').get(userId);
+    if (actor?.status !== 'active' || !this.isServerOwner(userId)) {
+      throw accountError('forbidden', 'Server owner access is required.', 403);
+    }
+  }
+
+  listServerUsers(actorUserId, { search = '', offset = 0, limit = 25 } = {}) {
+    this.requireServerOwner(actorUserId);
+    if (typeof search !== 'string' || search.length > 80
+      || !Number.isSafeInteger(offset) || offset < 0
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw accountError('invalid_request', 'Invalid user search or pagination.');
+    }
+    const database = this.getDatabase();
+    const query = search.trim();
+    const condition = "instr(lower(username), lower(?)) > 0 OR instr(lower(display_name), lower(?)) > 0";
+    const total = Number(database.prepare(`SELECT count(*) AS count FROM users WHERE ${condition}`)
+      .get(query, query).count);
+    // Deliberately separate from publicUser: administrator responses must never
+    // include authentication identifiers, workspace IDs, keys or content.
+    const users = database.prepare(`
+      SELECT id, username, display_name, status, created_at, updated_at
+      FROM users WHERE ${condition}
+      ORDER BY created_at, id LIMIT ? OFFSET ?
+    `).all(query, query, limit, offset).map((row) => ({
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      status: row.status,
+      serverOwner: row.id === actorUserId,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+    return { users, total, offset, limit };
+  }
+
+  updateServerUser(actorUserId, userId, patch = {}) {
+    const fields = Object.keys(patch);
+    if (!fields.length || fields.some((field) => !['displayName', 'status', 'revokeSessions'].includes(field))
+      || (patch.displayName !== undefined && typeof patch.displayName !== 'string')
+      || (patch.status !== undefined && !['active', 'disabled'].includes(patch.status))
+      || (patch.revokeSessions !== undefined && patch.revokeSessions !== true)) {
+      throw accountError('invalid_request', 'Unsupported user update.');
+    }
+    const name = patch.displayName === undefined ? undefined : normalizeDisplayName(patch.displayName);
+    const database = this.getDatabase();
+    return withImmediateTransaction(database, () => {
+      this.requireServerOwner(actorUserId);
+      const user = database.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+      if (!user) throw accountError('user_not_found', 'User not found.', 404);
+      if (this.isServerOwner(userId)) {
+        throw accountError('protected_account', 'Manage the server owner through personal settings.', 409);
+      }
+      const now = isoTimestamp(this.clock());
+      if (name !== undefined) {
+        database.prepare('UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?')
+          .run(name, now, userId);
+      }
+      if (patch.status !== undefined) {
+        database.prepare('UPDATE users SET status = ?, updated_at = ? WHERE id = ?')
+          .run(patch.status, now, userId);
+      }
+      let revokedSessions = 0;
+      if (patch.status === 'disabled' || patch.revokeSessions) {
+        revokedSessions = Number(database.prepare(`
+          UPDATE web_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL
+        `).run(now, userId).changes);
+        // Invalidate authentication flows already bound to this user.
+        database.prepare('DELETE FROM webauthn_flows WHERE user_id = ?').run(userId);
+        database.prepare('DELETE FROM passkey_registration_flows WHERE user_id = ?').run(userId);
+      }
+      return { id: userId, updated: true, revokedSessions };
+    });
+  }
+
   updateServerSettings(userId, tenantId, patch = {}) {
     if (!this.isServerOwner(userId)) {
       throw accountError('forbidden', 'Server owner access is required.', 403);

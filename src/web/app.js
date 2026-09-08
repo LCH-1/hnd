@@ -93,6 +93,11 @@ const state = {
   vaultProblem: null,
   dataStore: null,
   serverOwner: false,
+  settingsTab: null,
+  adminUsers: new Map(),
+  adminUserOffset: 0,
+  adminUserSearch: "",
+  adminUsersRequest: 0,
   offlineBoot: false,
   offlineAccessEpoch: null,
   pendingRecoveryCodes: [],
@@ -277,6 +282,17 @@ async function navigate(path, { replace = false, force = false } = {}) {
 async function setView(view, { force = false } = {}) {
   for (const picker of selectPickers) picker.close();
   const selected = Object.hasOwn(viewMeta, view) ? view : "home";
+  if (selected === "settings") {
+    const tab = readAppRoute(window.location)?.id === "admin" ? "admin" : "general";
+    if (state.settingsTab !== tab) force = true;
+    state.settingsTab = tab;
+    setHidden($("#settings-general-panel"), tab !== "general");
+    // Fail closed until the server confirms administrative access.
+    setHidden($("#settings-admin-panel"), true);
+    if (!force && state.loaded.has("settings") && tab === "admin") {
+      setHidden($("#settings-admin-panel"), !state.serverOwner);
+    }
+  }
   const enteringProjects = selected === "projects" && state.view !== "projects";
   const requestedProjectId = selected === "projects" ? currentProjectId() : null;
   if (enteringProjects) force = true;
@@ -1653,13 +1669,26 @@ async function loadAccountManagement() {
 
 async function loadSettings() {
   showNotice($("#settings-error"));
-  await loadAppSettings();
   const payload = await api.settings();
   const user = payload.user || state.session.user || {};
   $("#settings-username").value = user.username || "";
   $("#settings-display-name").value = displayName(user);
   $("#settings-language").value = user.language || languagePreference();
   state.serverOwner = payload.serverOwner === true;
+  setHidden($("#settings-admin-link"), !state.serverOwner);
+  let adminTab = state.settingsTab === "admin";
+  if (adminTab && !state.serverOwner) {
+    window.history.replaceState(null, "", "/settings");
+    state.settingsTab = "general";
+    adminTab = false;
+    showNotice($("#settings-error"), "관리자 설정은 서버 소유자만 사용할 수 있습니다.", "warning");
+  }
+  for (const [selector, selected] of [["#settings-general-link", !adminTab], ["#settings-admin-link", adminTab]]) {
+    if (selected) $(selector).setAttribute("aria-current", "page");
+    else $(selector).removeAttribute("aria-current");
+  }
+  setHidden($("#settings-general-panel"), adminTab);
+  setHidden($("#settings-admin-panel"), !adminTab);
   setHidden($("#server-settings-form"), !state.serverOwner);
   if (state.serverOwner) {
     $("#signup-mode").value =
@@ -1667,9 +1696,104 @@ async function loadSettings() {
     $("#revision-retention").value =
       payload.revisionRetention || payload.retention || 50;
   }
-  if (userCanManageAccounts()) await loadAccountManagement();
-  else setHidden($("#account-management"), true);
+  if (adminTab) await loadAdminUsers();
+  else {
+    await loadAppSettings();
+    if (userCanManageAccounts()) await loadAccountManagement();
+    else setHidden($("#account-management"), true);
+  }
   refreshSelectPickers();
+}
+
+function renderAdminUsers(users) {
+  const list = $("#admin-users-list");
+  clearChildren(list);
+  state.adminUsers = new Map(users.map((user) => [user.id, user]));
+  for (const user of users) {
+    const row = element("li", { className: "admin-user-row", attrs: { "data-user-id": user.id } });
+    const summary = element("div", { className: "admin-user-summary" });
+    const copy = element("div", { className: "admin-user-copy" });
+    copy.append(
+      element("strong", { text: user.displayName }),
+      element("span", { className: "admin-user-meta", text: user.username }),
+      element("span", { className: "admin-user-meta", text: `${t("가입일")} · ${formatDate(user.createdAt)}` }),
+    );
+    summary.append(copy, element("span", {
+      className: `admin-user-state${user.status === "disabled" ? " is-disabled" : ""}`,
+      text: user.serverOwner ? "서버 소유자" : user.status === "disabled" ? "웹 로그인 차단됨" : "웹 로그인 허용",
+    }));
+    row.append(summary);
+    if (user.serverOwner) {
+      row.append(element("p", { className: "field-help", text: "소유자 계정은 일반 설정과 보안 화면에서 관리합니다." }));
+    } else {
+      const actions = element("div", { className: "admin-user-actions", attrs: { role: "group", "aria-label": user.username } });
+      for (const [action, text, danger] of [
+        ["edit", "표시 이름 수정", false],
+        ["status", user.status === "disabled" ? "웹 로그인 허용" : "웹 로그인 차단", user.status !== "disabled"],
+        ["sessions", "웹 세션 종료", false],
+      ]) {
+        actions.append(element("button", { className: `text-button${danger ? " danger" : ""}`, text,
+          attrs: { type: "button", "data-user-action": action } }));
+      }
+      const form = element("form", { className: "admin-user-edit", attrs: { hidden: "", "data-user-edit": user.id } });
+      const inputId = `admin-name-${user.id}`;
+      form.append(element("label", { text: "표시 이름", attrs: { for: inputId } }), element("input", {
+        attrs: { id: inputId, name: "displayName", value: user.displayName, maxlength: "80", required: "", type: "text" },
+      }));
+      const formActions = element("div", { className: "form-actions" });
+      formActions.append(
+        element("button", { className: "button button-primary", text: "저장", attrs: { type: "submit" } }),
+        element("button", { className: "button button-secondary", text: "취소", attrs: { type: "button", "data-user-action": "cancel" } }),
+      );
+      form.append(formActions);
+      row.append(actions, form);
+    }
+    list.append(row);
+  }
+}
+
+async function loadAdminUsers() {
+  if (!state.serverOwner) return;
+  const requestId = ++state.adminUsersRequest;
+  const status = $("#admin-users-status");
+  const list = $("#admin-users-list");
+  list.setAttribute("aria-busy", "true");
+  clearChildren(list);
+  state.adminUsers.clear();
+  $("#admin-users-prev").disabled = true;
+  $("#admin-users-next").disabled = true;
+  status.textContent = "사용자 불러오는 중…";
+  showNotice($("#admin-users-error"));
+  try {
+    const result = await api.adminUsers({ search: state.adminUserSearch, offset: state.adminUserOffset });
+    if (requestId !== state.adminUsersRequest) return;
+    renderAdminUsers(result.users);
+    status.textContent = result.total === 0 ? t("검색 결과가 없습니다.")
+      : `${t("사용자")} ${result.total} · ${result.offset + 1}–${result.offset + result.users.length}`;
+    $("#admin-users-prev").disabled = result.offset === 0;
+    $("#admin-users-next").disabled = result.offset + result.limit >= result.total;
+  } catch (error) {
+    if (requestId !== state.adminUsersRequest) return;
+    status.textContent = "사용자를 불러오지 못했습니다. 검색 버튼으로 다시 시도하세요.";
+    showNotice($("#admin-users-error"), error.message, "error");
+  } finally {
+    if (requestId === state.adminUsersRequest) list.removeAttribute("aria-busy");
+  }
+}
+
+async function updateAdminUser(id, patch, button) {
+  setBusy(button, true, "처리 중…");
+  showNotice($("#admin-users-error"));
+  try {
+    await withRecentAuthentication(() => api.updateAdminUser(id, patch));
+    toast("사용자 정보를 변경했습니다.");
+    await loadAdminUsers();
+    $("#admin-user-query").focus();
+  } catch (error) {
+    showNotice($("#admin-users-error"), error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 async function loadAppSettings() {
@@ -3424,6 +3548,47 @@ for (const button of $$('[data-device-install-mode]')) {
     updateDeviceCommands();
   });
 }
+$("#admin-user-search").addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.adminUserSearch = $("#admin-user-query").value.trim();
+  state.adminUserOffset = 0;
+  void loadAdminUsers();
+});
+for (const [selector, change] of [["#admin-users-prev", -25], ["#admin-users-next", 25]]) {
+  $(selector).addEventListener("click", () => {
+    state.adminUserOffset = Math.max(0, state.adminUserOffset + change);
+    void loadAdminUsers();
+  });
+}
+$("#admin-users-list").addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-user-edit]");
+  if (!form) return;
+  event.preventDefault();
+  await updateAdminUser(form.dataset.userEdit, { displayName: form.elements.displayName.value.trim() }, form.querySelector('[type="submit"]'));
+});
+$("#admin-users-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-user-action]");
+  if (!button) return;
+  const row = button.closest("[data-user-id]");
+  const user = state.adminUsers.get(row.dataset.userId);
+  if (!user || user.serverOwner) return;
+  const action = button.dataset.userAction;
+  const form = row.querySelector("form");
+  if (action === "edit" || action === "cancel") {
+    setHidden(form, action === "cancel");
+    if (action === "edit") form.elements.displayName.focus();
+    else row.querySelector('[data-user-action="edit"]').focus();
+    return;
+  }
+  const disable = action === "status" && user.status !== "disabled";
+  const label = action === "sessions" ? "웹 세션 종료" : disable ? "웹 로그인 차단" : "웹 로그인 허용";
+  const description = action === "sessions"
+    ? "이 사용자의 모든 웹 세션을 종료합니다. 웹 로그인 허용 여부는 변경되지 않으며 CLI 기기는 유지됩니다."
+    : disable ? "웹 로그인을 막고 모든 웹 세션을 종료합니다. CLI 기기와 이미 내려받은 데이터는 유지됩니다."
+      : "웹 로그인을 다시 허용합니다. 사용자는 새로 로그인해야 합니다.";
+  if (!await confirmAction(`${t(label)} · ${user.username}`, t(description), t(label), disable ? "danger" : "normal")) return;
+  await updateAdminUser(user.id, action === "sessions" ? { revokeSessions: true } : { status: disable ? "disabled" : "active" }, button);
+});
 $("#app-settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const fields = $("#app-settings-fields");

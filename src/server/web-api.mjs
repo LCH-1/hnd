@@ -813,6 +813,33 @@ export class WebApiRouter {
       ));
       return;
     }
+    if (pathname === '/api/web/admin/users' && req.method === 'GET') {
+      const { authenticated } = this.#authenticate(req);
+      this.accounts.requireServerOwner(authenticated.user.id);
+      const params = url.searchParams;
+      for (const key of params.keys()) {
+        if (!['search', 'offset', 'limit'].includes(key) || params.getAll(key).length !== 1) {
+          throw new WebApiError(400, 'invalid_request', 'Unsupported user search parameter.');
+        }
+      }
+      sendJson(res, 200, this.accounts.listServerUsers(authenticated.user.id, {
+        search: params.get('search') ?? '',
+        offset: params.has('offset') ? Number(params.get('offset')) : 0,
+        limit: params.has('limit') ? Number(params.get('limit')) : 25,
+      }));
+      return;
+    }
+    const adminUserMatch = /^\/api\/web\/admin\/users\/([A-Za-z0-9_-]{1,64})$/.exec(pathname);
+    if (adminUserMatch && req.method === 'PATCH') {
+      const { sessionToken, authenticated } = this.#authenticate(req, { csrf: true });
+      this.accounts.requireServerOwner(authenticated.user.id);
+      this.auth.requireRecentAuthentication(sessionToken);
+      this.#rate(req, 'admin-user-update', 60, 60 * 60_000);
+      const body = await readJson(req);
+      assertOnlyFields(body, ['displayName', 'status', 'revokeSessions']);
+      sendJson(res, 200, this.accounts.updateServerUser(authenticated.user.id, adminUserMatch[1], body));
+      return;
+    }
     if (pathname === '/api/web/settings' && req.method === 'GET') {
       const { authenticated } = this.#authenticate(req);
       sendJson(res, 200, {

@@ -17,6 +17,10 @@ test('all app views have direct paths and legacy hash links canonicalize without
   assert.equal(readAppRoute({ pathname: `/app/projects/${id}` }).id, id);
   assert.equal(routePath('projects', id), `/project/${id}`);
   assert.equal(readAppRoute({ pathname: '/rule', hash: '#main-content' }).view, 'rules');
+  assert.deepEqual(readAppRoute({ pathname: '/settings/admin' }), { view: 'settings', id: 'admin', path: '/settings/admin' });
+  assert.equal(resolveWebAsset('/settings/admin').file, 'app.html');
+  assert.equal(readAppRoute({ pathname: '/app', hash: '#settings/admin' }).path, '/settings/admin');
+  assert.equal(isAppPath('/settings/unknown'), false);
 });
 
 test('unknown paths, malformed project IDs, APIs and assets are not rewritten to the app', () => {
@@ -30,7 +34,7 @@ test('offline worker covers every canonical app route and never treats APIs as n
   const worker = await readFile(new URL('../src/web/sw.js', import.meta.url), 'utf8');
   const context = vm.createContext({ self: { addEventListener() {} } });
   vm.runInContext(worker, context);
-  for (const path of [...Object.values(APP_ROUTES), '/project/11111111-1111-4111-8111-111111111111', '/app', '/app/work']) {
+  for (const path of [...Object.values(APP_ROUTES), '/settings/admin', '/project/11111111-1111-4111-8111-111111111111', '/app', '/app/work']) {
     assert.equal(vm.runInContext(`isAppNavigation(${JSON.stringify(path)})`, context), true);
   }
   for (const path of ['/api/web/settings', '/', '/setup', '/work/not-a-route']) {

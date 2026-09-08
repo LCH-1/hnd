@@ -101,11 +101,11 @@ function mutationHeaders(values = {}) {
   };
 }
 
-async function registerOwner(server, url, credentialId = 'owner_credential') {
+async function registerOwner(server, url, credentialId = 'owner_credential', username = 'owner') {
   const registration = await jsonRequest(url, '/api/web/auth/register/options', {
     method: 'POST',
     headers: mutationHeaders(),
-    body: { username: 'owner', displayName: 'Owner' },
+    body: { username, displayName: 'Owner' },
   });
   assert.equal(registration.response.status, 200);
   const verified = await jsonRequest(url, '/api/web/auth/register/verify', {
@@ -152,6 +152,95 @@ async function registerInvitedUser(url, owner, { username, role }) {
     csrf: verified.response.headers.get('x-hnd-csrf'),
   };
 }
+
+test('server user administration is owner-only and never returns authentication or workspace data', async (t) => {
+  const { url, server } = await fixture(t);
+  const owner = await registerOwner(server, url);
+  const independent = await registerOwner(server, url, 'independent_key', 'independent');
+  const admin = await registerInvitedUser(url, owner, { username: 'workspace_admin', role: 'admin' });
+  const member = await registerInvitedUser(url, owner, { username: 'workspace_member', role: 'member' });
+  assert.notEqual(owner.body.activeTenantId, independent.body.activeTenantId);
+  const endpoint = `/api/web/admin/users/${independent.body.user.id}`;
+  assert.equal((await jsonRequest(url, '/api/web/admin/users')).response.status, 401);
+  for (const user of [independent, admin, member]) {
+    assert.equal((await jsonRequest(url, '/api/web/admin/users', { headers: { Cookie: user.cookie } })).response.status, 403);
+    assert.equal((await jsonRequest(url, endpoint, { method: 'PATCH', headers: mutationHeaders({ Cookie: user.cookie, 'X-Hnd-CSRF': user.csrf }), body: { status: 'disabled' } })).response.status, 403);
+  }
+  const result = await jsonRequest(url, '/api/web/admin/users?search=independent&limit=1', { headers: { Cookie: owner.cookie } });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.total, 1);
+  assert.equal(result.body.users[0].username, 'independent');
+  assert.deepEqual(Object.keys(result.body.users[0]).sort(), ['id', 'username', 'displayName', 'status', 'serverOwner', 'createdAt', 'updatedAt'].sort());
+  assert.equal(result.body.users[0].serverOwner, false);
+  const page = await jsonRequest(url, '/api/web/admin/users?offset=1&limit=1', { headers: { Cookie: owner.cookie } });
+  assert.equal(page.body.total, 4);
+  assert.equal(page.body.users.length, 1);
+  for (const query of ['limit=101', 'offset=-1', 'limit=NaN', 'tenantId=other', 'search=a&search=b']) {
+    assert.equal((await jsonRequest(url, `/api/web/admin/users?${query}`, { headers: { Cookie: owner.cookie } })).response.status, 400);
+  }
+  const wildcard = await jsonRequest(url, '/api/web/admin/users?search=%25', { headers: { Cookie: owner.cookie } });
+  assert.equal(wildcard.body.total, 0);
+  const headers = mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf });
+  for (const body of [{ role: 'owner' }, { tenantId: independent.body.activeTenantId }, { displayName: null }, { displayName: 'Must not save', status: 'invalid' }, {}]) {
+    assert.equal((await jsonRequest(url, endpoint, { method: 'PATCH', headers, body })).response.status, 400);
+  }
+  assert.equal(server.accounts.getUser(independent.body.user.id).displayName, 'Owner');
+  for (const body of [{ status: 'disabled' }, { displayName: 'Changed' }, { revokeSessions: true }]) {
+    const protectedResult = await jsonRequest(url, `/api/web/admin/users/${owner.body.user.id}`, { method: 'PATCH', headers, body });
+    assert.equal(protectedResult.response.status, 409);
+    assert.equal(protectedResult.body.error, 'protected_account');
+  }
+  const missing = await jsonRequest(url, '/api/web/admin/users/missing', { method: 'PATCH', headers, body: { status: 'disabled' } });
+  assert.equal(missing.response.status, 404);
+  const renamed = await jsonRequest(url, endpoint, { method: 'PATCH', headers, body: { displayName: 'New display name' } });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(server.accounts.getUser(independent.body.user.id).displayName, 'New display name');
+  // Server administration is not membership: spoofing tenant IDs cannot unlock
+  // or read the independent user's encrypted workspace.
+  const key = generateVaultKey();
+  const encrypted = await encryptSnapshot({ schemaVersion: 1, files: [] }, key);
+  const initialized = await jsonRequest(url, '/api/web/vault/initialize', {
+    method: 'POST', headers: mutationHeaders({ Cookie: independent.cookie, 'X-Hnd-CSRF': independent.csrf }),
+    body: { version: 1, algorithm: 'AES-256-GCM', snapshot: encrypted.toString('base64url') },
+  });
+  assert.equal(initialized.response.status, 201);
+  const snapshot = await jsonRequest(url, `/api/web/vault/snapshot?tenantId=${independent.body.activeTenantId}`, { headers: { Cookie: owner.cookie } });
+  assert.equal(snapshot.response.status, 404);
+  const keyResponse = await jsonRequest(url, '/api/web/vault/key/unlock', { method: 'POST', headers, body: { tenantId: independent.body.activeTenantId } });
+  assert.equal(keyResponse.response.status, 400);
+  assert.equal(server.accounts.membershipsForUser(owner.body.user.id).length, 1);
+});
+
+test('server user mutations require CSRF and recent auth; blocking and restoring never revives old sessions', async (t) => {
+  let now = Date.parse('2026-09-08T00:00:00Z');
+  const { url, server } = await fixture(t, { clock: () => now });
+  const owner = await registerOwner(server, url);
+  const other = await registerOwner(server, url, 'other_key', 'other');
+  const endpoint = `/api/web/admin/users/${other.body.user.id}`;
+  const headers = mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf });
+  const patch = (body, extraHeaders = headers) => jsonRequest(url, endpoint, { method: 'PATCH', headers: extraHeaders, body });
+  assert.equal((await patch({ status: 'disabled' }, mutationHeaders({ Cookie: owner.cookie }))).response.status, 403);
+  assert.equal((await patch({ status: 'disabled' }, { ...headers, Origin: 'https://evil.example' })).response.status, 403);
+  const signedOut = await patch({ revokeSessions: true });
+  assert.equal(signedOut.response.status, 200);
+  assert.ok(signedOut.body.revokedSessions >= 1);
+  assert.equal((await jsonRequest(url, '/api/web/settings', { headers: { Cookie: other.cookie } })).response.status, 401);
+  const newSession = server.accounts.createSession(other.body.user.id, { activeTenantId: other.body.activeTenantId });
+  const disabled = await patch({ status: 'disabled' });
+  assert.equal(disabled.response.status, 200);
+  assert.equal(server.accounts.getUser(other.body.user.id).status, 'disabled');
+  assert.throws(() => server.accounts.authenticateSession(newSession.sessionToken), { code: 'invalid_session' });
+  assert.throws(() => server.accounts.createSession(other.body.user.id, { activeTenantId: other.body.activeTenantId }));
+  assert.equal((await patch({ status: 'active' })).response.status, 200);
+  assert.throws(() => server.accounts.authenticateSession(newSession.sessionToken), { code: 'invalid_session' });
+  const restored = server.accounts.createSession(other.body.user.id, { activeTenantId: other.body.activeTenantId });
+  assert.equal(server.accounts.authenticateSession(restored.sessionToken).user.status, 'active');
+  now += 16 * 60 * 1000;
+  const stale = await patch({ status: 'disabled' });
+  assert.equal(stale.response.status, 401);
+  assert.equal(stale.body.error, 'reauthentication_required');
+  assert.equal(server.accounts.getUser(other.body.user.id).status, 'active');
+});
 
 test('web API defaults to open registration without an invitation', async (t) => {
   const { url } = await fixture(t);

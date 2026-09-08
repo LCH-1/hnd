@@ -67,6 +67,8 @@ function errorMessage(status, body) {
   const knownErrors = {
     unauthorized: "로그인이 필요합니다.",
     forbidden: "이 작업을 수행할 권한이 없습니다.",
+    protected_account: "서버 소유자의 계정은 일반 설정과 보안 화면에서 관리하세요.",
+    user_not_found: "사용자를 찾을 수 없습니다. 목록을 새로고침해 주세요.",
     invalid_code: "코드가 올바르지 않거나 만료되었습니다.",
     invalid_account_code: "시작 또는 초대 코드가 올바르지 않거나 만료되었습니다.",
     authentication_failed: "패스키 확인에 실패했습니다. 다시 시도해 주세요.",
@@ -326,6 +328,10 @@ export const api = Object.freeze({
   createAccountInvite: (payload) =>
     request("/account/invites", { method: "POST", body: payload }),
   accountMembers: () => request("/account/members"),
+  adminUsers: ({ search = "", offset = 0 } = {}) =>
+    request(`/admin/users?${new URLSearchParams({ search, offset: String(offset), limit: "25" })}`),
+  updateAdminUser: (id, payload) =>
+    request(resourcePath("/admin/users", id), { method: "PATCH", body: payload }),
 
   overview: () => request("/overview"),
 

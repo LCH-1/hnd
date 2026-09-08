@@ -1266,6 +1266,11 @@
                   <p>앱의 기록 방식과 계정 설정을 관리합니다.</p>
                 </div>
               </div>
+              <nav class="settings-tabs" aria-label="설정 메뉴">
+                <a id="settings-general-link" href="/settings" aria-current="page">일반 설정</a>
+                <a id="settings-admin-link" href="/settings/admin" hidden>관리자 설정</a>
+              </nav>
+              <div id="settings-general-panel">
               <form id="app-settings-form" class="settings-form panel" aria-labelledby="app-settings-title">
                 <div class="panel-head">
                   <div>
@@ -1354,14 +1359,14 @@
               <section id="account-management" class="settings-form panel" hidden>
                 <div class="panel-head">
                   <div>
-                    <h3>사용자 관리</h3>
-                    <p>가입 코드를 만들고 이 작업 공간의 계정을 확인합니다.</p>
+                    <h3>작업 공간 공유</h3>
+                    <p>초대한 사용자는 이 작업 공간의 작업·룰·지식을 함께 사용합니다. 서버 관리 권한은 부여되지 않습니다.</p>
                   </div>
                 </div>
                 <form id="account-invite-form" class="invite-account-form">
                   <div class="field-grid">
                     <div>
-                      <label for="account-invite-role">권한</label>
+                      <label for="account-invite-role">작업 공간 권한</label>
                       <select id="account-invite-role" name="role">
                         <option value="member">사용자</option>
                         <option value="admin">관리자</option>
@@ -1403,6 +1408,29 @@
                 </div>
                 <div id="account-management-error" class="notice" role="alert" hidden></div>
               </section>
+              </div>
+              <div id="settings-admin-panel" hidden>
+              <section class="settings-form panel" aria-labelledby="admin-users-title">
+                <div class="panel-head">
+                  <div>
+                    <h3 id="admin-users-title">사용자 관리</h3>
+                    <p>서버에 가입한 사용자 정보를 관리합니다. 다른 사용자의 작업·룰·지식은 볼 수 없습니다.</p>
+                  </div>
+                </div>
+                <form id="admin-user-search" class="admin-user-search" role="search" aria-label="사용자 검색">
+                  <label class="sr-only" for="admin-user-query">사용자 이름 또는 표시 이름</label>
+                  <input id="admin-user-query" type="search" maxlength="80" placeholder="사용자 이름 또는 표시 이름" />
+                  <button class="button button-secondary" type="submit">검색</button>
+                </form>
+                <p class="field-help">웹 로그인 차단은 연결된 CLI 기기와 이미 내려받은 데이터에는 적용되지 않습니다.</p>
+                <div id="admin-users-status" class="field-help" role="status"></div>
+                <ul id="admin-users-list" class="admin-users-list" aria-label="서버 사용자"></ul>
+                <div class="admin-users-pagination">
+                  <button id="admin-users-prev" class="button button-secondary" type="button" disabled>이전</button>
+                  <button id="admin-users-next" class="button button-secondary" type="button" disabled>다음</button>
+                </div>
+                <div id="admin-users-error" class="notice" role="alert" hidden></div>
+              </section>
               <form
                 id="server-settings-form"
                 class="settings-form panel owner-only"
@@ -1435,6 +1463,7 @@
                   </button>
                 </div>
               </form>
+              </div>
               <div id="settings-error" class="notice" role="alert" hidden></div>
             </section>
           </div>
