@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { UsageError, optionBoolean, optionString } from './args.mjs';
+import { ct } from './cli-i18n.mjs';
 import {
   readJson,
   removeFile,
@@ -761,7 +762,7 @@ async function push({ options, rest, env, stdout, jsonOutput, syncClientOptions 
       await pruneSyncBases(env, config.etag);
       const output = { pushed: false, unchanged: true, etag: config.etag, snapshotDigest: digest };
       if (jsonOutput) writeJson(output, stdout);
-      else writeText(stdout, 'Remote is already up to date.');
+      else writeText(stdout, ct('보낼 변경 사항이 없습니다.'));
       return output;
     }
     throw new RemoteConflictError('The remote changed since the last sync. Pull before pushing.', {
@@ -787,7 +788,7 @@ async function push({ options, rest, env, stdout, jsonOutput, syncClientOptions 
   });
   const output = { pushed: true, created: result.created, etag: result.etag, snapshotDigest: digest };
   if (jsonOutput) writeJson(output, stdout);
-  else writeText(stdout, `Pushed encrypted snapshot ${result.etag}.`);
+  else writeText(stdout, ct('서버에 저장했습니다.'));
   return output;
 }
 
@@ -809,7 +810,7 @@ async function pull({ options, rest, env, stdout, jsonOutput }) {
   const result = await client.pullSnapshot(key, { etag: cachedBase ? config.etag : undefined });
   if (result.notModified) {
     if (jsonOutput) writeJson({ pulled: false, unchanged: true, etag: config.etag }, stdout);
-    else writeText(stdout, 'Local synced state is already current.');
+    else writeText(stdout, ct('받을 변경 사항이 없습니다.'));
     return;
   }
   if (result.missing) {
@@ -858,7 +859,7 @@ async function pull({ options, rest, env, stdout, jsonOutput }) {
   };
   if (jsonOutput) writeJson(output, stdout);
   else {
-    writeText(stdout, `Pulled and verified encrypted snapshot ${result.etag}.`);
+    writeText(stdout, ct('서버의 변경 사항을 적용했습니다.'));
     if (backupPath) writeText(stdout, `Previous local synced state backup: ${backupPath}`);
     if (reconciliation.removed) writeText(stdout, `Removed ${reconciliation.removed} orphaned local repository binding(s).`);
   }
@@ -964,7 +965,7 @@ async function mergeRemote({ options, rest, env, stdout, jsonOutput, syncClientO
   if (jsonOutput) {
     writeJson(output, stdout);
   } else {
-    writeText(stdout, `Merged local and remote synced state at ${remote.etag}.`);
+    writeText(stdout, ct('로컬과 서버의 변경 사항을 병합했습니다.'));
     if (output.conflicts.length > 0) {
       writeText(stdout, `${output.conflicts.length} conflict(s) kept the local version. Review: ${output.conflictPath}`);
     }

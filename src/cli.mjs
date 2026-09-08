@@ -1144,53 +1144,37 @@ async function handleAdapters({
   if (jsonOutput) writeJson({ dryRun, operations: summary }, stdout);
   else {
     const changed = summary.filter((item) => item.changed);
-    if (dryRun) writeText(stdout, ct('미리보기: 파일을 변경하지 않았습니다.'));
-    if (changed.length === 0) {
+    if (dryRun) {
+      writeText(stdout, ct(changed.length === 0
+        ? '미리보기: 변경 사항 없음.' : '미리보기: 파일은 변경하지 않습니다.'));
+    } else if (changed.length === 0) {
       if (action === 'install') {
         writeText(stdout, materialized.skipped
-          ? ct('사용자 공통 설정은 이미 완료되어 변경할 내용이 없습니다.')
-          : ct('설정이 이미 완료되어 변경할 내용이 없습니다.'));
+          ? ct('공통 설정은 이미 완료되어 있습니다.')
+          : ct('이미 설정되어 있습니다.'));
       } else {
-        writeText(stdout, ct('제거할 HND 관리 설정이 없습니다.'));
+        writeText(stdout, ct('제거할 설정이 없습니다.'));
       }
     } else {
-      writeText(stdout, dryRun
-        ? ct(action === 'install' ? '다음 파일에 HND 설정을 적용할 예정입니다.' : '다음 파일에서 HND 설정을 제거할 예정입니다.')
-        : ct(action === 'install' ? 'HND 설정을 적용했습니다.' : 'HND 설정을 제거했습니다. 다른 사용자 설정은 보존했습니다.'));
+      writeText(stdout, ct(action === 'install'
+        ? (materialized.skipped ? '공통 설정 완료.' : '설정 완료.')
+        : '설정 제거 완료.'));
     }
-    const projectComponents = new Set(['cursor-rule', 'cursor-exclude']);
-    for (const [projectOnly, label] of [
-      [true, '프로젝트 전용 — 현재 Git 저장소'],
-      [false, '사용자 공통 — 이 PC의 같은 사용자로 실행하는 모든 프로젝트'],
-    ]) {
-      const items = summary.filter((item) => projectComponents.has(item.component) === projectOnly);
-      if (items.length === 0) continue;
-      writeText(stdout, ct(label));
-      for (const item of items) {
-        const verb = !item.changed ? ct('변경 없음')
-          : dryRun ? ct(item.action === 'write' ? '저장 예정' : '삭제 예정')
-            : ct(item.action === 'write' ? '저장' : '삭제');
-        writeText(stdout, `  ${verb}  ${item.path}`);
-      }
-    }
-    if (action === 'install') {
-      writeText(stdout, agents.includes('cursor')
-        ? ct('Cursor 룰은 프로젝트마다 설정하고, 훅·스킬은 사용자 공통 설정을 공유합니다. 같은 내용의 파일은 다시 저장하지 않습니다.')
-        : ct('훅·스킬은 사용자 공통 설정입니다. 같은 내용의 파일은 다시 저장하지 않습니다.'));
+    for (const item of changed) {
+      const verb = dryRun ? ct(item.action === 'write' ? '저장 예정' : '삭제 예정')
+        : ct(item.action === 'write' ? '저장' : '삭제');
+      writeText(stdout, `  ${verb}  ${item.path}`);
     }
     if (materialized.skipped) {
       const unregistered = materialized.skipped === 'REPOSITORY_NOT_REGISTERED';
       writeText(stdout, unregistered
-        ? ct('프로젝트 전용 Cursor 룰은 건너뛰었습니다. 현재 Git 저장소가 HND에 등록되지 않았습니다.')
-        : ct('프로젝트 전용 Cursor 룰은 건너뛰었습니다. 현재 경로가 Git 저장소가 아닙니다.'));
+        ? ct('Cursor 룰 설정 생략: 등록되지 않은 프로젝트입니다.')
+        : ct('Cursor 룰 설정 생략: Git 프로젝트 경로가 아닙니다.'));
       if (action === 'install') {
         writeText(stdout, unregistered
-          ? ct('다음 단계: hnd init으로 현재 프로젝트를 등록한 뒤 hnd setup을 실행하세요.')
-          : ct('다음 단계: Git 프로젝트 경로에서 hnd init을 실행한 뒤 hnd setup을 실행하세요.'));
+          ? ct('설정: hnd init 실행 후 hnd setup')
+          : ct('설정: Git 프로젝트 경로에서 hnd init 실행 후 hnd setup'));
       }
-    }
-    if (action === 'install') {
-      writeText(stdout, `${ct('설정 확인')}: hnd doctor --agents ${agents.join(',')}`);
     }
     if (
       action === 'install'
@@ -1508,7 +1492,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     }
     await refreshCursor({ force: true });
     if (jsonOutput) writeJson({ ...resolved, environment: await core.env.get() }, stdout);
-    else writeText(stdout, `Initialized ${describeRepository(resolved)}.\nEnvironment: ${(await core.env.get()) ?? 'not selected'}`);
+    else writeText(stdout, `${ct('프로젝트 등록 완료')}: ${describeRepository(resolved)}\n${ct('환경')}: ${(await core.env.get()) ?? ct('선택 안 됨')}`);
     return;
   }
 
@@ -1558,7 +1542,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       ? { enabled: await core.auto.get() }
       : await core.auto.set(subcommand === 'on');
     if (jsonOutput) writeJson(result, stdout);
-    else writeText(stdout, `Automatic progress: ${result.enabled ? 'on' : 'off'}`);
+    else writeText(stdout, `${ct('진행 자동 저장')}: ${result.enabled ? ct('켜짐') : ct('꺼짐')}`);
     return;
   }
 
@@ -1623,7 +1607,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       const result = await core.env.set(label);
       await refreshCursor();
       if (jsonOutput) writeJson(result, stdout);
-      else writeText(stdout, `Environment: ${result.environment}`);
+      else writeText(stdout, `${ct('환경')}: ${result.environment}`);
       return;
     }
     if (subcommand === 'clear') {
@@ -1631,14 +1615,14 @@ async function mainImpl(argv = process.argv.slice(2), {
       const result = await core.env.set(null);
       await refreshCursor();
       if (jsonOutput) writeJson(result, stdout);
-      else writeText(stdout, 'Environment selection cleared.');
+      else writeText(stdout, ct('환경 선택을 해제했습니다.'));
       return;
     }
     if (subcommand === 'show') {
       ensureNoExtra(positionals, 'hnd env show');
       const result = await core.env.get();
       if (jsonOutput) writeJson({ environment: result }, stdout);
-      else writeText(stdout, result ?? 'No environment is selected.');
+      else writeText(stdout, result ?? ct('선택된 환경이 없습니다.'));
       return;
     }
     throw new UsageError('Env command must be set, show, or clear.');
@@ -1756,11 +1740,14 @@ async function mainImpl(argv = process.argv.slice(2), {
       operations: summary,
     };
     if (jsonOutput) writeJson(output, stdout);
-    else if (summary.length === 0) writeText(stdout, `Cursor fallback is current: ${result.paths.rule}`);
+    else if (summary.length === 0) writeText(stdout, ct(dryRun
+      ? '미리보기: 변경 사항 없음.' : 'Cursor 룰이 최신 상태입니다.'));
     else {
       for (const item of summary) {
-        const verb = item.changed ? (dryRun ? `would ${item.action}` : item.action) : 'unchanged';
-        writeText(stdout, `${verb.padEnd(13)} ${item.path}`);
+        const verb = !item.changed ? ct('변경 없음')
+          : dryRun ? ct(item.action === 'write' ? '저장 예정' : '삭제 예정')
+            : ct(item.action === 'write' ? '저장' : '삭제');
+        writeText(stdout, `${verb}  ${item.path}`);
       }
     }
     return;

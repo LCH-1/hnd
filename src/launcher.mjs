@@ -128,28 +128,24 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   if (action === 'help' || action === '--help' || action === '-h') {
     writeText(stdout, ko ? [
       '사용법:',
-      '  hnd update status    현재·최신 클라이언트와 npm 런처 버전, 필요한 명령 확인',
-      '  hnd update check     연결된 서버와 npm 공식 registry에서 최신 정보 조회',
-      '  hnd update apply     이 PC의 클라이언트 업데이트 (서버는 변경하지 않음)',
-      '  hnd update rollback  이전 정상 클라이언트로 복구하고 문제 릴리스 적용 차단',
+      '  hnd update           로컬 버전·최신 버전·업데이트 상태 확인',
+      '  hnd update check     최신 버전 확인',
+      '  hnd update apply     업데이트 적용',
+      '  hnd update rollback  이전 버전으로 복구',
+      '  hnd update --json    상세 진단 정보',
       '  npm install --global @lch-1/hnd@latest    npm 런처 업데이트',
       '',
-      '서버 프로그램은 서버 관리자가 별도로 배포합니다: docs/DEPLOYMENT.md',
-      '서버 자체 버전과 최신 서버 릴리스는 현재 조회 기능이 없습니다. 서버가 제공하는 클라이언트 버전과 구분합니다.',
-      '',
-      'hnd 명령을 실행할 때 마지막 확인 시도 후 6시간이 지났으면 짧은 백그라운드 확인을 시작합니다. 계속 실행되는 업데이트 프로그램은 없습니다. 서버가 꺼져 있으면 마지막 정상 버전을 계속 사용합니다.',
+      '최신 버전은 연결된 서버 기준입니다. 서버 자체는 별도로 배포합니다.',
     ].join('\n') : [
       'Usage:',
-      '  hnd update status    Show installed/latest client and npm launcher versions and next steps',
-      '  hnd update check     Check the connected server and official npm registry',
-      '  hnd update apply     Update this PC client (does not update the server)',
-      '  hnd update rollback  Restore the previous client and block the problematic release',
+      '  hnd update           Show local version, latest version, and update status',
+      '  hnd update check     Check for updates',
+      '  hnd update apply     Apply the update',
+      '  hnd update rollback  Restore the previous version',
+      '  hnd update --json    Detailed diagnostics',
       '  npm install --global @lch-1/hnd@latest    Update the npm launcher',
       '',
-      'Server administrators deploy the server separately: docs/DEPLOYMENT.md',
-      'Server program and latest server release versions are not currently exposed; the client release offered by the server is separate.',
-      '',
-      'HND starts a short background check when the last attempt was more than 6 hours ago. No updater runs continuously. If the server is unavailable, the last verified version remains active.',
+      'The latest version comes from the connected server. Deploy the server separately.',
     ].join('\n'));
     return;
   }
@@ -217,13 +213,13 @@ async function runUpdateCommand(argv, { env, stdout, stderr, fetchImpl = fetch }
   }
   if (action === 'rollback') {
     writeText(stdout, ko
-      ? `이전 정상 클라이언트로 복구했습니다: ${result.current.version}\n문제가 있던 릴리스는 다시 적용하지 않습니다.\n다음 단계: hnd update check`
-      : `Restored the previous verified client: ${result.current.version}\nThe problematic release will not be reapplied.\nNext: hnd update check`);
+      ? `로컬 버전: ${result.current.version}\n복구 상태: 이전 버전으로 복구 완료`
+      : `Local version: ${result.current.version}\nRecovery status: previous version restored`);
   } else {
     writeText(stdout, formatUpdateReport(result, { action, ko }));
     if (result.skillsRefreshError) writeText(stderr, ko
-      ? '클라이언트 버전 확인/적용은 끝났지만 기존 스킬 갱신에 실패했습니다. hnd update apply로 다시 시도하세요.'
-      : 'Client processing finished, but managed skill refresh failed. Retry with hnd update apply.');
+      ? '스킬 갱신 실패. 다시 시도: hnd update apply'
+      : 'Skill refresh failed. Retry: hnd update apply');
     if (operationError && action !== 'status') throw operationError;
   }
 }

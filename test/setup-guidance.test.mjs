@@ -46,14 +46,12 @@ async function fixture(t) {
   return { root, env, repository, run };
 }
 
-test('setup explains project-specific and shared-user files across two projects', async (t) => {
+test('setup shows only changed files across two projects and a single line when already configured', async (t) => {
   const item = await fixture(t);
   const first = await item.repository('first');
   const second = await item.repository('second');
   const firstOutput = await item.run(first, ['setup']);
-  assert.match(firstOutput, /HND setup completed/u);
-  assert.match(firstOutput, /Project only — current Git repository/u);
-  assert.match(firstOutput, /Shared user settings — all projects run by this user on this PC/u);
+  assert.match(firstOutput, /^Setup complete\./u);
   assert.ok(firstOutput.includes(path.join(first, '.cursor', 'rules', '50-hnd.mdc')));
   const commonFiles = [
     path.join(item.env.HND_USER_HOME, '.claude', 'settings.json'),
@@ -65,23 +63,21 @@ test('setup explains project-specific and shared-user files across two projects'
   const secondOutput = await item.run(second, ['setup']);
   assert.ok(secondOutput.includes(path.join(second, '.cursor', 'rules', '50-hnd.mdc')));
   for (const file of commonFiles) assert.ok(!secondOutput.includes(file));
-  assert.match(secondOutput, /Identical files are not written again/u);
+  assert.doesNotMatch(secondOutput, /Identical files|Shared user settings|hnd doctor/u);
   assert.deepEqual(await Promise.all(commonFiles.map((file) => fs.readFile(file, 'utf8'))), before);
 
   const repeated = await item.run(second, ['setup']);
-  assert.match(repeated, /^Setup is already complete\. No changes needed\./u);
+  assert.equal(repeated, 'Already configured.\n');
   assert.doesNotMatch(repeated, /No managed files found|Saved|approve the changed/u);
-  assert.match(repeated, /Check setup: hnd doctor --agents claude,codex,cursor/u);
 });
 
 test('setup dry-run describes future work and preserves the JSON contract without writing files', async (t) => {
   const item = await fixture(t);
   const cwd = await item.repository('project');
   const preview = await item.run(cwd, ['setup', '--dry-run']);
-  assert.match(preview, /^Preview: no files were changed\./u);
-  assert.match(preview, /HND settings would be applied/u);
+  assert.match(preview, /^Preview: files will not be changed\./u);
   assert.match(preview, /Would save/u);
-  assert.doesNotMatch(preview, /HND setup completed|approve the changed/u);
+  assert.doesNotMatch(preview, /Setup complete|approve the changed/u);
   await assert.rejects(fs.stat(path.join(cwd, '.cursor', 'rules', '50-hnd.mdc')), { code: 'ENOENT' });
   await assert.rejects(fs.stat(item.env.HND_USER_HOME), { code: 'ENOENT' });
   const json = JSON.parse(await item.run(cwd, ['setup', '--dry-run', '--json']));
@@ -91,8 +87,7 @@ test('setup dry-run describes future work and preserves the JSON contract withou
   assert.deepEqual(Object.keys(json.operations[0]).sort(), ['action', 'agent', 'changed', 'component', 'path', 'reason']);
   await item.run(cwd, ['setup']);
   const repeatedPreview = await item.run(cwd, ['setup', '--dry-run']);
-  assert.match(repeatedPreview, /Preview: no files were changed/u);
-  assert.match(repeatedPreview, /Setup is already complete/u);
+  assert.equal(repeatedPreview, 'Preview: no changes needed.\n');
   assert.doesNotMatch(repeatedPreview, /Would save/u);
   assert.deepEqual(JSON.parse(await item.run(cwd, ['setup', '--json'])), { dryRun: false, operations: [] });
 });
@@ -100,44 +95,44 @@ test('setup dry-run describes future work and preserves the JSON contract withou
 test('uninstall distinguishes absent HND settings from successful removal and dry-run', async (t) => {
   const item = await fixture(t);
   const cwd = await item.repository('project');
-  assert.equal(await item.run(cwd, ['uninstall']), 'No HND-managed settings found. Nothing to uninstall.\n');
+  assert.equal(await item.run(cwd, ['uninstall']), 'No settings to remove.\n');
   await item.run(cwd, ['setup']);
   const preview = await item.run(cwd, ['uninstall', '--dry-run']);
-  assert.match(preview, /HND settings would be removed/u);
+  assert.match(preview, /^Preview: files will not be changed\./u);
   assert.match(preview, /Would remove/u);
   assert.ok(await fs.stat(path.join(cwd, '.cursor', 'rules', '50-hnd.mdc')));
   const removed = await item.run(cwd, ['uninstall']);
-  assert.match(removed, /^HND settings removed\. Other user settings were preserved\./u);
+  assert.match(removed, /^Settings removed\./u);
   assert.doesNotMatch(removed, /setup completed/u);
-  assert.equal(await item.run(cwd, ['uninstall']), 'No HND-managed settings found. Nothing to uninstall.\n');
+  assert.equal(await item.run(cwd, ['uninstall']), 'No settings to remove.\n');
 });
 
 test('setup reports an unregistered project separately from already-complete shared setup', async (t) => {
   const item = await fixture(t);
   const cwd = await item.repository('unregistered', { registered: false });
   const first = await item.run(cwd, ['setup']);
-  assert.match(first, /Project-specific Cursor rules were skipped: this Git repository is not registered/u);
-  assert.match(first, /Next: register this project with hnd init, then run hnd setup/u);
+  assert.match(first, /Cursor rules skipped: project not registered/u);
+  assert.match(first, /Setup: run hnd init, then hnd setup/u);
   await assert.rejects(fs.stat(path.join(cwd, '.cursor', 'rules', '50-hnd.mdc')), { code: 'ENOENT' });
   const repeated = await item.run(cwd, ['setup']);
-  assert.match(repeated, /^Shared user setup is already complete/u);
-  assert.match(repeated, /Project-specific Cursor rules were skipped/u);
-  assert.doesNotMatch(repeated, /^Setup is already complete/u);
+  assert.match(repeated, /^Shared settings are already configured/u);
+  assert.match(repeated, /Cursor rules skipped/u);
+  assert.doesNotMatch(repeated, /^Already configured/u);
 });
 
 test('setup outside Git explains the skipped project scope and how to complete it', async (t) => {
   const item = await fixture(t);
   const output = await item.run(item.root, ['setup', '--dry-run']);
-  assert.match(output, /Project-specific Cursor rules were skipped: the current path is not a Git repository/u);
-  assert.match(output, /Next: run hnd init in a Git project, then run hnd setup/u);
+  assert.match(output, /Cursor rules skipped: not in a Git project/u);
+  assert.match(output, /Setup: run hnd init in a Git project, then hnd setup/u);
   assert.doesNotMatch(output, /this Git repository is not registered/u);
 });
 
 test('explicit Claude-only setup does not imply Cursor project configuration was checked', async (t) => {
   const item = await fixture(t);
   const output = await item.run(item.root, ['setup', '--agents', 'claude']);
-  assert.match(output, /Hooks and skills are shared user settings/u);
-  assert.match(output, /Check setup: hnd doctor --agents claude/u);
+  assert.match(output, /^Setup complete\./u);
+  assert.equal(await item.run(item.root, ['setup', '--agents', 'claude']), 'Already configured.\n');
   assert.doesNotMatch(output, /Cursor|Project only/u);
 });
 
@@ -145,12 +140,10 @@ test('Korean setup guides distinguish completion, previews, and empty uninstall'
   const item = await fixture(t);
   const cwd = await item.repository('project');
   const preview = await item.run(cwd, ['setup', '--dry-run'], 'ko');
-  assert.match(preview, /미리보기: 파일을 변경하지 않았습니다/u);
-  assert.match(preview, /프로젝트 전용 — 현재 Git 저장소/u);
-  assert.match(preview, /사용자 공통 — 이 PC의 같은 사용자로 실행하는 모든 프로젝트/u);
+  assert.match(preview, /미리보기: 파일은 변경하지 않습니다/u);
   assert.match(preview, /저장 예정/u);
   await item.run(cwd, ['setup'], 'ko');
-  assert.match(await item.run(cwd, ['setup'], 'ko'), /^설정이 이미 완료되어 변경할 내용이 없습니다/u);
+  assert.equal(await item.run(cwd, ['setup'], 'ko'), '이미 설정되어 있습니다.\n');
   await item.run(cwd, ['uninstall'], 'ko');
-  assert.equal(await item.run(cwd, ['uninstall'], 'ko'), '제거할 HND 관리 설정이 없습니다.\n');
+  assert.equal(await item.run(cwd, ['uninstall'], 'ko'), '제거할 설정이 없습니다.\n');
 });

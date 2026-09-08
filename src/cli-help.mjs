@@ -221,11 +221,11 @@ const SETUP_HELP = `hnd setup — PC 연결과 에이전트 설정
   hnd uninstall [--agents all|claude,codex,cursor] [--dry-run]
 
 업데이트:
-  hnd update status     현재·최신 버전과 업데이트 필요 여부, 다음 명령 확인
-  hnd update check      연결된 서버·npm의 최신 버전 다시 확인
-  hnd update apply      이 PC의 클라이언트 업데이트 (서버는 변경하지 않음)
-  hnd update rollback   이전 정상 클라이언트로 복구
-  hnd update help       npm 런처·서버 업데이트 방법과 차이 확인
+  hnd update            로컬 버전·최신 버전·업데이트 상태 확인
+  hnd update check      최신 버전 확인
+  hnd update apply      업데이트 적용
+  hnd update rollback   이전 버전으로 복구
+  hnd update help       업데이트 도움말
 `;
 
 const ADVANCED_HELP = `hnd advanced — 진단·내부·이전 호환 명령

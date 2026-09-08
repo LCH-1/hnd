@@ -55,7 +55,8 @@ test('init keeps an independent environment for each checkout', async (context) 
   };
 
   const initialized = await run(['init']);
-  assert.match(initialized.stdout, /Environment: default/u);
+  assert.match(initialized.stdout, /프로젝트 등록 완료:/u);
+  assert.match(initialized.stdout, /환경: default/u);
   assert.equal(initialized.stderr, '');
   const statusJson = JSON.parse((await run(['status', '--json'])).stdout);
   assert.equal(statusJson.environment, 'default');

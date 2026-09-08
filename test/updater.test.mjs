@@ -192,17 +192,17 @@ function outputStream() {
   };
 }
 
-test('update help describes the command-triggered short background check accurately', async (t) => {
+test('update help lists concise actions and keeps detailed diagnostics opt-in', async (t) => {
   const { env } = await temporaryEnvironment(t);
   env.LANG = 'ko_KR.UTF-8';
   const stdout = outputStream();
   const stderr = outputStream();
   await launcherMain(['update', 'help'], { env, stdout, stderr });
   const help = stdout.text();
-  assert.match(help, /hnd 명령을 실행할 때 마지막 확인 시도 후 6시간/u);
-  assert.match(help, /짧은 백그라운드 확인을 시작/u);
-  assert.match(help, /계속 실행되는 업데이트 프로그램은 없습니다/u);
-  assert.doesNotMatch(help, /평소에는 6시간마다/u);
+  assert.match(help, /hnd update\s+로컬 버전·최신 버전·업데이트 상태/u);
+  assert.match(help, /hnd update --json\s+상세 진단 정보/u);
+  assert.match(help, /최신 버전은 연결된 서버 기준/u);
+  assert.doesNotMatch(help, /런타임|릴리스|릴리즈|최근 확인/u);
   assert.equal(stderr.text(), '');
 });
 
@@ -228,7 +228,7 @@ test('automatic update spawn errors never escape into the foreground command', a
   })));
 });
 
-test('update status separates the npm launcher, local runtime, and server runtime', async (t) => {
+test('update keeps human output concise and detailed versions in JSON', async (t) => {
   const { env } = await temporaryEnvironment(t);
   env.LANG = 'ko_KR.UTF-8';
   const stdout = outputStream();
@@ -236,11 +236,9 @@ test('update status separates the npm launcher, local runtime, and server runtim
   const fetchImpl = async () => Response.json({ name: '@lch-1/hnd', version: LAUNCHER_VERSION });
   await launcherMain(['update', 'status'], { env, stdout, stderr, fetchImpl });
   const status = stdout.text();
-  assert.match(status, /현재 npm 런처: \d+\.\d+\.\d+/u);
-  assert.match(status, /현재 클라이언트: \d+\.\d+\.\d+ · npm 내장/u);
-  assert.match(status, /최신 클라이언트 \(연결된 서버 기준\): 확인 불가/u);
-  assert.match(status, /판단 불가 · PC 연결이 필요/u);
-  assert.match(status, /현재 서버 프로그램 버전: 확인 불가/u);
+  assert.match(status, /로컬 버전: \d+\.\d+\.\d+/u);
+  assert.match(status, /최신 버전: 확인 불가/u);
+  assert.match(status, /업데이트 상태: 연결 필요/u);
   assert.doesNotMatch(status, /일치함|적용 상태/u);
   assert.equal(stderr.text(), '');
 
@@ -270,9 +268,9 @@ test('failed update checks retain installed versions, give recovery steps, and p
     if (action === 'status') await pending;
     else await assert.rejects(pending, /HTTP 503/);
     const text = stdout.text();
-    assert.match(text, /현재 클라이언트: \d+\.\d+\.\d+/u);
-    assert.match(text, /판단 불가 · 서버를 확인할 수 없습니다/u);
-    assert.match(text, /다음 명령: hnd update check/u);
+    assert.match(text, /로컬 버전: \d+\.\d+\.\d+/u);
+    assert.match(text, /업데이트 상태: 확인 실패/u);
+    assert.match(text, /다시 확인: hnd update check/u);
     assert.match(text, /npm install --global @lch-1\/hnd@latest/u);
     assert.doesNotMatch(text, /업데이트 완료|일치함|적용 상태/u);
   }

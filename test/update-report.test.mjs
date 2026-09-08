@@ -23,10 +23,7 @@ test('update report describes a verified matching client as current, without exp
   assert.deepEqual(describeClientUpdate(input), { status: 'current', needsUpdate: false, reason: 'current' });
   for (const action of ['status', 'check', 'apply']) {
     const text = formatUpdateReport(input, { action, ko: true });
-    assert.match(text, /현재 클라이언트: 1\.3\.0 · 릴리스 19/);
-    assert.match(text, /최신 클라이언트 \(연결된 서버 기준\): 1\.3\.0 · 릴리스 19/);
-    assert.match(text, /불필요 · 이미 최신 버전입니다 \(연결된 서버 기준\)/);
-    assert.match(text, /다음 명령: hnd update check/);
+    assert.match(text, /^로컬 버전: 1\.3\.0\n최신 버전: 1\.3\.0\n업데이트 상태: 최신$/);
     assert.doesNotMatch(text, /일치함|변경 없음|aaaaaaaaaaaa/);
   }
 });
@@ -38,39 +35,39 @@ test('update report recognizes a new release with the same semantic version', ()
   });
   assert.deepEqual(describeClientUpdate(input), { status: 'update_available', needsUpdate: true, reason: 'new_release' });
   const text = formatUpdateReport(input, { ko: true });
-  assert.match(text, /릴리스 20/);
-  assert.match(text, /다음 명령: hnd update apply/);
+  assert.match(text, /업데이트 상태: 업데이트 가능/);
+  assert.doesNotMatch(text, /릴리스|릴리즈|20|bbbbbbbb/);
+  assert.match(text, /업데이트: hnd update apply/);
 });
 
 test('a quarantined release is blocked rather than current even when available is false', () => {
   const input = result({ quarantined: true, available: false });
   assert.deepEqual(describeClientUpdate(input), { status: 'blocked', needsUpdate: null, reason: 'quarantined' });
   const text = formatUpdateReport(input, { ko: true });
-  assert.match(text, /판단 보류 · 이전 롤백 또는 실패로 해당 릴리스가 차단/);
-  assert.match(text, /다음 명령: hnd update check/);
-  assert.doesNotMatch(text, /클라이언트 업데이트 필요 여부: 불필요/);
+  assert.match(text, /업데이트 상태: 업데이트 차단/);
+  assert.match(text, /관리자에게 새 버전을 요청/);
+  assert.doesNotMatch(text, /업데이트 상태: 최신/);
 });
 
 test('a successful apply ignores the stale pre-install available flag', () => {
   const input = result({ available: true, installed: true });
   assert.equal(describeClientUpdate(input).status, 'current');
   const text = formatUpdateReport(input, { action: 'apply', ko: true });
-  assert.match(text, /^클라이언트 업데이트 완료/);
-  assert.match(text, /다음 명령: hnd update check/);
+  assert.equal(text, '로컬 버전: 1.3.0\n최신 버전: 1.3.0\n업데이트 상태: 업데이트 완료');
 });
 
 test('matching digests plus available means damaged installation requiring repair', () => {
   const input = result({ available: true });
   assert.deepEqual(describeClientUpdate(input), { status: 'update_available', needsUpdate: true, reason: 'repair_required' });
   const text = formatUpdateReport(input, { ko: true });
-  assert.match(text, /설치 파일 검증에 실패하여 재설치가 필요/);
-  assert.match(text, /다음 명령: hnd update apply/);
+  assert.match(text, /업데이트 상태: 재설치 필요/);
+  assert.match(text, /업데이트: hnd update apply/);
 });
 
 test('a built-in client without a digest is not assumed identical to the server by version alone', () => {
   const input = result({ clientRelease: { version: '1.3.0', builtIn: true } });
   assert.equal(describeClientUpdate(input).status, 'update_available');
-  assert.match(formatUpdateReport(input, { ko: true }), /현재 클라이언트: 1\.3\.0 · npm 내장/);
+  assert.match(formatUpdateReport(input, { ko: true }), /로컬 버전: 1\.3\.0/);
 });
 
 test('disconnected and failed checks never claim current and include recovery steps', () => {
@@ -80,30 +77,27 @@ test('disconnected and failed checks never claim current and include recovery st
   for (const input of [result({ serverError: 'network failed' }), result({ serverRelease: null })]) {
     assert.equal(describeClientUpdate(input).status, 'check_failed');
     const text = formatUpdateReport(input, { ko: true });
-    assert.match(text, /현재 클라이언트는 계속 사용할 수 있습니다/);
-    assert.match(text, /다음 명령: hnd update check/);
-    assert.doesNotMatch(text, /클라이언트 업데이트 필요 여부: 불필요/);
+    assert.match(text, /업데이트 상태: 확인 실패/);
+    assert.match(text, /다시 확인: hnd update check/);
+    assert.doesNotMatch(text, /업데이트 상태: 최신/);
   }
 });
 
-test('server program versions remain explicitly unknown instead of reusing client or npm versions', () => {
+test('normal output omits unavailable server diagnostics and internal update metadata', () => {
   const text = formatUpdateReport(result(), { ko: true });
-  assert.match(text, /현재 서버 프로그램 버전: 확인 불가 · 서버가 버전 정보를 제공하지 않습니다/);
-  assert.match(text, /최신 서버 프로그램 버전: 확인 불가 · 서버 릴리스 조회 경로가 없습니다/);
-  assert.match(text, /서버 업데이트 필요 여부: 판단 불가/);
-  assert.match(text, /docs\/DEPLOYMENT\.md/);
-  assert.match(text, /클라이언트만 업데이트하며 서버 프로그램을 변경하지 않습니다/);
+  assert.equal(text.split('\n').length, 3);
+  assert.doesNotMatch(text, /런타임|릴리스|릴리즈|서버|npm|최근|이전|일치|aaaaaaaa/);
 });
 
 test('npm launcher comparison recommends updating only when the registry version is newer', () => {
   const older = formatUpdateReport(result({ launcherLatestVersion: '0.3.0' }), { ko: true });
-  assert.match(older, /npm 런처 업데이트 필요 여부: 필요/);
+  assert.match(older, /npm 업데이트 가능: /);
   assert.match(older, /npm install --global @lch-1\/hnd@latest/);
   const newer = formatUpdateReport(result({ launcherLatestVersion: '0.2.1' }), { ko: true });
-  assert.match(newer, /설치된 버전이 npm 최신 공개 버전보다 새 버전/);
+  assert.equal(newer.split('\n').length, 3);
   assert.doesNotMatch(newer, /npm install/);
   const prerelease = formatUpdateReport(result({ launcherVersion: '0.3.0-rc.1', launcherLatestVersion: '0.3.0' }), { ko: true });
-  assert.match(prerelease, /npm 런처 업데이트 필요 여부: 필요/);
+  assert.match(prerelease, /npm 업데이트 가능: /);
 });
 
 test('failed npm lookup is unknown and offers an explicit manual version check', () => {
@@ -112,7 +106,7 @@ test('failed npm lookup is unknown and offers an explicit manual version check',
     result({ launcherLatestVersion: '0.3.0', launcherCheckError: 'timeout' }),
   ]) {
     const text = formatUpdateReport(input, { ko: true });
-    assert.match(text, /npm 런처 업데이트 필요 여부: 판단 불가/);
+    assert.match(text, /npm 버전 확인 실패/);
     assert.match(text, /npm view @lch-1\/hnd version/);
     assert.doesNotMatch(text, /npm install/);
   }
@@ -132,11 +126,10 @@ test('English reports have the same actionable states and no Korean text', () =>
   for (const input of inputs) {
     const text = formatUpdateReport(input, { action: 'apply', ko: false });
     assert.doesNotMatch(text, /[가-힣]/);
-    assert.match(text, /Installed client:/);
-    assert.match(text, /Latest client \(from the connected server\):/);
-    assert.match(text, /Client update needed:/);
-    assert.match(text, /hnd update (?:apply|check)/);
-    assert.match(text, /Installed server program version: unknown/);
+    assert.match(text, /Local version:/);
+    assert.match(text, /Latest version:/);
+    assert.match(text, /Update status:/);
+    assert.doesNotMatch(text, /release \d|runtime|Installed server program version/);
   }
 });
 
@@ -145,5 +138,5 @@ test('formatting is pure and does not mutate result records', () => {
   const before = structuredClone(input);
   const text = formatUpdateReport(input, { action: 'status', ko: true });
   assert.deepEqual(input, before);
-  assert.match(text, /되돌릴 수 있는 이전 클라이언트: 1\.2\.0 · 릴리스 18/);
+  assert.doesNotMatch(text, /1\.2\.0|18|이전|릴리즈|릴리스/);
 });
