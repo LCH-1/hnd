@@ -28,6 +28,7 @@ src/core/knowledge-transfer.mjs
 src/core/knowledge.mjs
 src/core/live-context.mjs
 src/core/mutation-lock.mjs
+src/core/notify.mjs
 src/core/policies.mjs
 src/core/privacy.mjs
 src/core/repositories.mjs
@@ -45,6 +46,7 @@ src/paths.mjs
 src/presentation.mjs
 src/remote-cli.mjs
 src/shared/app-settings.mjs
+src/shared/notify.mjs
 src/sync/auto.mjs
 src/sync/capture.mjs
 src/sync/client.mjs

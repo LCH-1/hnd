@@ -16,6 +16,7 @@ const ASSETS = new Map([
   ['/web/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/web/app-routes.js', ['app-routes.js', 'text/javascript; charset=utf-8']],
   ['/shared/app-settings.mjs', ['app-settings.mjs', 'text/javascript; charset=utf-8', 'shared']],
+  ['/shared/notify.mjs', ['notify.mjs', 'text/javascript; charset=utf-8', 'shared']],
   ['/web/select-picker.js', ['select-picker.js', 'text/javascript; charset=utf-8']],
   ['/web/connector-release.js', ['connector-release.js', 'text/javascript; charset=utf-8']],
   ['/web/snapshot-data.js', ['snapshot-data.js', 'text/javascript; charset=utf-8']],

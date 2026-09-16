@@ -1314,6 +1314,19 @@
                 </fieldset>
                 <div id="app-settings-error" class="notice" role="alert" hidden></div>
               </form>
+              <section id="notify-settings" class="settings-form panel" aria-labelledby="notify-settings-title">
+                <div class="panel-head">
+                  <div>
+                    <h3 id="notify-settings-title">작업 완료 알림</h3>
+                    <p>에이전트가 한 턴을 끝내면 Slack이나 Discord로 알립니다. Claude Code·Codex·Cursor에 모두 적용합니다.</p>
+                  </div>
+                  <button id="notify-add" class="button button-primary" type="button">알림 채널 추가</button>
+                </div>
+                <ul id="notify-channel-list" class="notify-channel-list"></ul>
+                <p id="notify-settings-status" class="field-help" role="status" aria-live="polite">설정 불러오는 중…</p>
+                <p class="field-help">웹훅 주소는 암호화한 보관함에만 저장합니다. 서버는 내용을 읽을 수 없습니다.</p>
+                <div id="notify-settings-error" class="notice" role="alert" hidden></div>
+              </section>
               <form id="settings-form" class="settings-form panel">
                 <div class="panel-head">
                   <div>
@@ -1557,6 +1570,76 @@
             <button class="button button-secondary" type="button" data-close-dialog>취소</button>
             <button class="button button-primary" type="submit">저장</button>
           </div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="notify-dialog" class="form-dialog" aria-labelledby="notify-dialog-title">
+      <form method="dialog" class="dialog-close-form">
+        <button type="submit" value="cancel" aria-label="닫기">×</button>
+      </form>
+      <form id="notify-form" class="dialog-form">
+        <input name="id" type="hidden" />
+        <div class="dialog-head">
+          <h2 id="notify-dialog-title">알림 채널 추가</h2>
+          <p>아래 순서대로 웹훅을 만든 뒤 주소를 붙여 넣으세요.</p>
+        </div>
+        <fieldset class="notify-provider">
+          <legend>보낼 곳</legend>
+          <div class="segmented">
+            <label class="segmented-option">
+              <input type="radio" name="provider" value="slack" checked />
+              <span>Slack</span>
+            </label>
+            <label class="segmented-option">
+              <input type="radio" name="provider" value="discord" />
+              <span>Discord</span>
+            </label>
+          </div>
+        </fieldset>
+        <details id="notify-guide" class="form-details" open>
+          <summary id="notify-guide-title">웹훅 만드는 방법</summary>
+          <ol id="notify-guide-steps" class="notify-guide-steps"></ol>
+          <p class="field-help"><span id="notify-guide-example-label">예시</span>: <code id="notify-guide-example"></code></p>
+        </details>
+        <label>웹훅 URL<input
+            name="webhookUrl"
+            type="url"
+            maxlength="512"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="https://hooks.slack.com/services/..." />
+          <small id="notify-webhook-help" class="field-help">주소는 이 보관함에만 저장합니다.</small>
+        </label>
+        <label>이름<input name="label" type="text" maxlength="60" placeholder="예: 팀 알림" /></label>
+        <div class="field-grid">
+          <label>보낼 때<select name="trigger">
+              <option value="long-turn">오래 걸린 턴만</option>
+              <option value="changed-files">파일이 바뀐 턴만</option>
+              <option value="session-end">세션이 끝날 때만</option>
+              <option value="always">매 턴마다</option>
+            </select>
+            <small class="field-help">에이전트는 턴마다 멈추므로 매 턴 알림은 많을 수 있습니다.</small>
+          </label>
+          <label data-notify-field="threshold">기준 시간(초)<input
+              name="thresholdSeconds"
+              type="number"
+              min="5"
+              max="86400"
+              step="1"
+              value="60" />
+            <small class="field-help">이 시간보다 오래 걸린 턴만 알립니다.</small>
+          </label>
+        </div>
+        <label>사용<select name="enabled">
+            <option value="true">켜짐</option>
+            <option value="false">꺼짐</option>
+          </select></label>
+        <p class="field-help">저장한 뒤 터미널에서 hnd notify test 명령으로 실제 전송을 확인하세요.</p>
+        <div class="notice" role="alert" hidden></div>
+        <div class="form-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>취소</button>
+          <button class="button button-primary" type="submit">저장</button>
         </div>
       </form>
     </dialog>

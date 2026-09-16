@@ -20,6 +20,16 @@ import {
   VERSION,
 } from './constants.mjs';
 import { createCore } from './core/index.mjs';
+import { buildNotifyEvent, consumeTurnStart, markTurnStart } from './core/notify.mjs';
+import {
+  NOTIFY_DEFAULT_THRESHOLD_SECONDS,
+  NOTIFY_DEFAULT_TRIGGER,
+  NOTIFY_PROVIDERS,
+  NOTIFY_TRIGGERS,
+  providerGuide,
+  providerLabel,
+  redactNotifyChannel,
+} from './shared/notify.mjs';
 import { scanSensitive } from './core/privacy.mjs';
 import { watchWork, writeWatchUpdate } from './work-watch.mjs';
 import {
@@ -45,7 +55,7 @@ import {
 import { WORK_SESSION_ENV, resolveWorkSession, workSessionKey } from './core/work-session.mjs';
 import { connectClaudeSessionEnvironment } from './adapters/session-environment.mjs';
 import { applyOperations, summarizeOperations } from './fs-operations.mjs';
-import { editText, readStdin, readTextInput } from './input.mjs';
+import { editText, interactive, promptLine, readStdin, readTextInput } from './input.mjs';
 import {
   MaterializeError,
   materializeCursor,
@@ -1239,6 +1249,200 @@ async function handlePrivacy({ rest, options, core, stdin, stdout }) {
   throw new UsageError('Use privacy show, set, scan, or retention.');
 }
 
+function triggerLabel(trigger, thresholdSeconds) {
+  if (trigger === 'always') return ct('매 턴마다');
+  if (trigger === 'changed-files') return ct('파일이 바뀐 턴만');
+  if (trigger === 'session-end') return ct('세션이 끝날 때만');
+  return `${ct('오래 걸린 턴만')} (${thresholdSeconds}${ct('초 이상')})`;
+}
+
+function describeNotifyChannel(channel) {
+  const summary = redactNotifyChannel(channel);
+  return [
+    `${summary.enabled ? '●' : '○'} ${summary.label} [${summary.id}]`,
+    `  ${providerLabel(summary.provider)} · ${summary.webhook}`,
+    `  ${ct('발송 조건')}: ${triggerLabel(summary.trigger, summary.thresholdSeconds)}`,
+  ].join('\n');
+}
+
+function renderProviderGuide(provider) {
+  const guide = providerGuide(provider, cliLanguage());
+  const steps = guide.steps.map((step, index) => `  ${index + 1}. ${step}`).join('\n');
+  return `${guide.title}\n${steps}\n  ${ct('예시')}: ${guide.example}`;
+}
+
+function notifyTriggerOption(options, fallback) {
+  const trigger = optionString(options, 'trigger', fallback);
+  if (trigger !== undefined && !NOTIFY_TRIGGERS.includes(trigger)) {
+    throw new UsageError(`--trigger must be one of: ${NOTIFY_TRIGGERS.join(', ')}`);
+  }
+  return trigger;
+}
+
+function notifyThresholdOption(options, fallback) {
+  const raw = optionString(options, 'threshold');
+  if (raw === undefined) return fallback;
+  const seconds = Number(raw);
+  if (!Number.isSafeInteger(seconds)) throw new UsageError('--threshold must be a whole number of seconds.');
+  return seconds;
+}
+
+async function resolveNotifyProvider(options, { stdin, stdout }) {
+  const provider = optionString(options, 'provider');
+  if (provider !== undefined) {
+    if (!NOTIFY_PROVIDERS.includes(provider)) {
+      throw new UsageError(`--provider must be one of: ${NOTIFY_PROVIDERS.join(', ')}`);
+    }
+    return provider;
+  }
+  if (!interactive(stdin)) {
+    throw new UsageError(`Provide --provider (${NOTIFY_PROVIDERS.join(' | ')}).`);
+  }
+  const choices = NOTIFY_PROVIDERS.map((name, index) => `  ${index + 1}) ${providerLabel(name)}`).join('\n');
+  writeText(stdout, `${ct('알림을 보낼 서비스를 고르세요.')}\n${choices}`);
+  const answer = await promptLine(`${ct('번호 또는 이름')} [1]: `, { input: stdin, output: stdout });
+  const selected = answer === '' ? NOTIFY_PROVIDERS[0]
+    : NOTIFY_PROVIDERS[Number(answer) - 1] ?? NOTIFY_PROVIDERS.find((name) => name === answer.toLowerCase());
+  if (!selected) throw new UsageError(`Provider must be one of: ${NOTIFY_PROVIDERS.join(', ')}`);
+  return selected;
+}
+
+/**
+ * Collects a webhook URL. When the value is missing the provider's setup steps
+ * are printed first, so the guide and the input live in one command instead of
+ * sending the user off to the docs.
+ */
+async function resolveNotifyWebhook(options, { provider, stdin, stdout }) {
+  const url = optionString(options, 'url');
+  if (url !== undefined) return url;
+  if (!interactive(stdin)) throw new UsageError('Provide --url with the webhook address.');
+  writeText(stdout, `\n${renderProviderGuide(provider)}\n`);
+  return promptLine(`${ct('웹훅 URL')}: `, { input: stdin, output: stdout });
+}
+
+async function handleNotify({ rest, options, core, stdin, stdout, jsonOutput }) {
+  const action = rest.shift() ?? 'status';
+
+  if (action === 'status' || action === 'list') {
+    assertOptions(options, []);
+    ensureNoExtra(rest, 'hnd notify status');
+    const { channels } = await core.notify.get();
+    if (jsonOutput) {
+      writeJson({ channels: channels.map((channel) => redactNotifyChannel(channel)) }, stdout);
+      return;
+    }
+    if (!channels.length) {
+      writeText(stdout, `${ct('등록된 알림 채널이 없습니다.')}\n${ct('다음 단계')}: hnd notify add`);
+      return;
+    }
+    writeText(stdout, channels.map((channel) => describeNotifyChannel(channel)).join('\n\n'));
+    return;
+  }
+
+  if (action === 'guide') {
+    assertOptions(options, ['provider']);
+    ensureNoExtra(rest, 'hnd notify guide [--provider slack|discord]');
+    const provider = optionString(options, 'provider');
+    if (provider !== undefined && !NOTIFY_PROVIDERS.includes(provider)) {
+      throw new UsageError(`--provider must be one of: ${NOTIFY_PROVIDERS.join(', ')}`);
+    }
+    const providers = provider === undefined ? NOTIFY_PROVIDERS : [provider];
+    if (jsonOutput) {
+      writeJson({ guides: providers.map((name) => providerGuide(name, cliLanguage())) }, stdout);
+      return;
+    }
+    writeText(stdout, providers.map((name) => renderProviderGuide(name)).join('\n\n'));
+    return;
+  }
+
+  if (action === 'add') {
+    assertOptions(options, ['provider', 'url', 'label', 'trigger', 'threshold', 'disabled']);
+    ensureNoExtra(rest, 'hnd notify add [--provider slack|discord] [--url URL]');
+    const provider = await resolveNotifyProvider(options, { stdin, stdout });
+    const webhookUrl = await resolveNotifyWebhook(options, { provider, stdin, stdout });
+    const result = await core.notify.add({
+      provider,
+      webhookUrl,
+      label: optionString(options, 'label'),
+      trigger: notifyTriggerOption(options, NOTIFY_DEFAULT_TRIGGER),
+      thresholdSeconds: notifyThresholdOption(options, NOTIFY_DEFAULT_THRESHOLD_SECONDS),
+      enabled: !optionBoolean(options, 'disabled'),
+    });
+    if (jsonOutput) writeJson(result.channel, stdout);
+    else {
+      writeText(stdout, `${ct('알림 채널을 추가했습니다.')}\n\n${describeNotifyChannel(
+        (await core.notify.find({ id: result.channel.id }))[0],
+      )}\n\n${ct('다음 단계')}: hnd notify test --channel ${result.channel.id}`);
+    }
+    return;
+  }
+
+  if (action === 'set') {
+    assertOptions(options, ['channel', 'url', 'label', 'trigger', 'threshold', 'enabled']);
+    ensureNoExtra(rest, 'hnd notify set --channel ID [--trigger T] [--threshold N]');
+    const patch = {
+      label: optionString(options, 'label'),
+      webhookUrl: optionString(options, 'url'),
+      trigger: notifyTriggerOption(options),
+      thresholdSeconds: notifyThresholdOption(options),
+    };
+    if (options.enabled !== undefined) patch.enabled = optionBoolean(options, 'enabled');
+    const result = await core.notify.update({
+      id: requireValue(optionString(options, 'channel'), '--channel'),
+      ...patch,
+    });
+    if (jsonOutput) writeJson(result.channel, stdout);
+    else writeText(stdout, `${ct('알림 채널을 수정했습니다.')}\n\n${describeNotifyChannel(
+      (await core.notify.find({ id: result.channel.id }))[0],
+    )}`);
+    return;
+  }
+
+  if (action === 'remove') {
+    assertOptions(options, ['channel']);
+    ensureNoExtra(rest, 'hnd notify remove --channel ID');
+    const result = await core.notify.remove({ id: requireValue(optionString(options, 'channel'), '--channel') });
+    if (jsonOutput) writeJson(result, stdout);
+    else writeText(stdout, `${ct('알림 채널을 삭제했습니다.')}: ${result.removed}`);
+    return;
+  }
+
+  if (action === 'test') {
+    assertOptions(options, ['channel']);
+    ensureNoExtra(rest, 'hnd notify test [--channel ID]');
+    const channels = await core.notify.find({ id: optionString(options, 'channel') });
+    if (!channels.length) throw new UsageError('No notification channel is configured. Run hnd notify add.');
+    const event = {
+      phase: 'stop',
+      agentLabel: 'hnd notify test',
+      repository: path.basename(process.cwd()),
+      branch: '',
+      changed: false,
+      changedCount: null,
+      elapsedSeconds: null,
+      title: ct('알림 연결 테스트'),
+      currentState: ct('이 메시지가 보이면 알림 설정이 끝난 것입니다.'),
+      nextStep: '',
+    };
+    // `always` bypasses the configured trigger so a test never silently no-ops
+    // on a channel that is waiting for a long turn.
+    const result = await core.notify.send({
+      event,
+      language: cliLanguage(),
+      channels: channels.map((channel) => ({ ...channel, enabled: true, trigger: 'always' })),
+    });
+    if (jsonOutput) writeJson(result, stdout);
+    else {
+      writeText(stdout, result.results.map((entry) => (entry.delivered
+        ? `${ct('전송 성공')}: ${entry.id}`
+        : `${ct('전송 실패')}: ${entry.id} (${entry.reason})`)).join('\n'));
+    }
+    return;
+  }
+
+  throw new UsageError('Use notify status, guide, add, set, remove, or test.');
+}
+
 async function runHookAutomaticSync({ core, agent, phase, payload, env, stderr }) {
   try {
     if (!await core.sync.get()) {
@@ -1288,6 +1492,44 @@ async function renewHookWork({ cwd, env, sessionKey, agent, stderr }) {
     if (!optionalMaterializationErrors.has(error?.code)) {
       writeText(stderr, `hnd hook: work heartbeat unavailable (${error.code || error.name || 'ERROR'}).`);
     }
+  }
+}
+
+const AGENT_LABELS = Object.freeze({ claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' });
+
+/**
+ * Posts the end-of-turn notification. Every failure here is reported to stderr
+ * and swallowed: a webhook outage must never fail the agent's turn.
+ */
+async function notifyFromHook({ agent, phase, cwd, capture, env, sessionKey, stderr }) {
+  let elapsedSeconds = null;
+  try {
+    // The marker is always consumed, even when no channel is configured, so a
+    // later turn can never inherit a stale start time.
+    elapsedSeconds = await consumeTurnStart({ env, agent, sessionKey });
+    const notifyCore = createCore({ env, cwd, sessionKey, agent });
+    const { channels } = await notifyCore.notify.get();
+    if (!channels.length) return null;
+    const work = await notifyCore.handoff.show().catch(() => null);
+    const event = buildNotifyEvent({
+      phase,
+      agentLabel: AGENT_LABELS[agent] ?? agent,
+      repository: cwd ? path.basename(cwd) : '',
+      branch: capture?.checkpoint?.branch,
+      changed: capture?.changed === true,
+      changedCount: capture?.checkpoint?.totalChanges,
+      elapsedSeconds,
+      work,
+    });
+    const result = await notifyCore.notify.send({ event, language: cliLanguage(), channels });
+    const failed = result.results.filter((entry) => !entry.delivered);
+    if (failed.length) {
+      writeText(stderr, `hnd hook: notification not delivered (${failed.map((entry) => `${entry.id}:${entry.reason}`).join(', ')}).`);
+    }
+    return result;
+  } catch (error) {
+    writeText(stderr, `hnd hook: notifications unavailable (${error.code || error.name || 'ERROR'}).`);
+    return null;
   }
 }
 
@@ -1549,6 +1791,10 @@ async function mainImpl(argv = process.argv.slice(2), {
     return handlePrivacy({ rest: positionals, options, core, stdin, stdout });
   }
 
+  if (command === 'notify') {
+    return handleNotify({ rest: positionals, options, core, stdin, stdout, jsonOutput });
+  }
+
   if (command === 'repo') {
     const subcommand = positionals.shift();
     if (subcommand === 'list') {
@@ -1782,12 +2028,13 @@ async function mainImpl(argv = process.argv.slice(2), {
       if (phase === 'stop' || phase === 'precompact') {
         for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr });
       }
+      const captures = new Map();
       try {
         if (await core.auto.get()) {
           for (const hookCwd of hookCwds) {
             try {
               const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
-              await hookCore.auto.capture({ agent });
+              captures.set(hookCwd, await hookCore.auto.capture({ agent }));
             } catch (error) {
               if (!optionalMaterializationErrors.has(error?.code)) {
                 writeText(
@@ -1803,6 +2050,17 @@ async function mainImpl(argv = process.argv.slice(2), {
           stderr,
           `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
         );
+      }
+      if (phase === 'stop' || phase === 'end') {
+        await notifyFromHook({
+          agent,
+          phase,
+          cwd: hookCwds[0],
+          capture: captures.get(hookCwds[0]) ?? null,
+          env: runtimeEnv,
+          sessionKey: hookSessionKey,
+          stderr,
+        });
       }
       await suggestKnowledgeFromSession({
         core,
@@ -1828,6 +2086,11 @@ async function mainImpl(argv = process.argv.slice(2), {
       // Stop hooks require valid JSON on stdout. SessionEnd output is advisory and can stay empty.
       if (phase === 'stop') stdout.write('{}\n');
       return;
+    }
+    // A turn's start time is what separates a quick answer from a long build.
+    // It is recorded before any network work so a slow sync cannot skew it.
+    if (phase === 'prompt') {
+      await markTurnStart({ env: runtimeEnv, agent, sessionKey: hookSessionKey });
     }
     await runHookAutomaticSync({
       core,

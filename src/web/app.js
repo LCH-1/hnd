@@ -1,6 +1,7 @@
 import { api, setCsrfToken } from "./api.js";
 import {
   applyAccountLanguage,
+  currentLanguage,
   languagePreference,
   setLanguagePreference,
   startI18n,
@@ -21,6 +22,16 @@ import {
   resetBrowserWorkspaceCache,
   SnapshotDataStore,
 } from "./snapshot-data.js";
+import {
+  NOTIFY_DEFAULT_THRESHOLD_SECONDS,
+  NOTIFY_DEFAULT_TRIGGER,
+  NOTIFY_MAX_CHANNELS,
+  maskWebhookUrl,
+  providerGuide,
+  providerLabel,
+  validNotifyChannel,
+  webhookUrlProblem,
+} from "../shared/notify.mjs";
 import { createPasskey, getPasskey } from "./webauthn.js";
 import {
   adoptBrowserVaultKey,
@@ -98,6 +109,7 @@ const state = {
   adminUserOffset: 0,
   adminUserSearch: "",
   adminUsersRequest: 0,
+  notifyChannels: [],
   offlineBoot: false,
   offlineAccessEpoch: null,
   pendingRecoveryCodes: [],
@@ -1699,6 +1711,7 @@ async function loadSettings() {
   if (adminTab) await loadAdminUsers();
   else {
     await loadAppSettings();
+    await loadNotifySettings();
     if (userCanManageAccounts()) await loadAccountManagement();
     else setHidden($("#account-management"), true);
   }
@@ -1813,6 +1826,137 @@ async function loadAppSettings() {
     showNotice($("#app-settings-error"), error.message, "error");
   }
   refreshSelectPickers();
+}
+
+function notifyTriggerText(channel) {
+  if (channel.trigger === "always") return t("매 턴마다");
+  if (channel.trigger === "changed-files") return t("파일이 바뀐 턴만");
+  if (channel.trigger === "session-end") return t("세션이 끝날 때만");
+  return `${t("오래 걸린 턴만")} · ${channel.thresholdSeconds}${t("초 이상")}`;
+}
+
+function renderNotifyChannels(channels) {
+  const list = $("#notify-channel-list");
+  clearChildren(list);
+  for (const channel of channels) {
+    const row = element("li", { className: "notify-channel-row", attrs: { "data-channel-id": channel.id } });
+    const copy = element("div", { className: "notify-channel-copy" });
+    copy.append(
+      element("strong", { text: channel.label }),
+      element("span", { className: "notify-channel-meta", text: `${providerLabel(channel.provider)} · ${maskWebhookUrl(channel.webhookUrl)}` }),
+      element("span", { className: "notify-channel-meta", text: notifyTriggerText(channel) }),
+    );
+    const summary = element("div", { className: "notify-channel-summary" });
+    summary.append(copy, element("span", {
+      className: `notify-channel-state${channel.enabled ? "" : " is-disabled"}`,
+      text: channel.enabled ? "켜짐" : "꺼짐",
+    }));
+    const actions = element("div", { className: "notify-channel-actions", attrs: { role: "group", "aria-label": channel.label } });
+    for (const [action, text, danger] of [
+      ["edit", "수정", false],
+      ["toggle", channel.enabled ? "끄기" : "켜기", false],
+      ["remove", "삭제", true],
+    ]) {
+      actions.append(element("button", {
+        className: `text-button${danger ? " danger" : ""}`,
+        text: t(text),
+        attrs: { type: "button", "data-notify-action": action },
+      }));
+    }
+    row.append(summary, actions);
+    list.append(row);
+  }
+}
+
+async function loadNotifySettings() {
+  const status = $("#notify-settings-status");
+  showNotice($("#notify-settings-error"));
+  try {
+    if (!state.dataStore) throw new Error("알림 설정을 사용하려면 보관함을 먼저 열어 주세요.");
+    const { notify } = await state.dataStore.appSettings();
+    state.notifyChannels = notify.channels;
+    renderNotifyChannels(notify.channels);
+    $("#notify-add").disabled = notify.channels.length >= NOTIFY_MAX_CHANNELS;
+    status.textContent = notify.channels.length
+      ? t("저장한 설정은 다음 동기화부터 적용됩니다.")
+      : t("등록된 알림 채널이 없습니다.");
+  } catch (error) {
+    state.notifyChannels = [];
+    clearChildren($("#notify-channel-list"));
+    $("#notify-add").disabled = true;
+    status.textContent = t("알림 설정을 불러오지 못했습니다.");
+    showNotice($("#notify-settings-error"), error.message, "error");
+  }
+}
+
+/** Writes the whole channel list back; the caller owns the edit it applied. */
+async function saveNotifyChannels(channels) {
+  await state.dataStore.updateAppSettings({ notify: { channels } });
+  await loadNotifySettings();
+  toast(localSaveMessage(t("알림 설정을 저장했습니다.")));
+}
+
+function renderNotifyGuide(provider) {
+  const guide = providerGuide(provider, currentLanguage());
+  $("#notify-guide-title").textContent = guide.title;
+  const steps = $("#notify-guide-steps");
+  clearChildren(steps);
+  for (const step of guide.steps) steps.append(element("li", { text: step }));
+  $("#notify-guide-example").textContent = guide.example;
+  $("#notify-form").elements.namedItem("webhookUrl").placeholder = guide.example;
+}
+
+function updateNotifyFormFields() {
+  const form = $("#notify-form");
+  const editing = Boolean(form.elements.namedItem("id").value);
+  renderNotifyGuide(form.elements.namedItem("provider").value);
+  setHidden($('[data-notify-field="threshold"]', form), form.elements.namedItem("trigger").value !== "long-turn");
+  // An existing webhook is never sent back to the form, so an empty field on
+  // edit means "keep the stored address" rather than "clear it".
+  form.elements.namedItem("webhookUrl").required = !editing;
+  $("#notify-webhook-help").textContent = editing
+    ? t("비워 두면 저장된 주소를 그대로 사용합니다.")
+    : t("주소는 이 보관함에만 저장합니다.");
+  refreshSelectPickers();
+}
+
+function openNotifyDialog(channel) {
+  const dialog = $("#notify-dialog");
+  const form = $("#notify-form");
+  form.reset();
+  showNotice($(".notice", form));
+  form.elements.namedItem("id").value = channel?.id ?? "";
+  form.elements.namedItem("provider").value = channel?.provider ?? "slack";
+  form.elements.namedItem("webhookUrl").value = "";
+  form.elements.namedItem("label").value = channel?.label ?? "";
+  form.elements.namedItem("trigger").value = channel?.trigger ?? NOTIFY_DEFAULT_TRIGGER;
+  form.elements.namedItem("thresholdSeconds").value = String(channel?.thresholdSeconds ?? NOTIFY_DEFAULT_THRESHOLD_SECONDS);
+  form.elements.namedItem("enabled").value = String(channel?.enabled ?? true);
+  $("#notify-dialog-title").textContent = channel ? t("알림 채널 수정") : t("알림 채널 추가");
+  updateNotifyFormFields();
+  dialog.showModal();
+}
+
+function readNotifyForm(existing) {
+  const form = $("#notify-form");
+  const provider = form.elements.namedItem("provider").value;
+  const entered = form.elements.namedItem("webhookUrl").value.trim();
+  const webhookUrl = entered || existing?.webhookUrl || "";
+  const problem = webhookUrlProblem(provider, webhookUrl);
+  if (problem === "missing") throw new Error(t("웹훅 URL을 입력하세요."));
+  if (problem === "not_https") throw new Error(t("웹훅 주소는 https여야 합니다."));
+  if (problem) throw new Error(`${providerLabel(provider)} ${t("웹훅 주소 형식이 아닙니다.")}`);
+  const channel = {
+    id: existing?.id ?? crypto.randomUUID().slice(0, 8),
+    provider,
+    label: form.elements.namedItem("label").value.trim().slice(0, 60) || providerLabel(provider),
+    webhookUrl,
+    enabled: form.elements.namedItem("enabled").value === "true",
+    trigger: form.elements.namedItem("trigger").value,
+    thresholdSeconds: Number(form.elements.namedItem("thresholdSeconds").value),
+  };
+  if (!validNotifyChannel(channel)) throw new Error(t("알림 설정 값이 올바르지 않습니다."));
+  return channel;
 }
 
 const dialogFormStates = new WeakMap();
@@ -3588,6 +3732,69 @@ $("#admin-users-list").addEventListener("click", async (event) => {
       : "웹 로그인을 다시 허용합니다. 사용자는 새로 로그인해야 합니다.";
   if (!await confirmAction(`${t(label)} · ${user.username}`, t(description), t(label), disable ? "danger" : "normal")) return;
   await updateAdminUser(user.id, action === "sessions" ? { revokeSessions: true } : { status: disable ? "disabled" : "active" }, button);
+});
+$("#notify-add").addEventListener("click", () => openNotifyDialog(null));
+$("#notify-form").addEventListener("change", (event) => {
+  if (["provider", "trigger"].includes(event.target.name)) updateNotifyFormFields();
+});
+$("#notify-channel-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-notify-action]");
+  if (!button) return;
+  const id = button.closest("[data-channel-id]")?.dataset.channelId;
+  const channel = state.notifyChannels.find((candidate) => candidate.id === id);
+  if (!channel) return;
+  const action = button.dataset.notifyAction;
+  if (action === "edit") {
+    openNotifyDialog(channel);
+    return;
+  }
+  setBusy(button, true);
+  showNotice($("#notify-settings-error"));
+  try {
+    if (action === "remove") {
+      const confirmed = await confirmAction(
+        `${t("알림 채널 삭제")} · ${channel.label}`,
+        t("이 채널로 더 이상 알림을 보내지 않습니다. 웹훅 자체는 Slack이나 Discord에서 따로 지워야 합니다."),
+        t("삭제"),
+        "danger",
+      );
+      if (!confirmed) return;
+      await saveNotifyChannels(state.notifyChannels.filter((candidate) => candidate.id !== id));
+      return;
+    }
+    await saveNotifyChannels(state.notifyChannels.map((candidate) => (
+      candidate.id === id ? { ...candidate, enabled: !candidate.enabled } : candidate
+    )));
+  } catch (error) {
+    showNotice($("#notify-settings-error"), error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+});
+$("#notify-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('[type="submit"]');
+  const notice = $(".notice", form);
+  showNotice(notice);
+  setBusy(button, true, t("저장 중…"));
+  try {
+    const id = form.elements.namedItem("id").value;
+    const existing = state.notifyChannels.find((candidate) => candidate.id === id);
+    const channel = readNotifyForm(existing);
+    const channels = existing
+      ? state.notifyChannels.map((candidate) => (candidate.id === id ? channel : candidate))
+      : [...state.notifyChannels, channel];
+    if (channels.some((candidate) => candidate.id !== channel.id && candidate.webhookUrl === channel.webhookUrl)) {
+      throw new Error(t("이미 등록된 웹훅 주소입니다."));
+    }
+    await saveNotifyChannels(channels);
+    $("#notify-dialog").close();
+  } catch (error) {
+    showNotice(notice, error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
 });
 $("#app-settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();

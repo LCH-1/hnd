@@ -1,4 +1,4 @@
-const CACHE_NAME = "hnd-app-shell-v37";
+const CACHE_NAME = "hnd-app-shell-v39";
 const APP_DOCUMENT = "/home";
 const isAppNavigation = (pathname) => /^\/(?:app(?:\/.*)?|home\/?|project(?:\/[a-zA-Z0-9._-]+)?\/?|rule\/?|work\/?|knowledge\/?|device\/?|history\/?|security\/?|settings(?:\/admin)?\/?)$/.test(pathname);
 const APP_ASSETS = Object.freeze([
@@ -12,6 +12,7 @@ const APP_ASSETS = Object.freeze([
   "/web/app.js",
   "/web/app-routes.js",
   "/shared/app-settings.mjs",
+  "/shared/notify.mjs",
   "/web/select-picker.js",
   "/web/connector-release.js",
   "/web/snapshot-data.js",

@@ -236,10 +236,10 @@ function storeOptions(cache, remote, localRules = null) {
 test('app settings remain opt-in, persist across browsers, and preserve other workspace files', async () => {
   const remote = immediateRemote({ schemaVersion: 1, files: [textFile('policies/global.md', 'Keep this rule.')] });
   const first = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
-  assert.deepEqual(await first.appSettings(), { schemaVersion: 1, workRecording: 'manual', autoSave: true, knowledgeSuggestions: false });
+  assert.deepEqual(await first.appSettings(), { schemaVersion: 1, workRecording: 'manual', autoSave: true, knowledgeSuggestions: false, notify: { channels: [] } });
   await first.updateAppSettings({ workRecording: 'automatic', autoSave: false });
   const second = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
-  assert.deepEqual(await second.appSettings(), { schemaVersion: 1, workRecording: 'automatic', autoSave: false, knowledgeSuggestions: false });
+  assert.deepEqual(await second.appSettings(), { schemaVersion: 1, workRecording: 'automatic', autoSave: false, knowledgeSuggestions: false, notify: { channels: [] } });
   assert.equal(remote.inspect().snapshot.files.find(file => file.path === 'policies/global.md').content, Buffer.from('Keep this rule.').toString('base64'));
   await assert.rejects(first.updateAppSettings({ workRecording: 'unknown' }), /올바르지/u);
   await assert.rejects(first.updateAppSettings({ signupMode: 'open' }), /올바르지/u);

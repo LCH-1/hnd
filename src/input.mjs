@@ -55,6 +55,31 @@ export async function readStdin(
   return readTextStream(stream, { maxBytes, label: 'Standard input' });
 }
 
+export function interactive(stream = process.stdin) {
+  return Boolean(stream?.isTTY);
+}
+
+/**
+ * Reads one answer from an attached terminal. Callers must check `interactive()`
+ * first: in a pipeline there is nobody to answer, and silently blocking a hook
+ * or a script would be worse than failing with usage guidance.
+ */
+export async function promptLine(question, {
+  input = process.stdin,
+  output = process.stdout,
+  maxBytes = 4096,
+} = {}) {
+  if (!interactive(input)) throw new UsageError('This command needs an interactive terminal.');
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(question);
+    return assertWithinLimit(answer.trim(), maxBytes, 'Answer');
+  } finally {
+    rl.close();
+  }
+}
+
 export async function readTextInput(options, {
   required = true,
   stream = process.stdin,

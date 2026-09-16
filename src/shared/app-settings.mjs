@@ -1,9 +1,12 @@
 // Shared, dependency-free contract for the browser and installed connector.
+import { NOTIFY_DEFAULTS, effectiveNotifySettings, validNotifySettings } from './notify.mjs';
+
 export const APP_SETTINGS_PATH = 'app-settings.json';
 export const APP_SETTINGS_DEFAULTS = Object.freeze({
   workRecording: 'manual',
   autoSave: true,
   knowledgeSuggestions: false,
+  notify: NOTIFY_DEFAULTS,
 });
 
 export function validAppSettings(value) {
@@ -12,7 +15,8 @@ export function validAppSettings(value) {
     && Object.keys(value).every((key) => key === 'schemaVersion' || Object.hasOwn(APP_SETTINGS_DEFAULTS, key))
     && (value.workRecording === undefined || ['manual', 'automatic'].includes(value.workRecording))
     && (value.autoSave === undefined || typeof value.autoSave === 'boolean')
-    && (value.knowledgeSuggestions === undefined || typeof value.knowledgeSuggestions === 'boolean');
+    && (value.knowledgeSuggestions === undefined || typeof value.knowledgeSuggestions === 'boolean')
+    && validNotifySettings(value.notify);
 }
 
 export function effectiveAppSettings(value = {}, localConfig = {}) {
@@ -21,6 +25,9 @@ export function effectiveAppSettings(value = {}, localConfig = {}) {
     autoSave: localConfig.autoSave !== false,
     knowledgeSuggestions: localConfig.knowledgeSuggestions === true,
     ...value,
+    // Frozen defaults must never be handed out as a live reference, and a
+    // partially written channel list must never reach the sender.
+    notify: effectiveNotifySettings(value.notify),
     schemaVersion: 1,
   };
 }

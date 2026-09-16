@@ -5,6 +5,14 @@ import { withStateLock } from './mutation-lock.mjs';
 import { workSessionKey } from './work-session.mjs';
 import { inspectWorkCoordination, acknowledgeWorkEvents, heartbeatWorkSession } from './work-coordination.mjs';
 import { getPrivacyPolicy, setPrivacyPolicy, previewRetention, applyRetention, collectionAllowed } from './privacy.mjs';
+import {
+  addNotifyChannel,
+  findNotifyChannel,
+  getNotifySettings,
+  notifyForEvent,
+  removeNotifyChannel,
+  updateNotifyChannel,
+} from './notify.mjs';
 import { automaticSessionCandidate } from './knowledge-transfer.mjs';
 import { getSemanticSearchConfig, configureSemanticSearch } from './semantic-search.mjs';
 import {
@@ -292,6 +300,16 @@ export function createCore({ env = process.env, cwd = process.cwd(), clock = Dat
       inspect: (options = {}) => locked(() => inspectWorkCoordination(withDefaults(options, defaults, { cwd: true }))),
       ack: (options = {}) => locked(() => acknowledgeWorkEvents(withDefaults(options, defaults))),
       heartbeat: (options = {}) => locked(() => heartbeatWorkSession(withDefaults(options, defaults, { cwd: true }))),
+    }),
+    notify: Object.freeze({
+      // Sending is deliberately outside the state lock: a slow webhook must not
+      // block a checkpoint or another session's mutation.
+      get: () => locked(() => getNotifySettings({ env })),
+      add: (options = {}) => locked(() => addNotifyChannel({ ...options, env })),
+      update: (options = {}) => locked(() => updateNotifyChannel({ ...options, env })),
+      remove: (options = {}) => locked(() => removeNotifyChannel({ ...options, env })),
+      find: (options = {}) => locked(() => findNotifyChannel({ ...options, env })),
+      send: (options = {}) => notifyForEvent({ ...options, env }),
     }),
     privacy: Object.freeze({
       get: (options = {}) => locked(() => getPrivacyPolicy(withDefaults(options, defaults, { cwd: true }))),

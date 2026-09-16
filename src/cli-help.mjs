@@ -14,6 +14,7 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
   hnd know find QUERY                오래 남긴 지식 검색
   hnd work watch --sync              작업 변경 구독
   hnd privacy show                  수집 제외·보존 정책 확인
+  hnd notify status                  작업 완료 알림 채널 확인
   hnd lang show                      현재 언어 확인
 
 프로젝트를 지금 직접 등록하려면 Git 저장소에서 hnd init을 실행합니다.
@@ -25,6 +26,7 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
   hnd work help      작업 인계
   hnd know help      장기 지식
   hnd privacy help   수집·민감정보·보존
+  hnd notify help    Slack·Discord 작업 완료 알림
   hnd sync help      자동 동기화·복구
   hnd setup help     PC 연결·에이전트 설정
   hnd advanced help  진단·내부·이전 호환 명령
@@ -50,6 +52,7 @@ Everyday commands:
   hnd know find QUERY                Search long-term knowledge
   hnd work watch --sync              Subscribe to work changes
   hnd privacy show                  Show capture and retention policy
+  hnd notify status                  Show turn completion notification channels
   hnd lang show                      Show the current language
 
 Run hnd init in a Git repository to register it immediately.
@@ -61,6 +64,7 @@ Topic help:
   hnd work help      Work handoff
   hnd know help      Long-term knowledge
   hnd privacy help   Collection, secrets, and retention
+  hnd notify help    Slack and Discord turn completion notifications
   hnd sync help      Automatic sync and recovery
   hnd setup help     PC connection and agent setup
   hnd advanced help  Diagnostics, internals, and legacy commands
@@ -450,6 +454,34 @@ const TOPICS = Object.freeze({
   setup: SETUP_HELP,
   advanced: ADVANCED_HELP,
   lang: LANG_HELP,
+  notify: `hnd notify — 작업 완료 알림 (Slack·Discord)
+
+  hnd notify status                                    등록한 채널 확인
+  hnd notify guide [--provider slack|discord]          웹훅 만드는 방법
+  hnd notify add [--provider slack|discord] [--url URL]
+      [--label NAME] [--trigger always|long-turn|changed-files|session-end]
+      [--threshold 60] [--disabled]
+  hnd notify set --channel ID [--url URL] [--label NAME]
+      [--trigger T] [--threshold N] [--enabled true|false]
+  hnd notify remove --channel ID
+  hnd notify test [--channel ID]                       실제로 한 건 보내기
+
+--provider나 --url을 빼면 터미널에서 웹훅 만드는 순서를 안내하고 값을 물어봅니다.
+웹으로 설정하려면 설정 화면의 작업 완료 알림에서 같은 항목을 관리합니다.
+
+발송 조건:
+  long-turn      --threshold 초보다 오래 걸린 턴만 (기본값, 60초)
+  changed-files  Git 변경이 있었던 턴만
+  session-end    세션이 끝날 때 한 번만
+  always         매 턴마다 (에이전트는 턴마다 멈추므로 알림이 잦습니다)
+
+Claude Code·Codex·Cursor의 stop/SessionEnd 훅에서 보냅니다. 룰이 아니라 훅이므로
+모델이 지시를 따르는지와 무관하게 동작합니다.
+웹훅 주소는 종단간 암호화된 설정에만 저장하고 룰이나 프롬프트에는 넣지 않습니다.
+서버는 내용을 읽을 수 없습니다. hooks.slack.com과 discord.com 주소만 허용합니다.
+메시지에는 저장소·브랜치·소요 시간과 hnd work 기록 요약이 들어가며,
+알려진 형식의 credential은 보내기 전에 가림 처리합니다.
+`,
   privacy: `hnd privacy — 자동 수집·민감정보·보존
 
   hnd privacy show
@@ -526,6 +558,34 @@ Experimental knowledge (excluded from shared search/context until adopted):
   hnd know branch diff EXPERIMENT_ID
   hnd know branch adopt EXPERIMENT_ID --expect DIFF_REVISION
 Adoption rejects changed bases. No Git branches are created or modified.
+`,
+    notify: `hnd notify — turn completion notifications (Slack, Discord)
+
+  hnd notify status
+  hnd notify guide [--provider slack|discord]
+  hnd notify add [--provider slack|discord] [--url URL]
+      [--label NAME] [--trigger always|long-turn|changed-files|session-end]
+      [--threshold 60] [--disabled]
+  hnd notify set --channel ID [--url URL] [--label NAME]
+      [--trigger T] [--threshold N] [--enabled true|false]
+  hnd notify remove --channel ID
+  hnd notify test [--channel ID]
+
+Omit --provider or --url and the command prints the webhook setup steps, then asks for the value.
+The same channels are managed in the web app under settings.
+
+Triggers:
+  long-turn      only turns longer than --threshold seconds (default, 60)
+  changed-files  only turns with Git changes
+  session-end    once, when the session ends
+  always         every turn (agents stop after each one, so this is frequent)
+
+Delivered from the stop and SessionEnd hooks of Claude Code, Codex, and Cursor. Because
+this is a hook rather than a rule, it does not depend on the model following an instruction.
+Webhook addresses are stored only in the end-to-end encrypted settings, never in a rule or
+prompt. The server cannot read them. Only hooks.slack.com and discord.com hosts are accepted.
+Messages carry the repository, branch, elapsed time, and a summary of the hnd work record;
+credentials in known formats are masked before sending.
 `,
     privacy: `hnd privacy — collection, sensitive data, and retention
 
