@@ -54,6 +54,7 @@ import {
   renderLiveContextSnapshot,
 } from './core/live-context.mjs';
 import { WORK_SESSION_ENV, resolveWorkSession, workSessionKey } from './core/work-session.mjs';
+import { setProcessLockDeadline } from './core/mutation-lock.mjs';
 import { connectClaudeSessionEnvironment } from './adapters/session-environment.mjs';
 import { applyOperations, summarizeOperations } from './fs-operations.mjs';
 import { editText, interactive, promptLine, readStdin, readTextInput } from './input.mjs';
@@ -2022,6 +2023,9 @@ async function mainImpl(argv = process.argv.slice(2), {
     // state lock several times in sequence, and separate budgets would sum past
     // the vendor timeout even though each wait looked short enough.
     const hookLockDeadline = Date.now() + hookLockBudgetMs(agent, phase === 'precompact' ? 'stop' : phase);
+    // Also enforced process-wide: the sync and restore paths take the state
+    // lock from many places that never receive this deadline as an argument.
+    setProcessLockDeadline(hookLockDeadline);
     const hookSessionKey = liveContextSessionKey(agent, payload, runtimeEnv);
     // The core built before command dispatch still carries the default 15s lock
     // wait, which alone overruns every hook budget. Rebind it to this hook's

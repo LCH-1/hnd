@@ -18,6 +18,29 @@ export function restoreJournalPath(env = process.env) {
 // before a lease is reclaimed. What it does bound is how long the lock stays
 // poisoned after an unclean kill, which is the only case that reaches it.
 const STATE_LOCK_STALE_MS = 60_000;
+const MINIMUM_LOCK_WAIT_MS = 50;
+
+// A process-wide ceiling on every state-lock wait, set once by a caller that
+// runs under an external deadline. Threading a timeout through every call site
+// is not enough: the sync and restore paths take this lock from a dozen places,
+// and one missed argument is all it takes to be killed mid-operation again.
+let processLockDeadlineAt = null;
+
+/** Pass null to clear. Only a process dedicated to one bounded task may set it. */
+export function setProcessLockDeadline(deadlineAt) {
+  processLockDeadlineAt = Number.isFinite(deadlineAt) ? deadlineAt : null;
+}
+
+export function processLockDeadline() {
+  return processLockDeadlineAt;
+}
+
+function boundedTimeout(timeoutMs, now = Date.now()) {
+  if (processLockDeadlineAt === null) return timeoutMs;
+  // Never zero: an uncontended lock should still be taken once the budget is
+  // spent, and publishing it costs a single syscall.
+  return Math.max(MINIMUM_LOCK_WAIT_MS, Math.min(timeoutMs, processLockDeadlineAt - now));
+}
 
 export function withStateLock(
   callback,
@@ -28,6 +51,7 @@ export function withStateLock(
     allowRestoreJournal = false,
   } = {},
 ) {
+  timeoutMs = boundedTimeout(timeoutMs);
   return withFileLock(
     path.join(statePaths(env).locks, 'state-generation.lock'),
     async () => {

@@ -9,7 +9,7 @@ import { hookLockBudgetMs } from '../src/adapters/index.mjs';
 import { CLAUDE_HOOK_TIMEOUT_SECONDS } from '../src/adapters/claude.mjs';
 import { CODEX_HOOK_TIMEOUT_SECONDS } from '../src/adapters/codex.mjs';
 import { createCore } from '../src/core/index.mjs';
-import { withStateLock } from '../src/core/mutation-lock.mjs';
+import { processLockDeadline, setProcessLockDeadline, withStateLock } from '../src/core/mutation-lock.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-hook-lock-'));
@@ -85,6 +85,38 @@ test('sequential lock attempts share one deadline instead of each getting the fu
   await holder;
 
   assert.equal(waited < CLAUDE_HOOK_TIMEOUT_SECONDS.prompt * 1_000, true, `four attempts took ${waited}ms, past the 2s vendor timeout`);
+});
+
+test('the process deadline bounds lock waits that were never given a timeout', async (t) => {
+  const { env } = await fixture(t);
+  t.after(() => setProcessLockDeadline(null));
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const holder = withStateLock(() => held, { env, timeoutMs: 10_000 });
+  await new Promise((resolve) => { setTimeout(resolve, 150); });
+
+  // The sync and restore paths take this lock from a dozen places that pass no
+  // timeout at all, so they inherit the 15s default. Threading an argument into
+  // every one of them is what a missed call site would silently undo; the
+  // process-wide ceiling covers them without being passed anywhere.
+  setProcessLockDeadline(Date.now() + 700);
+  const started = Date.now();
+  await assert.rejects(withStateLock(() => 'unreachable', { env }), (error) => error.code === 'STATE_BUSY');
+  const waited = Date.now() - started;
+  release();
+  await holder;
+
+  assert.equal(waited < 2_000, true, `an untimed wait took ${waited}ms despite a 700ms process deadline`);
+});
+
+test('clearing the process deadline restores the default wait', async (t) => {
+  const { env } = await fixture(t);
+  t.after(() => setProcessLockDeadline(null));
+  setProcessLockDeadline(Date.now() + 500);
+  setProcessLockDeadline(null);
+  assert.equal(processLockDeadline(), null);
+  // With no deadline the lock is taken normally, not refused.
+  assert.equal(await withStateLock(() => 'acquired', { env }), 'acquired');
 });
 
 test('the default state lock wait is unchanged for ordinary CLI callers', async (t) => {
