@@ -1023,3 +1023,27 @@ test('launcher falls back to the packaged CLI when no cached runtime is usable',
   assert.match(stdout.text(), /^\d+\.\d+\.\d+\n$/);
   assert.equal(stderr.text(), '');
 });
+
+test('the update check interval is tunable per device within a safe range', async () => {
+  const { configuredUpdateIntervalMs, DEFAULT_UPDATE_INTERVAL_MS, MIN_UPDATE_INTERVAL_MS, MAX_UPDATE_INTERVAL_MS } =
+    await import('../src/update/client.mjs');
+
+  // The default is the delay between publishing a fix and devices running it,
+  // so it is measured in one hour rather than a working day.
+  assert.equal(DEFAULT_UPDATE_INTERVAL_MS, 60 * 60 * 1000);
+  assert.equal(configuredUpdateIntervalMs({}), DEFAULT_UPDATE_INTERVAL_MS);
+  assert.equal(configuredUpdateIntervalMs({ HND_UPDATE_INTERVAL_MINUTES: '15' }), 15 * 60_000);
+
+  // A too-small value would turn every routine command into a polling loop.
+  assert.equal(configuredUpdateIntervalMs({ HND_UPDATE_INTERVAL_MINUTES: '1' }), MIN_UPDATE_INTERVAL_MS);
+  assert.equal(configuredUpdateIntervalMs({ HND_UPDATE_INTERVAL_MINUTES: '99999' }), MAX_UPDATE_INTERVAL_MS);
+
+  // Garbage must fall back to the default, never to "never check again".
+  for (const value of ['', '   ', 'abc', '-5', '0', 'NaN', 'Infinity']) {
+    assert.equal(
+      configuredUpdateIntervalMs({ HND_UPDATE_INTERVAL_MINUTES: value }),
+      DEFAULT_UPDATE_INTERVAL_MS,
+      `"${value}" should fall back to the default`,
+    );
+  }
+});

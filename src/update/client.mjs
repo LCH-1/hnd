@@ -20,7 +20,25 @@ import {
   writeUpdateState,
 } from './state.mjs';
 
-export const DEFAULT_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// How long a device waits before asking the server whether a newer signed
+// runtime exists. A check is one small manifest fetch, so this is not about
+// server load; it is the delay between publishing a fix and devices running it.
+export const DEFAULT_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+export const MIN_UPDATE_INTERVAL_MS = 5 * 60 * 1000;
+export const MAX_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Per-device override, in minutes, clamped to a sane range. A value below the
+ * floor would turn routine commands into a polling loop; an unparseable one
+ * falls back to the default rather than disabling checks silently.
+ */
+export function configuredUpdateIntervalMs(env = process.env) {
+  const raw = env.HND_UPDATE_INTERVAL_MINUTES;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_UPDATE_INTERVAL_MS;
+  const minutes = Number(String(raw).trim());
+  if (!Number.isFinite(minutes) || minutes <= 0) return DEFAULT_UPDATE_INTERVAL_MS;
+  return Math.min(MAX_UPDATE_INTERVAL_MS, Math.max(MIN_UPDATE_INTERVAL_MS, Math.round(minutes * 60_000)));
+}
 const MAX_MANIFEST_BYTES = 32 * 1024;
 const MAX_DEVICE_TOKEN_BYTES = 512;
 
@@ -274,8 +292,9 @@ export async function applyConnectorUpdate(options = {}) {
 export async function updateDue({
   env = process.env,
   now = Date.now(),
-  intervalMs = DEFAULT_UPDATE_INTERVAL_MS,
+  intervalMs,
 } = {}) {
+  if (intervalMs === undefined) intervalMs = configuredUpdateIntervalMs(env);
   const remote = await readEnrolledRemote(env);
   if (!remote) return false;
   const state = await readUpdateState(env);
