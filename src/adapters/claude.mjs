@@ -10,6 +10,17 @@ import {
   stripNestedHandler,
 } from './common.mjs';
 
+// The timeouts Claude Code enforces on each hook, in seconds. They are the
+// budget every hook phase has to finish in, so they are declared once here and
+// reused both when writing settings.json and when sizing internal waits.
+export const CLAUDE_HOOK_TIMEOUT_SECONDS = Object.freeze({
+  start: 5,
+  prompt: 2,
+  stop: 5,
+  precompact: 5,
+  end: 5,
+});
+
 export const CLAUDE_EVENT = 'SessionStart';
 export const CLAUDE_MATCHER = 'startup|resume|clear|compact|fork';
 export const CLAUDE_PROMPT_EVENT = 'UserPromptSubmit';
@@ -21,7 +32,7 @@ export function createClaudeHook(commands) {
   return {
     type: 'command',
     command: commands.start.host,
-    timeout: 5,
+    timeout: CLAUDE_HOOK_TIMEOUT_SECONDS.start,
     statusMessage: HND_HOOK_STATUS,
   };
 }
@@ -30,7 +41,7 @@ export function createClaudePromptHook(commands) {
   return {
     type: 'command',
     command: commands.prompt.host,
-    timeout: 2,
+    timeout: CLAUDE_HOOK_TIMEOUT_SECONDS.prompt,
     statusMessage: HND_RULE_REFRESH_STATUS,
   };
 }
@@ -40,7 +51,7 @@ export function createClaudeCheckpointHook(commands, phase) {
   return {
     type: 'command',
     command: commands[phase].host,
-    timeout: 5,
+    timeout: CLAUDE_HOOK_TIMEOUT_SECONDS[phase],
     statusMessage: HND_CHECKPOINT_STATUS,
   };
 }

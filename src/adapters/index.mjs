@@ -22,6 +22,7 @@ import {
 } from './common.mjs';
 import {
   CLAUDE_EVENT,
+  CLAUDE_HOOK_TIMEOUT_SECONDS,
   CLAUDE_MATCHER,
   CLAUDE_PROMPT_EVENT,
   claudeAdapter,
@@ -35,6 +36,7 @@ import {
 } from './claude.mjs';
 import {
   CODEX_EVENT,
+  CODEX_HOOK_TIMEOUT_SECONDS,
   CODEX_MATCHER,
   CODEX_PROMPT_EVENT,
   codexAdapter,
@@ -48,6 +50,7 @@ import {
 } from './codex.mjs';
 import {
   CURSOR_EVENT,
+  CURSOR_HOOK_TIMEOUT_SECONDS,
   CURSOR_PROMPT_EVENT,
   createCursorHook,
   cursorAdapter,
@@ -449,3 +452,31 @@ export const install = planInstall;
 export const uninstall = planUninstall;
 export const preview = previewAdapters;
 export const doctor = doctorAdapters;
+
+const HOOK_TIMEOUT_SECONDS = Object.freeze({
+  claude: CLAUDE_HOOK_TIMEOUT_SECONDS,
+  codex: CODEX_HOOK_TIMEOUT_SECONDS,
+  cursor: CURSOR_HOOK_TIMEOUT_SECONDS,
+});
+// Half the vendor budget. The other half has to cover process startup, the
+// work the hook actually exists to do, and writing its response.
+const HOOK_LOCK_BUDGET_RATIO = 0.5;
+const MIN_HOOK_LOCK_BUDGET_MS = 250;
+const MAX_HOOK_LOCK_BUDGET_MS = 5_000;
+
+/**
+ * How long a hook may wait for the shared state lock before giving up.
+ *
+ * A hook that waits past its vendor timeout is killed mid-operation, and a
+ * process killed while holding the state lock poisons it for every other
+ * session until the lease expires. Failing fast degrades one hook; being killed
+ * degrades every session that follows.
+ */
+export function hookLockBudgetMs(agent, phase = 'start') {
+  const seconds = HOOK_TIMEOUT_SECONDS[agent]?.[phase];
+  if (!Number.isFinite(seconds)) return MIN_HOOK_LOCK_BUDGET_MS;
+  return Math.min(
+    MAX_HOOK_LOCK_BUDGET_MS,
+    Math.max(MIN_HOOK_LOCK_BUDGET_MS, Math.round(seconds * 1_000 * HOOK_LOCK_BUDGET_RATIO)),
+  );
+}

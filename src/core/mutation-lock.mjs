@@ -13,12 +13,18 @@ export function restoreJournalPath(env = process.env) {
  * Specialized locks still protect their own read/modify/write records; this
  * outer lock provides a consistent generation boundary across those records.
  */
+// A live holder refreshes the lease every staleMs/3, so this bound does not cut
+// long operations short — PID liveness and the heartbeat both have to lapse
+// before a lease is reclaimed. What it does bound is how long the lock stays
+// poisoned after an unclean kill, which is the only case that reaches it.
+const STATE_LOCK_STALE_MS = 60_000;
+
 export function withStateLock(
   callback,
   {
     env = process.env,
     timeoutMs = 15_000,
-    staleMs = 5 * 60_000,
+    staleMs = STATE_LOCK_STALE_MS,
     allowRestoreJournal = false,
   } = {},
 ) {

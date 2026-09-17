@@ -160,13 +160,42 @@ async function validateHandoffCandidate(candidate, defaults) {
   });
 }
 
+const MINIMUM_LOCK_WAIT_MS = 50;
+
 /**
  * Bound local core used by the CLI. Raw functions are exported below for tests
  * and integrations that prefer explicit env/cwd/clock parameters.
  */
-export function createCore({ env = process.env, cwd = process.cwd(), clock = Date, sessionKey, sessionId, agent } = {}) {
+export function createCore({
+  env = process.env,
+  cwd = process.cwd(),
+  clock = Date,
+  sessionKey,
+  sessionId,
+  agent,
+  // Callers that run under an external deadline — hooks, above all — pass the
+  // time they can afford to spend waiting for the shared state lock. Waiting
+  // past that deadline means being killed mid-operation, which leaves the lock
+  // held by a dead process and blocks every other session until it expires.
+  lockTimeoutMs,
+  // An absolute deadline shared by every lock this core takes. A single hook
+  // makes several separate acquisitions in sequence, so a per-acquisition
+  // timeout would still add up past the caller's real budget.
+  lockDeadlineAt,
+} = {}) {
   const defaults = { env, cwd, clock, agent, sessionKey: workSessionKey({ sessionKey, sessionId, agent, env }) };
-  const locked = (callback) => withStateLock(callback, { env });
+  const lockWaitMs = () => {
+    if (Number.isFinite(lockDeadlineAt)) {
+      // Never zero: a lock that happens to be free should still be taken even
+      // once the budget is spent, and publishing it costs a single syscall.
+      return Math.max(MINIMUM_LOCK_WAIT_MS, lockDeadlineAt - clock.now());
+    }
+    return Number.isFinite(lockTimeoutMs) ? lockTimeoutMs : undefined;
+  };
+  const locked = (callback) => {
+    const timeoutMs = lockWaitMs();
+    return withStateLock(callback, { env, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+  };
   const workMutation = (callback) => locked(async () => {
     const result = await callback();
     try {

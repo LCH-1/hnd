@@ -6,6 +6,16 @@ import {
   jsonEquals,
 } from './common.mjs';
 
+// Cursor does not accept a per-hook timeout in hooks.json, so these are not
+// written to the configuration. They are the conservative budget hnd assumes
+// when sizing its own internal waits for a Cursor hook.
+export const CURSOR_HOOK_TIMEOUT_SECONDS = Object.freeze({
+  start: 5,
+  prompt: 5,
+  stop: 5,
+  end: 5,
+});
+
 export const CURSOR_EVENT = 'sessionStart';
 export const CURSOR_PROMPT_EVENT = 'beforeSubmitPrompt';
 export const CURSOR_STOP_EVENT = 'stop';

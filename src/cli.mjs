@@ -20,7 +20,7 @@ import {
   VERSION,
 } from './constants.mjs';
 import { createCore } from './core/index.mjs';
-import { buildNotifyEvent, consumeTurnStart, markTurnStart } from './core/notify.mjs';
+import { buildNotifyEvent, consumeTurnStart, getNotifySettings, markTurnStart } from './core/notify.mjs';
 import {
   NOTIFY_DEFAULT_THRESHOLD_SECONDS,
   NOTIFY_DEFAULT_TRIGGER,
@@ -40,6 +40,7 @@ import {
 } from './core/knowledge-transfer.mjs';
 import {
   buildAdapterOperations,
+  hookLockBudgetMs,
   hookOutputObject,
   inspectAdapters,
   renderHookOutput,
@@ -1470,11 +1471,11 @@ async function runHookAutomaticSync({ core, agent, phase, payload, env, stderr }
   }
 }
 
-async function acknowledgeHookWork({ composition, sessionKey, cwd, env, agent, stderr }) {
+async function acknowledgeHookWork({ composition, sessionKey, cwd, env, agent, stderr, lockDeadlineAt }) {
   const snapshot = composition?.coordination;
   if (!sessionKey || snapshot?.omitted || !snapshot?.deliveredEventIds?.length) return;
   try {
-    await createCore({ env, cwd, sessionKey, agent }).work.ack({
+    await createCore({ env, cwd, sessionKey, agent, lockDeadlineAt }).work.ack({
       repoId: snapshot.repoId, epoch: snapshot.eventCursor.epoch, eventIds: snapshot.deliveredEventIds,
     });
   } catch (error) {
@@ -1483,10 +1484,10 @@ async function acknowledgeHookWork({ composition, sessionKey, cwd, env, agent, s
   }
 }
 
-async function renewHookWork({ cwd, env, sessionKey, agent, stderr }) {
+async function renewHookWork({ cwd, env, sessionKey, agent, stderr, lockDeadlineAt }) {
   if (!sessionKey) return;
   try {
-    const result = await createCore({ env, cwd, sessionKey, agent }).work.heartbeat();
+    const result = await createCore({ env, cwd, sessionKey, agent, lockDeadlineAt }).work.heartbeat();
     if (result.lost.length) writeText(stderr, 'hnd hook: work ownership expired or was taken over; inspect hnd work session before saving.');
   } catch (error) {
     if (!optionalMaterializationErrors.has(error?.code)) {
@@ -1501,15 +1502,19 @@ const AGENT_LABELS = Object.freeze({ claude: 'Claude Code', codex: 'Codex', curs
  * Posts the end-of-turn notification. Every failure here is reported to stderr
  * and swallowed: a webhook outage must never fail the agent's turn.
  */
-async function notifyFromHook({ agent, phase, cwd, capture, env, sessionKey, stderr }) {
+async function notifyFromHook({ agent, phase, cwd, capture, env, sessionKey, stderr, lockDeadlineAt }) {
   let elapsedSeconds = null;
   try {
     // The marker is always consumed, even when no channel is configured, so a
     // later turn can never inherit a stale start time.
     elapsedSeconds = await consumeTurnStart({ env, agent, sessionKey });
-    const notifyCore = createCore({ env, cwd, sessionKey, agent });
-    const { channels } = await notifyCore.notify.get();
+    // Read the channel list straight from disk rather than through the state
+    // lock. It is a single file with no cross-record invariant, and taking the
+    // generation lock here would make every stop hook contend with every other
+    // session even when no channel is configured at all.
+    const { channels } = await getNotifySettings({ env });
     if (!channels.length) return null;
+    const notifyCore = createCore({ env, cwd, sessionKey, agent, lockDeadlineAt });
     const work = await notifyCore.handoff.show().catch(() => null);
     const event = buildNotifyEvent({
       phase,
@@ -1543,12 +1548,12 @@ function hookKnowledgeQuery(payload) {
   return '';
 }
 
-async function suggestKnowledgeFromSession({ core, agent, phase, payload, cwd, env, stderr, sessionKey }) {
+async function suggestKnowledgeFromSession({ core, agent, phase, payload, cwd, env, stderr, sessionKey, lockDeadlineAt }) {
   if (!['end', 'precompact'].includes(phase)) return null;
   const sessionId = [payload?.session_id, payload?.sessionId, payload?.conversation_id]
     .find((value) => typeof value === 'string' && value.trim());
   try {
-    const hookCore = createCore({ env, cwd, sessionKey, agent });
+    const hookCore = createCore({ env, cwd, sessionKey, agent, lockDeadlineAt });
     const saved = await hookCore.auto.suggest({ payload, agent, sourceSessionId: sessionId });
     if (!saved) return null;
     writeText(stderr, `hnd: saved a knowledge candidate for review (${saved.id}).`);
@@ -1580,8 +1585,8 @@ async function runMutationAutomaticSync({ core, env }) {
   }
 }
 
-async function ensureHookRepository({ cwd, env }) {
-  const hookCore = createCore({ env, cwd });
+async function ensureHookRepository({ cwd, env, lockDeadlineAt }) {
+  const hookCore = createCore({ env, cwd, lockDeadlineAt });
   const resolved = await hookCore.repo.resolve({ create: true });
   if (resolved.environment === undefined) {
     // Migrate a legacy device-wide selection once, otherwise give each newly
@@ -1592,11 +1597,11 @@ async function ensureHookRepository({ cwd, env }) {
   return resolved;
 }
 
-async function refreshCursorHookRoots({ hookCwds, env, stderr }) {
+async function refreshCursorHookRoots({ hookCwds, env, stderr, lockDeadlineAt }) {
   for (const hookCwd of hookCwds) {
     try {
       // This file belongs to the checkout, not to the hook's calling session.
-      const content = (await createCore({ env, cwd: hookCwd }).compose({
+      const content = (await createCore({ env, cwd: hookCwd, lockDeadlineAt }).compose({
         createRepository: false,
         fastRepository: true,
         sharedWorkOnly: true,
@@ -2011,7 +2016,23 @@ async function mainImpl(argv = process.argv.slice(2), {
       throw new UsageError('PreCompact is currently supported by the Claude adapter only.');
     }
     const payload = await parseHookInput(stdin);
+    // Every state-lock wait inside this hook is bounded by the vendor's own
+    // timeout for this phase. Exceeding it means being killed mid-operation.
+    // One deadline for the whole hook, not per acquisition: a hook takes the
+    // state lock several times in sequence, and separate budgets would sum past
+    // the vendor timeout even though each wait looked short enough.
+    const hookLockDeadline = Date.now() + hookLockBudgetMs(agent, phase === 'precompact' ? 'stop' : phase);
     const hookSessionKey = liveContextSessionKey(agent, payload, runtimeEnv);
+    // The core built before command dispatch still carries the default 15s lock
+    // wait, which alone overruns every hook budget. Rebind it to this hook's
+    // deadline before anything in this branch reads shared state.
+    const hookScopedCore = createCore({
+      env: runtimeEnv,
+      cwd: invocationCwd,
+      sessionKey: hookSessionKey,
+      agent,
+      lockDeadlineAt: hookLockDeadline,
+    });
     if (agent === 'claude' && phase === 'start') {
       try {
         await connectClaudeSessionEnvironment({ sessionKey: hookSessionKey, env: runtimeEnv });
@@ -2026,14 +2047,14 @@ async function mainImpl(argv = process.argv.slice(2), {
     );
     if (!['start', 'prompt'].includes(phase)) {
       if (phase === 'stop' || phase === 'precompact') {
-        for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr });
+        for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr, lockDeadlineAt: hookLockDeadline });
       }
       const captures = new Map();
       try {
-        if (await core.auto.get()) {
+        if (await hookScopedCore.auto.get()) {
           for (const hookCwd of hookCwds) {
             try {
-              const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
+              const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent, lockDeadlineAt: hookLockDeadline });
               captures.set(hookCwd, await hookCore.auto.capture({ agent }));
             } catch (error) {
               if (!optionalMaterializationErrors.has(error?.code)) {
@@ -2060,10 +2081,11 @@ async function mainImpl(argv = process.argv.slice(2), {
           env: runtimeEnv,
           sessionKey: hookSessionKey,
           stderr,
+          lockDeadlineAt: hookLockDeadline,
         });
       }
       await suggestKnowledgeFromSession({
-        core,
+        core: hookScopedCore,
         agent,
         phase,
         payload,
@@ -2071,9 +2093,10 @@ async function mainImpl(argv = process.argv.slice(2), {
         env: runtimeEnv,
         stderr,
         sessionKey: hookSessionKey,
+        lockDeadlineAt: hookLockDeadline,
       });
       await runHookAutomaticSync({
-        core,
+        core: hookScopedCore,
         agent,
         phase,
         payload,
@@ -2081,7 +2104,7 @@ async function mainImpl(argv = process.argv.slice(2), {
         stderr,
       });
       if (agent === 'cursor') {
-        await refreshCursorHookRoots({ hookCwds, env: runtimeEnv, stderr });
+        await refreshCursorHookRoots({ hookCwds, env: runtimeEnv, stderr, lockDeadlineAt: hookLockDeadline });
       }
       // Stop hooks require valid JSON on stdout. SessionEnd output is advisory and can stay empty.
       if (phase === 'stop') stdout.write('{}\n');
@@ -2093,7 +2116,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       await markTurnStart({ env: runtimeEnv, agent, sessionKey: hookSessionKey });
     }
     await runHookAutomaticSync({
-      core,
+      core: hookScopedCore,
       agent,
       phase,
       payload,
@@ -2102,7 +2125,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     });
     const hookCwd = hookCwds[0];
     try {
-      await ensureHookRepository({ cwd: hookCwd, env: runtimeEnv });
+      await ensureHookRepository({ cwd: hookCwd, env: runtimeEnv, lockDeadlineAt: hookLockDeadline });
     } catch (error) {
       if (!optionalMaterializationErrors.has(error?.code)) {
         writeText(
@@ -2115,9 +2138,9 @@ async function mainImpl(argv = process.argv.slice(2), {
     let content = '';
     let contextAvailable = false;
     let primaryError = null;
-    await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr });
+    await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr, lockDeadlineAt: hookLockDeadline });
     try {
-      const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent });
+      const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent, lockDeadlineAt: hookLockDeadline });
       composition = await hookCore.compose({
         createRepository: false,
         fastRepository: true,
@@ -2129,7 +2152,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     } catch (error) {
       primaryError = error;
       try {
-        const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd });
+        const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, lockDeadlineAt: hookLockDeadline });
         composition = await hookCore.compose({ globalOnly: true, createRepository: false });
         content = composition.content;
         contextAvailable = true;
@@ -2193,7 +2216,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       const eventName = 'UserPromptSubmit';
       const rendered = renderHookOutput(agent, delivery?.changed ? delivery.content : content, eventName);
       stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
-      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
+      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
       return;
     }
     if (agent === 'cursor' && delivery?.sessionKey) {
@@ -2203,12 +2226,12 @@ async function mainImpl(argv = process.argv.slice(2), {
         [WORK_SESSION_ENV]: delivery.sessionKey,
       };
       stdout.write(`${JSON.stringify(rendered)}\n`);
-      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
+      await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
       return;
     }
     const rendered = renderHookOutput(agent, content);
     stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
-    await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr });
+    await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
     return;
   }
 

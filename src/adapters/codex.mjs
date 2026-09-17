@@ -10,6 +10,15 @@ import {
   stripNestedHandler,
 } from './common.mjs';
 
+// Codex enforces its own per-hook timeouts, in seconds. Declared once so the
+// installed configuration and the internal wait budget cannot drift apart.
+export const CODEX_HOOK_TIMEOUT_SECONDS = Object.freeze({
+  start: 10,
+  prompt: 5,
+  stop: 10,
+  end: 3,
+});
+
 export const CODEX_EVENT = 'SessionStart';
 export const CODEX_MATCHER = 'startup|resume|clear|compact';
 export const CODEX_PROMPT_EVENT = 'UserPromptSubmit';
@@ -25,7 +34,7 @@ export function createCodexHook(commands) {
     // `commandWindows`.
     command: commands.start.host,
     commandWindows: commands.start.windows,
-    timeout: 10,
+    timeout: CODEX_HOOK_TIMEOUT_SECONDS.start,
     statusMessage: HND_HOOK_STATUS,
     // hnd enforces its own 32 KiB composition cap.
     additionalContextLimit: 0,
@@ -37,7 +46,7 @@ export function createCodexPromptHook(commands) {
     type: 'command',
     command: commands.prompt.host,
     commandWindows: commands.prompt.windows,
-    timeout: 5,
+    timeout: CODEX_HOOK_TIMEOUT_SECONDS.prompt,
     statusMessage: HND_RULE_REFRESH_STATUS,
     additionalContextLimit: 0,
   };
@@ -49,7 +58,7 @@ export function createCodexCheckpointHook(commands, phase) {
     type: 'command',
     command: commands[phase].host,
     commandWindows: commands[phase].windows,
-    timeout: phase === 'end' ? 3 : 10,
+    timeout: CODEX_HOOK_TIMEOUT_SECONDS[phase],
     statusMessage: HND_CHECKPOINT_STATUS,
   };
 }
