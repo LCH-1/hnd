@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import { DEFAULT_ENVIRONMENT, STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { normalizeFsPath, repositoryPaths, statePaths } from '../paths.mjs';
-import { detectGitCheckout, detectGitRepository } from './git.mjs';
+import { detectWorkspace } from './workspace.mjs';
 import { CoreError } from './errors.mjs';
 import {
   readJson,
@@ -27,6 +27,8 @@ function clone(value) {
 
 function publicGit(git) {
   return {
+    available: git.available,
+    ...(git.unavailableReason ? { unavailableReason: git.unavailableReason } : {}),
     root: git.root,
     worktree: git.worktree,
     commonDirectory: git.commonDirectory,
@@ -152,7 +154,7 @@ export async function resolveRepositoryBinding({
   clock = Date,
 } = {}) {
   await initializeState({ env, clock });
-  const git = await detectGitCheckout(cwd);
+  const git = await detectWorkspace(cwd, { env, fast: true });
   const { index, bindings } = await readStores(env);
   const binding = bindings.bindings[normalizeFsPath(git.root)];
   if (!binding) {
@@ -197,7 +199,7 @@ export async function resolveRepository({
   name,
 } = {}) {
   await initializeState({ env, clock });
-  const git = await detectGitRepository(cwd);
+  const git = await detectWorkspace(cwd, { env });
   const state = statePaths(env);
 
   return withFileLock(path.join(state.locks, 'repositories.lock'), async () => {
@@ -309,7 +311,7 @@ export async function initializeRepository({
   if (existing) {
     return {
       ...existing,
-      git: publicGit(await detectGitRepository(cwd)),
+      git: publicGit(await detectWorkspace(cwd, { env })),
       match: 'binding',
       registrationStatus: 'existing',
       environment: existing.environment === undefined
@@ -347,7 +349,7 @@ export async function setRepositoryEnvironment(
 ) {
   const selected = validateEnvironmentLabel(environment, { optional: true });
   await initializeState({ env, clock });
-  const git = await detectGitCheckout(cwd);
+  const git = await detectWorkspace(cwd, { env, fast: true });
   const state = statePaths(env);
   return withFileLock(path.join(state.locks, 'repositories.lock'), async () => {
     const { bindings } = await readStores(env);
@@ -379,7 +381,7 @@ export async function registerRepository({
   allowRemoteCollision = false,
 } = {}) {
   await initializeState({ env, clock });
-  const git = await detectGitRepository(cwd);
+  const git = await detectWorkspace(cwd, { env });
   const state = statePaths(env);
 
   return withFileLock(path.join(state.locks, 'repositories.lock'), async () => {
@@ -423,7 +425,7 @@ export async function linkRepository({
 } = {}) {
   assertRepositoryId(repoId);
   await initializeState({ env, clock });
-  const git = await detectGitRepository(cwd);
+  const git = await detectWorkspace(cwd, { env });
   const state = statePaths(env);
 
   return withFileLock(path.join(state.locks, 'repositories.lock'), async () => {
@@ -506,7 +508,7 @@ export async function unlinkRepositoryPath({
   clock = Date,
 } = {}) {
   await initializeState({ env, clock });
-  const git = await detectGitRepository(cwd);
+  const git = await detectWorkspace(cwd, { env });
   const state = statePaths(env);
   return withFileLock(path.join(state.locks, 'repositories.lock'), async () => {
     const bindings = await readJson(state.bindings, { validate: validateBindings });

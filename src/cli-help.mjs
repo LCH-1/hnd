@@ -3,7 +3,7 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
 처음 한 번:
   1. HND 웹의 [기기 → PC 연결]에서 만든 명령 실행
   2. hnd setup
-  3. Git 프로젝트에서 AI 세션 시작 (프로젝트 자동 등록)
+  3. 프로젝트 폴더에서 AI 세션 시작 (프로젝트 자동 등록)
 
 평소에 필요한 명령:
   hnd status                         현재 프로젝트·환경·동기화 확인
@@ -17,7 +17,8 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
   hnd notify status                  작업 완료 알림 채널 확인
   hnd lang show                      현재 언어 확인
 
-프로젝트를 지금 직접 등록하려면 Git 저장소에서 hnd init을 실행합니다.
+프로젝트를 지금 직접 등록하려면 프로젝트 폴더에서 hnd init을 실행합니다.
+Git 설치나 git init 없이도 룰·작업·지식을 사용할 수 있습니다.
 진행 상태 저장과 서버 동기화는 기본적으로 자동입니다.
 
 주제별 도움말:
@@ -41,7 +42,7 @@ const HELP_EN = `hnd — shared rules and progress for coding agents
 One-time setup:
   1. Run the command created under [Devices → Connect PC] in the HND web app
   2. hnd setup
-  3. Start an AI session in a Git project (the project is registered automatically)
+  3. Start an AI session in a project folder (the project is registered automatically)
 
 Everyday commands:
   hnd status                         Check the current project, environment, and sync
@@ -55,7 +56,8 @@ Everyday commands:
   hnd notify status                  Show turn completion notification channels
   hnd lang show                      Show the current language
 
-Run hnd init in a Git repository to register it immediately.
+Run hnd init in a project folder to register it immediately.
+Rules, work, and knowledge work without installing Git or running git init.
 Progress capture and server sync are automatic by default.
 
 Topic help:
@@ -78,7 +80,7 @@ Version: hnd --version
 const PROJECT_HELP = `hnd project — 프로젝트 등록과 환경
 
 권장 흐름:
-  Git 저장소에서 Claude Code·Codex·Cursor 세션을 시작하면 자동 등록됩니다.
+  프로젝트 폴더에서 Claude Code·Codex·Cursor 세션을 시작하면 자동 등록됩니다.
   즉시 직접 등록하거나 자동 등록을 확인하려면 아래 명령을 사용합니다.
 
   hnd init [--cwd DIR] [--env LABEL]        최초 등록 (기존 설정은 변경하지 않음)
@@ -94,6 +96,9 @@ const PROJECT_HELP = `hnd project — 프로젝트 등록과 환경
   hnd repo unlink [--cwd DIR]
 
 같은 원격 Git 저장소라도 prod/test 체크아웃마다 다른 환경을 선택할 수 있습니다.
+Git 없는 폴더는 등록한 경로와 하위 폴더를 같은 프로젝트로 사용합니다.
+다른 PC나 경로에서 기존 프로젝트를 연결하려면 ID를 확인한 뒤 repo link ID --force를 사용합니다.
+Git이 없으면 브랜치·커밋·변경 파일 체크포인트만 생략합니다.
 `;
 
 const RULE_HELP = `hnd rule — 에이전트가 따라야 할 룰
@@ -150,7 +155,8 @@ const WORK_HELP = `hnd work — 에이전트 사이 작업 인계
   hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
   hnd work unblock [TASK]
 
-Git 진행 상태는 자동 저장됩니다. work는 결정, 다음 단계, 열린 질문처럼
+Git을 사용할 수 있는 저장소에서는 Git 진행 상태가 자동 저장됩니다.
+Git 없이도 work로 결정, 다음 단계, 열린 질문처럼
 사람이 보강해야 할 인계 내용을 남길 때 사용합니다.
 
 같은 프로젝트의 작업 목록은 공유합니다. 현재 작업은 세션별로 선택합니다.
@@ -189,7 +195,7 @@ const KNOW_HELP = `hnd know — 오래 남길 지식
   hnd know duplicates [--threshold 0.65]
   hnd know merge TARGET_ID SOURCE_ID
 
-repo와 env는 현재 Git 프로젝트를 사용합니다. env는 --environment를 생략하면
+repo와 env는 현재 프로젝트를 사용합니다. env는 --environment를 생략하면
 현재 체크아웃에서 선택한 환경을 사용합니다.
 승인된 관련 지식 3~5개와 고정 지식만 현재 질문에 맞춰 자동으로 전달됩니다.
 대화 전문은 수집하지 않습니다. 세션 제안도 직접 켜야 하며 승인 전에는 전달되지 않습니다.
@@ -269,7 +275,7 @@ const TOPICS_EN = Object.freeze({
   project: `hnd project — project registration and environments
 
 Recommended flow:
-  Starting Claude Code, Codex, or Cursor in a Git repository registers it automatically.
+  Starting Claude Code, Codex, or Cursor in a project folder registers it automatically.
   Use these commands to register immediately or inspect automatic registration.
 
   hnd init [--cwd DIR] [--env LABEL]        First-time registration (keeps existing settings)
@@ -285,6 +291,9 @@ Occasional commands:
   hnd repo unlink [--cwd DIR]
 
 Separate prod and test checkouts of the same Git remote can select different environments.
+Without Git, the registered folder and its subdirectories share one project.
+To connect another PC or path, verify the project ID and use repo link ID --force.
+Only branch, commit, and changed-file checkpoints are skipped without Git.
 `,
   rule: `hnd rule — instructions agents must follow
 
@@ -339,7 +348,8 @@ Usage:
   hnd work block [TASK] --reason TEXT [--unblock-when TEXT]
   hnd work unblock [TASK]
 
-Git progress is captured automatically. Use work for decisions, next steps, open questions,
+Git progress is captured automatically when Git is usable in the repository.
+Without Git, use work for decisions, next steps, open questions,
 and other context that needs a human explanation.
 
 Project work is shared; current selection is session-local. Codex/Cursor shell identities
@@ -371,7 +381,7 @@ Usage:
   hnd know duplicates [--threshold 0.65]
   hnd know merge TARGET_ID SOURCE_ID
 
-Scope defaults to all. Repo and env scopes use the current Git repository; env also uses
+Scope defaults to all. Repo and env scopes use the current project; env also uses
 the checkout's selected environment unless --environment is provided.
 Only approved relevant records (normally 3–5) and pinned knowledge are selected for a prompt.
 HND does not collect transcripts. Session suggestions are opt-in and stay out of context until approved.

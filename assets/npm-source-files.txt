@@ -37,6 +37,7 @@ src/core/semantic-search.mjs
 src/core/state.mjs
 src/core/work-coordination.mjs
 src/core/work-session.mjs
+src/core/workspace.mjs
 src/fs-operations.mjs
 src/input.mjs
 src/launcher-version.mjs

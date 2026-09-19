@@ -325,7 +325,7 @@ async function resolveRepoAndGit({
 }) {
   if (repository) {
     if (requireGit && !git) {
-      throw new CoreError('WORKTREE_REQUIRED', 'This operation requires Git checkout context');
+      throw new CoreError('WORKTREE_REQUIRED', 'This operation requires workspace context');
     }
     return { repository, git: git ?? null };
   }
@@ -337,7 +337,7 @@ async function resolveRepoAndGit({
   if (repoId) {
     const repository = await getRepository({ repoId, env, clock });
     if (requireGit) {
-      throw new CoreError('WORKTREE_REQUIRED', 'This operation requires cwd for Git context');
+      throw new CoreError('WORKTREE_REQUIRED', 'This operation requires cwd for workspace context');
     }
     return { repository, git: null };
   }

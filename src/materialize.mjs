@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { applyOperations } from './fs-operations.mjs';
+import { detectWorkspace, findGitBoundary } from './core/workspace.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -216,20 +217,46 @@ export function isManagedCursorRule(content) {
   return typeof content === 'string' && content.startsWith(CURSOR_RULE_PREFIX);
 }
 
-export async function resolveCursorMaterializationPaths(cwd = process.cwd()) {
-  const requested = path.resolve(cwd);
-  const rootSource = await runGit(requested, ['rev-parse', '--show-toplevel']);
-  const root = await fs.realpath(rootSource);
+export async function resolveCursorMaterializationPaths(cwd = process.cwd(), { env = process.env } = {}) {
+  const workspace = await detectWorkspace(cwd, { env, fast: true });
+  const { root } = workspace;
+  const ignore = path.join(root, '.gitignore');
+  await assertManagedDirectoryChain(root, ['.cursor', 'rules']);
+  if (!workspace.available) {
+    if (await findGitBoundary(root)) {
+      // Without Git we cannot verify that a rule in an existing repository is
+      // untracked. Keep private context out of that path until Git is usable.
+      throw new MaterializeError(workspace.unavailableReason,
+        'Cannot verify whether the Cursor rule is Git-tracked; workspace commands remain available.');
+    }
+    return Object.freeze({
+      root,
+      rule: path.join(root, ...CURSOR_RULE_RELATIVE_PATH.split('/')),
+      exclude: ignore,
+    });
+  }
   const commonSource = await runGit(root, ['rev-parse', '--git-common-dir']);
   const commonDirectory = await fs.realpath(path.resolve(root, commonSource));
   const infoDirectory = path.join(commonDirectory, 'info');
   await assertCursorRuleUntracked(root);
-  await assertManagedDirectoryChain(root, ['.cursor', 'rules']);
   await assertManagedDirectoryChain(commonDirectory, ['info']);
+
+  // A folder may have gained Git since its first setup. Keep using its owned
+  // block so uninstall can restore the original .gitignore bytes as well.
+  let ownedIgnore = false;
+  try {
+    const stat = await fs.lstat(ignore);
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      const file = await readRegularFile(ignore, { maxBytes: MAX_EXCLUDE_BYTES });
+      ownedIgnore = inspectExcludeBlock(file.content) !== null;
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   return Object.freeze({
     root,
     rule: path.join(root, ...CURSOR_RULE_RELATIVE_PATH.split('/')),
-    exclude: path.join(infoDirectory, 'exclude'),
+    exclude: ownedIgnore ? ignore : path.join(infoDirectory, 'exclude'),
   });
 }
 
@@ -257,8 +284,8 @@ function removeOperation({ filePath, previous, component, reason }) {
   };
 }
 
-export async function planCursorMaterialization({ cwd = process.cwd(), content } = {}) {
-  const paths = await resolveCursorMaterializationPaths(cwd);
+export async function planCursorMaterialization({ cwd = process.cwd(), content, env = process.env } = {}) {
+  const paths = await resolveCursorMaterializationPaths(cwd, { env });
   const [rule, exclude] = await Promise.all([
     readRegularFile(paths.rule, { optional: true }),
     readRegularFile(paths.exclude, { optional: true, maxBytes: MAX_EXCLUDE_BYTES }),
@@ -284,7 +311,7 @@ export async function planCursorMaterialization({ cwd = process.cwd(), content }
       previous: exclude.content,
       mode: exclude.mode ?? 0o600,
       component: 'cursor-exclude',
-      reason: `Exclude ${CURSOR_RULE_RELATIVE_PATH} without changing tracked repository files.`,
+      reason: `Exclude the private Cursor rule in ${paths.exclude}.`,
     }));
   }
 
@@ -302,8 +329,8 @@ export async function planCursorMaterialization({ cwd = process.cwd(), content }
   return Object.freeze({ paths, operations: Object.freeze(operations) });
 }
 
-export async function planCursorDematerialization({ cwd = process.cwd() } = {}) {
-  const paths = await resolveCursorMaterializationPaths(cwd);
+export async function planCursorDematerialization({ cwd = process.cwd(), env = process.env } = {}) {
+  const paths = await resolveCursorMaterializationPaths(cwd, { env });
   const [rule, exclude] = await Promise.all([
     readRegularFile(paths.rule, { optional: true }),
     readRegularFile(paths.exclude, { optional: true, maxBytes: MAX_EXCLUDE_BYTES }),

@@ -196,6 +196,7 @@ function findHookCwds(payload, fallback, cursorProjectDirectory) {
 }
 
 const optionalMaterializationErrors = new Set([
+  'GIT_UNAVAILABLE',
   'MATERIALIZE_NOT_GIT',
   'NOT_GIT_REPOSITORY',
   'REPOSITORY_NOT_REGISTERED',
@@ -209,13 +210,14 @@ async function planCurrentCursorMaterialization({
   action = 'install',
   core,
   cwd,
+  env,
   content,
   optional = false,
 } = {}) {
   try {
-    if (action === 'uninstall') return planCursorDematerialization({ cwd });
+    if (action === 'uninstall') return await planCursorDematerialization({ cwd, env });
     const effectiveContent = content ?? (await core.compose({ createRepository: false, sharedWorkOnly: true })).content;
-    return planCursorMaterialization({ cwd, content: effectiveContent });
+    return await planCursorMaterialization({ cwd, env, content: effectiveContent });
   } catch (error) {
     if (optional && isOptionalMaterializationError(error)) {
       return { paths: null, operations: [], skipped: error.code };
@@ -226,7 +228,7 @@ async function planCurrentCursorMaterialization({
 
 async function cursorFallbackEnabled({ cwd, env, execPath, binPath }) {
   try {
-    const existing = await planCursorDematerialization({ cwd });
+    const existing = await planCursorDematerialization({ cwd, env });
     if (existing.operations.length > 0) return true;
   } catch (error) {
     if (isOptionalMaterializationError(error)) return false;
@@ -249,7 +251,7 @@ async function refreshCursorAfterMutation({ core, cwd, env, execPath, binPath, f
       if (!force && !(await cursorFallbackEnabled({ cwd, env, execPath, binPath }))) {
         return { paths: null, operations: [], skipped: 'CURSOR_FALLBACK_DISABLED' };
       }
-      const planned = await planCurrentCursorMaterialization({ core, cwd, optional: true });
+      const planned = await planCurrentCursorMaterialization({ core, cwd, env, optional: true });
       if (planned.operations.length > 0) await applyOperations(planned.operations);
       return planned;
     });
@@ -1143,6 +1145,7 @@ async function handleAdapters({
           action,
           core,
           cwd,
+          env,
           optional: true,
         })
       : { operations: [] };
@@ -1179,11 +1182,16 @@ async function handleAdapters({
     }
     if (materialized.skipped) {
       const unregistered = materialized.skipped === 'REPOSITORY_NOT_REGISTERED';
-      writeText(stdout, unregistered
+      const unavailable = materialized.skipped === 'GIT_UNAVAILABLE';
+      writeText(stdout, unavailable
+        ? ct('Cursor 룰 설정 생략: 기존 Git 저장소의 추적 여부를 확인하려면 Git이 필요합니다.')
+        : unregistered
         ? ct('Cursor 룰 설정 생략: 등록되지 않은 프로젝트입니다.')
         : ct('Cursor 룰 설정 생략: Git 프로젝트 경로가 아닙니다.'));
       if (action === 'install') {
-        writeText(stdout, unregistered
+        writeText(stdout, unavailable
+          ? ct('룰·작업·지식 명령은 사용할 수 있습니다. Cursor 룰 파일은 Git 설치 후 hnd setup으로 갱신하세요.')
+          : unregistered
           ? ct('설정: hnd init 실행 후 hnd setup')
           : ct('설정: Git 프로젝트 경로에서 hnd init 실행 후 hnd setup'));
       }
@@ -1607,7 +1615,7 @@ async function refreshCursorHookRoots({ hookCwds, env, stderr, lockDeadlineAt })
         fastRepository: true,
         sharedWorkOnly: true,
       })).content;
-      await materializeCursor({ cwd: hookCwd, content });
+      await materializeCursor({ cwd: hookCwd, env, content });
     } catch (error) {
       if (!isOptionalMaterializationError(error)) {
         writeText(stderr, `hnd: Cursor fallback update failed (${error.code || error.name || 'ERROR'}).`);
@@ -1979,6 +1987,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     const context = await core.compose({ createRepository: false, sharedWorkOnly: true });
     const result = await materializeCursor({
       cwd: invocationCwd,
+      env: runtimeEnv,
       content: context.content,
       dryRun,
     });

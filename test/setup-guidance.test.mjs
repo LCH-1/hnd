@@ -120,11 +120,11 @@ test('setup reports an unregistered project separately from already-complete sha
   assert.doesNotMatch(repeated, /^Already configured/u);
 });
 
-test('setup outside Git explains the skipped project scope and how to complete it', async (t) => {
+test('setup in an unregistered plain folder explains how to register it', async (t) => {
   const item = await fixture(t);
   const output = await item.run(item.root, ['setup', '--dry-run']);
-  assert.match(output, /Cursor rules skipped: not in a Git project/u);
-  assert.match(output, /Setup: run hnd init in a Git project, then hnd setup/u);
+  assert.match(output, /Cursor rules skipped: project not registered/u);
+  assert.match(output, /Setup: run hnd init, then hnd setup/u);
   assert.doesNotMatch(output, /this Git repository is not registered/u);
 });
 

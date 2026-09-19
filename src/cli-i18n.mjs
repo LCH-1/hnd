@@ -116,6 +116,8 @@ const EN = Object.freeze({
   '저장': 'Saved',
   '삭제': 'Removed',
   'Cursor 룰 설정 생략: 등록되지 않은 프로젝트입니다.': 'Cursor rules skipped: project not registered.',
+  'Cursor 룰 설정 생략: 기존 Git 저장소의 추적 여부를 확인하려면 Git이 필요합니다.': 'Cursor rules skipped: Git is needed to check tracked files in this existing repository.',
+  '룰·작업·지식 명령은 사용할 수 있습니다. Cursor 룰 파일은 Git 설치 후 hnd setup으로 갱신하세요.': 'Rule, work, and knowledge commands remain available. Install Git, then run hnd setup to refresh the Cursor rule file.',
   'Cursor 룰 설정 생략: Git 프로젝트 경로가 아닙니다.': 'Cursor rules skipped: not in a Git project.',
   '설정: hnd init 실행 후 hnd setup': 'Setup: run hnd init, then hnd setup',
   '설정: Git 프로젝트 경로에서 hnd init 실행 후 hnd setup': 'Setup: run hnd init in a Git project, then hnd setup',

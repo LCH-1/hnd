@@ -80,6 +80,9 @@ export async function captureCheckpoint({
 } = {}) {
   if (!AGENT_NAMES.has(agent)) throw new TypeError(`Unsupported checkpoint agent: ${agent}`);
   const resolved = await resolveRepositoryBinding({ cwd, env, clock });
+  if (resolved.git.available === false) {
+    return { changed: false, checkpoint: null, skipped: true, reason: resolved.git.unavailableReason, path: null };
+  }
   sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const policy = await getPrivacyPolicy({ repoId: resolved.repository.id, sessionKey, env });
   if (!collectionAllowed({ policy, sourceKind: 'checkpoint' })) {
@@ -129,7 +132,7 @@ export async function getCheckpoint({
   sessionId,
   agent,
 } = {}) {
-  if (!repoId || !git) return null;
+  if (!repoId || !git || git.available === false) return null;
   const policy = await getPrivacyPolicy({ repoId, sessionKey, sessionId, agent, env });
   if (!collectionAllowed({ policy, sourceKind: 'checkpoint' })) return null;
   const key = checkpointKey(git);
