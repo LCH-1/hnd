@@ -203,6 +203,12 @@ repo와 env는 현재 프로젝트를 사용합니다. env는 --environment를 �
 
 const SYNC_HELP = `hnd sync — 서버 동기화와 복구
 
+서버 주소 확인·변경:
+  hnd remote show [--json]                 현재 서버 주소 확인 (오프라인 가능)
+  hnd remote set-url URL [--json]          기존 기기 인증 확인 후 주소 변경
+  hnd setup remote [--url URL] [--json]    현재 주소 확인·대화형 변경
+기기 등록과 동기화 이력은 유지하며, 새 서버에 연결할 수 없으면 변경하지 않습니다.
+
 평소에는 자동 동기화를 사용합니다:
   hnd sync status [--json]                  연결·대기 상태 확인
   hnd sync auto [status|on|off]             자동 동기화 설정
@@ -227,6 +233,9 @@ const SETUP_HELP = `hnd setup — PC 연결과 에이전트 설정
 사용법:
   hnd connect --url URL (--code CODE | --code-stdin) [--name DEVICE]
   hnd setup [--agents all|claude,codex,cursor] [--dry-run]
+  hnd setup remote [--url URL] [--json]    서버 주소 확인·변경
+  hnd remote show [--json]
+  hnd remote set-url URL [--json]
   hnd doctor [--cwd DIR] [--json]
   hnd uninstall [--agents all|claude,codex,cursor] [--dry-run]
 
@@ -388,6 +397,12 @@ HND does not collect transcripts. Session suggestions are opt-in and stay out of
 `,
   sync: `hnd sync — server sync and recovery
 
+View or change the server address:
+  hnd remote show [--json]                 Show the saved address (works offline)
+  hnd remote set-url URL [--json]          Verify this device, then change the address
+  hnd setup remote [--url URL] [--json]    View or interactively change the address
+Device registration and sync history are preserved. A failed connection leaves the address unchanged.
+
 Automatic sync is recommended:
   hnd sync status [--json]                  Show connection and pending work
   hnd sync auto [status|on|off]             Configure automatic sync
@@ -412,6 +427,9 @@ Recommended flow:
 Usage:
   hnd connect --url URL (--code CODE | --code-stdin) [--name DEVICE]
   hnd setup [--agents all|claude,codex,cursor] [--dry-run]
+  hnd setup remote [--url URL] [--json]    View or change the server address
+  hnd remote show [--json]
+  hnd remote set-url URL [--json]
   hnd doctor [--cwd DIR] [--json]
   hnd uninstall [--agents all|claude,codex,cursor] [--dry-run]
 

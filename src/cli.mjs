@@ -2249,6 +2249,12 @@ async function mainImpl(argv = process.argv.slice(2), {
   }
 
   if (command === 'setup' || command === 'uninstall') {
+    if (command === 'setup' && positionals[0] === 'remote') {
+      return handleRemote({
+        subcommand: 'setup', rest: positionals.slice(1), options, env: runtimeEnv,
+        stdin, stdout, stderr, jsonOutput,
+      });
+    }
     ensureNoExtra(positionals, `hnd ${command}`);
     return handleAdapters({
       action: command === 'setup' ? 'install' : 'uninstall',

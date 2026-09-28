@@ -13,7 +13,7 @@ import {
 } from './core/fs.mjs';
 import { restoreJournalPath, withStateLock } from './core/mutation-lock.mjs';
 import { getAutoSync } from './core/state.mjs';
-import { readStdin, readTextInput } from './input.mjs';
+import { interactive, promptLine, readStdin, readTextInput } from './input.mjs';
 import { statePaths } from './paths.mjs';
 import { writeJson } from './presentation.mjs';
 import {
@@ -339,7 +339,7 @@ async function createClient(env, urlOverride, clientOptions = {}) {
   const config = await readRemoteConfig(env);
   const configuredUrl = normalizeRemoteUrl(config.baseUrl, env);
   if (urlOverride !== undefined && normalizeRemoteUrl(urlOverride, env) !== configuredUrl) {
-    throw new UsageError('The supplied URL does not match the connected HND server. Reconnect this PC to change trust endpoints.');
+    throw new UsageError('The supplied URL does not match the connected HND server. Use hnd remote set-url URL to change the server address.');
   }
   return {
     config,
@@ -975,6 +975,90 @@ async function mergeRemote({ options, rest, env, stdout, jsonOutput, syncClientO
   return output;
 }
 
+async function showRemote({ options, rest, env, stdout, jsonOutput }) {
+  assertOptions(options, []);
+  ensureNoExtra(rest, 'hnd remote show [--json]');
+  const config = await readRemoteConfig(env, { optional: true });
+  const output = { configured: Boolean(config), baseUrl: config?.baseUrl ?? null };
+  if (jsonOutput) writeJson(output, stdout);
+  else writeText(stdout, config ? config.baseUrl : ct('연결된 서버가 없습니다. hnd connect로 PC를 먼저 연결하세요.'));
+  return output;
+}
+
+async function changeRemoteUrl({ env, stdout, jsonOutput, syncClientOptions }, remoteUrl) {
+  const baseUrl = normalizeRemoteUrl(remoteUrl, env);
+  // Match the automatic sync lock order so no in-flight sync can restore the old URL.
+  return withFileLock(path.join(statePaths(env).locks, 'auto-sync.lock'), () => (
+    withRemoteOperationLock(env, async () => {
+      const config = await readRemoteConfig(env);
+      const previousUrl = normalizeRemoteUrl(config.baseUrl, env);
+      if (baseUrl === previousUrl) {
+        const output = { changed: false, baseUrl };
+        if (jsonOutput) writeJson(output, stdout);
+        else writeText(stdout, `${ct('서버 주소 변경 없음')}: ${baseUrl}`);
+        return output;
+      }
+      const client = new SyncClient({
+        ...syncClientOptions,
+        baseUrl,
+        deviceToken: await readDeviceToken(env),
+      });
+      let devices;
+      try {
+        devices = await client.listDevices();
+      } catch (error) {
+        const detail = error instanceof SyncHttpError ? ` (HTTP ${error.status})` : '';
+        throw new UsageError(`${ct('새 서버에서 기기 인증을 확인하지 못했습니다. 기존 주소를 유지합니다.')}${detail}`);
+      }
+      const recognized = devices.some((device) => (
+        device?.id === config.device.id
+        && device.revokedAt === null
+        && (config.device.tenantId === undefined || device.tenantId === config.device.tenantId)
+      ));
+      if (!recognized) {
+        throw new UsageError(ct('새 서버에 현재 기기 등록이 없습니다. 기존 주소를 유지합니다.'));
+      }
+      const { readAutoSyncPending, clearAutoSyncPending } = await import('./sync/auto.mjs');
+      const pending = await readAutoSyncPending({ env });
+      const backupPath = `${statePaths(env).remotes}.before-url-change`;
+      await writeJsonAtomic(backupPath, config);
+      await saveRemoteConfig(env, { ...config, baseUrl });
+      // A verified connection resolves transport/authentication failures, not data conflicts.
+      if (pending && ['offline', 'timeout', 'server_unavailable', 'authentication'].includes(pending.reason)) {
+        await clearAutoSyncPending({ env });
+      }
+      const output = { changed: true, previousUrl, baseUrl, backupPath };
+      if (jsonOutput) writeJson(output, stdout);
+      else writeText(stdout, `${ct('서버 주소를 변경했습니다.')}\n${previousUrl} → ${baseUrl}\n${ct('이전 설정 백업')}: ${backupPath}`);
+      return output;
+    })
+  ), { timeoutMs: 45_000, staleMs: 5 * 60_000 });
+}
+
+async function setRemoteUrl(context) {
+  assertOptions(context.options, []);
+  const [remoteUrl, ...rest] = context.rest;
+  if (!remoteUrl) throw new UsageError('hnd remote set-url URL [--json]');
+  ensureNoExtra(rest, 'hnd remote set-url URL [--json]');
+  return changeRemoteUrl(context, remoteUrl);
+}
+
+async function setupRemote(context) {
+  const { options, rest, env, stdin, stdout, jsonOutput } = context;
+  assertOptions(options, ['url']);
+  ensureNoExtra(rest, 'hnd setup remote [--url URL] [--json]');
+  const suppliedUrl = optionString(options, 'url');
+  if (suppliedUrl !== undefined) return changeRemoteUrl(context, suppliedUrl);
+  const config = await readRemoteConfig(env, { optional: true });
+  if (!config || jsonOutput || !interactive(stdin)) {
+    return showRemote({ ...context, options: {} });
+  }
+  writeText(stdout, `${ct('현재 서버 주소')}: ${config.baseUrl}`);
+  const answer = await promptLine(`${ct('새 서버 주소 (Enter: 유지)')}: `, { input: stdin, output: stdout });
+  if (!answer) return showRemote({ ...context, options: {} });
+  return changeRemoteUrl(context, answer);
+}
+
 async function status({ options, rest, env, stdout, jsonOutput }) {
   assertOptions(options, []);
   ensureNoExtra(rest, 'hnd sync status [--json]');
@@ -1289,6 +1373,9 @@ export async function reconcileRemoteAutomatically({
 
 export async function remoteMain(context) {
   const { subcommand, options } = context;
+  if (subcommand === 'show') return showRemote(context);
+  if (subcommand === 'set-url') return setRemoteUrl(context);
+  if (subcommand === 'setup') return setupRemote(context);
   if (subcommand === 'enroll') return enroll(context);
   if (subcommand === 'invite') return invite(context);
   if (subcommand === 'join') return join(context);
@@ -1304,5 +1391,5 @@ export async function remoteMain(context) {
   if (subcommand === 'devices') return devices(context);
   if (subcommand === 'revoke') return revoke(context);
   if (subcommand === 'key') return keyCommand(context);
-  throw new UsageError('Sync command must be connect, enroll, invite, join, push, pull, merge, status, revisions, restore, devices, revoke, or key.');
+  throw new UsageError('Sync command must be show, set-url, setup, connect, enroll, invite, join, push, pull, merge, status, revisions, restore, devices, revoke, or key.');
 }
