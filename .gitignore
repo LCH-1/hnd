@@ -9,6 +9,7 @@ images/
 
 # Local server state and secrets
 .hnd-data/
+/backups/
 .env
 .env.*
 !.env.example
