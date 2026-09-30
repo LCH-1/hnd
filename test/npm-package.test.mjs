@@ -196,6 +196,14 @@ test('npm package is public client-only and installs as a global hnd command', a
   });
   assert.match(help.stdout, /평소에 필요한 명령:/u);
 
+  const npmHelp = await execFileAsync(installedCommand, ['npm', 'help'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: launcherSmokeEnvironment,
+  });
+  assert.match(npmHelp.stdout, /hnd npm update \[--json\]/u);
+
   const repository = path.join(root, 'repository');
   const userHome = path.join(root, 'user');
   const connectorHome = path.join(root, 'hnd-home');

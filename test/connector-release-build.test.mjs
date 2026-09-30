@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildConnectorRelease } from '../scripts/build-connector-release.mjs';
 import { VERSION as RUNTIME_VERSION } from '../src/constants.mjs';
@@ -110,6 +110,35 @@ test('connector release build is deterministic, signed, canonical, and client-on
 
   const inventory = (await fs.readdir(firstOutput)).sort();
   assert.deepEqual(inventory, [`${manifest.bundle.sha256}.hndb`, 'manifest.json'].sort());
+
+  // Exercise the command from the actual signed bundle while an older npm
+  // launcher supplies its permanent bin path. The runtime has no package.json.
+  const runtime = path.join(root, 'runtime');
+  for (const file of parsedBundle.files) {
+    const target = path.join(runtime, file.path);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, Buffer.from(file.content, 'base64'));
+  }
+  const launcherRoot = path.join(root, 'npm-launcher');
+  const binPath = path.join(launcherRoot, 'bin', 'hnd.mjs');
+  await fs.mkdir(path.dirname(binPath), { recursive: true });
+  await fs.writeFile(binPath, '');
+  await fs.writeFile(path.join(launcherRoot, 'package.json'), JSON.stringify({ name: '@lch-1/hnd', version: '0.1.1' }));
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    assert.equal(url, 'https://registry.npmjs.org/@lch-1%2fhnd/latest');
+    return Response.json({ name: '@lch-1/hnd', version: '0.2.5' });
+  });
+  const loaded = await import(pathToFileURL(path.join(runtime, 'src', 'cli.mjs')).href);
+  let npmOutput = '';
+  await loaded.main(['npm', 'version', '--json'], {
+    binPath, cwd: root,
+    env: { HND_HOME: path.join(root, 'state'), HND_USER_HOME: path.join(root, 'user') },
+    stdout: { write(chunk) { npmOutput += chunk; } },
+  });
+  const npmVersion = JSON.parse(npmOutput);
+  assert.equal(npmVersion.launcherVersion, '0.1.1');
+  assert.equal(npmVersion.launcherLatestVersion, '0.2.5');
+  assert.equal(npmVersion.launcherUpdate.status, 'update_available');
 });
 
 test('connector release build rejects mismatched keys and unrecognized output', async (t) => {

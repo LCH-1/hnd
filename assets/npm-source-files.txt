@@ -61,6 +61,7 @@ src/update/client.mjs
 src/update/install.mjs
 src/update/integration.mjs
 src/update/manifest.mjs
+src/update/npm-cli.mjs
 src/update/npm.mjs
 src/update/registry.mjs
 src/update/report.mjs

@@ -125,6 +125,22 @@ hnd update apply
 hnd update rollback
 ```
 
+npm 패키지의 설치 버전·최신 버전 확인과 업데이트는 별도 명령으로 실행할 수
+있습니다. Git 프로젝트나 HND 서버 연결 없이 사용할 수 있습니다.
+
+```sh
+hnd npm version
+hnd npm update
+hnd npm help
+```
+
+`hnd npm`만 실행해도 버전을 확인하며, `--json`으로 상세 결과를 받을 수 있습니다.
+`hnd npm update`는 현재 실행 중인 전역 `@lch-1/hnd` 설치본을 최신 버전으로
+갱신합니다. 최신 버전이거나 설치 버전이 더 높으면 유지하고, 설치 권한 부족 등으로
+실패하면 이유와 수동 명령을 안내합니다. `hnd --version`은 HND 실행 코드의 버전이고,
+`hnd npm version`은 npm 패키지의 버전입니다. 실행 코드와 npm 패키지를 함께
+갱신하려면 `hnd update apply`를 사용합니다.
+
 `hnd update status`, `check`, `apply`는 서로 독립적인 npm 런처 버전과 중앙
 런타임 버전을 구분해 표시합니다. npm의 `@lch-1/hnd@0.2.2`는 설치와 안전한
 업데이트를 담당하는 고정 런처이고, 서버가 배포하는 런타임은 별도 버전 체계

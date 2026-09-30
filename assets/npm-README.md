@@ -88,6 +88,21 @@ hnd update apply
 hnd update rollback
 ```
 
+npm 패키지의 버전 확인과 업데이트는 아래 명령으로 실행합니다. Git 프로젝트나
+HND 서버 연결 없이 사용할 수 있습니다.
+
+```sh
+hnd npm version
+hnd npm update
+hnd npm help
+```
+
+`hnd npm`은 `hnd npm version`과 같으며, 두 명령에 `--json`을 붙이면 상세 결과를
+받을 수 있습니다. `hnd npm update`는 현재 실행 중인 전역 `@lch-1/hnd` 설치본을
+갱신하고, 최신 버전이면 유지합니다. 실패하면 이유와 수동 업데이트 명령을 안내합니다.
+`hnd --version`은 HND 실행 코드의 버전이고, `hnd npm version`은 npm 패키지 버전입니다.
+실행 코드와 npm 패키지를 함께 갱신하려면 `hnd update apply`를 사용합니다.
+
 ## 제거
 
 먼저 Git 저장소에서 HND가 관리하는 설정을 확인하고 제거한 뒤 package를

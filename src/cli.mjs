@@ -66,6 +66,7 @@ import {
   renderCursorRule,
 } from './materialize.mjs';
 import { writeJson } from './presentation.mjs';
+import { runNpmCommand } from './update/npm-cli.mjs';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultBinPath = path.resolve(moduleDirectory, '..', 'bin', 'hnd.mjs');
@@ -1673,6 +1674,15 @@ async function mainImpl(argv = process.argv.slice(2), {
   if (runtimeEnv !== env) await useCliLanguage(runtimeEnv);
   const invocationCwd = path.resolve(optionString(options, 'cwd', cwd));
   const jsonOutput = optionBoolean(options, 'json');
+  if (command === 'npm') {
+    assertOptions(options, []);
+    const action = positionals.shift() ?? 'version';
+    ensureNoExtra(positionals, 'hnd npm <version|update> [--json]');
+    if (!['version', 'update'].includes(action)) {
+      throw new UsageError('Usage: hnd npm <version|update> [--json]');
+    }
+    return runNpmCommand(action, { env: runtimeEnv, execPath, binPath, stdout, stderr, jsonOutput });
+  }
   if (options.session_key !== undefined && options.session_id !== undefined) {
     throw new UsageError('Use --session-key or --session-id, not both.');
   }

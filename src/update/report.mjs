@@ -79,17 +79,53 @@ function versionSection(title, current, latest, state, ko) {
   ])];
 }
 
-function launcherReport(result, ko) {
+function launcherReport(result, ko, {
+  updateCommand = NPM_UPDATE_COMMAND,
+  retryCommand = 'npm view @lch-1/hnd version',
+} = {}) {
   const state = describeLauncherUpdate(result);
   const lines = versionSection(ko ? 'npm 패키지' : 'npm package', result.launcherVersion,
     result.launcherCheckError ? null : result.launcherLatestVersion, state, ko);
   if (state.needsUpdate) lines.push(ko
-    ? `업데이트: ${NPM_UPDATE_COMMAND}`
-    : `Update: ${NPM_UPDATE_COMMAND}`);
+    ? `업데이트: ${updateCommand}`
+    : `Update: ${updateCommand}`);
   if (state.status === 'check_failed') lines.push(ko
-    ? '다시 확인: npm view @lch-1/hnd version'
-    : 'Retry: npm view @lch-1/hnd version');
+    ? `다시 확인: ${retryCommand}`
+    : `Retry: ${retryCommand}`);
   return lines;
+}
+
+function npmFailureMessage(installation, ko) {
+  const reasons = ko ? {
+    permission: '권한 부족', npm_missing: 'npm을 찾을 수 없음', not_global: '전역 npm 설치본이 아님',
+    busy: '다른 업데이트가 진행 중', timeout: '시간 초과', verification_failed: '설치 확인 실패',
+    install_failed: '설치 실패', check_failed: '버전 확인 실패',
+  } : {
+    permission: 'insufficient permissions', npm_missing: 'npm not found', not_global: 'not a global npm installation',
+    busy: 'another update is running', timeout: 'timed out', verification_failed: 'installation verification failed',
+    install_failed: 'installation failed', check_failed: 'version check failed',
+  };
+  const reason = reasons[installation.reason] ?? reasons.install_failed;
+  return ko ? `npm 패키지 자동 업데이트를 하지 못했습니다 (${reason}).`
+    : `Could not update the npm package automatically (${reason}).`;
+}
+
+export function formatNpmUpdateReport(result, { action = 'version', ko = false } = {}) {
+  if (action !== 'update') return launcherReport(result, ko, {
+    updateCommand: 'hnd npm update', retryCommand: 'hnd npm version',
+  }).join('\n');
+  if (result.npmInstall?.status === 'updated') return ko
+    ? `npm 패키지 업데이트 완료: ${result.npmInstall.previousVersion} → ${result.launcherVersion}`
+    : `npm package updated: ${result.npmInstall.previousVersion} → ${result.launcherVersion}`;
+  if (['failed', 'skipped'].includes(result.npmInstall?.status)) return [
+    npmFailureMessage(result.npmInstall, ko),
+    result.npmInstall.reason === 'check_failed'
+      ? `${ko ? '다시 시도' : 'Retry'}: hnd npm update`
+      : `${ko ? '수동 업데이트' : 'Manual update'}: ${NPM_UPDATE_COMMAND}`,
+  ].join('\n');
+  return describeLauncherUpdate(result).status === 'ahead'
+    ? (ko ? 'npm 패키지가 공개된 최신 버전보다 높아 유지했습니다.' : 'The npm package is ahead of the public version and was kept.')
+    : (ko ? `npm 패키지는 최신 버전입니다: ${result.launcherVersion}` : `The npm package is up to date: ${result.launcherVersion}`);
 }
 
 function applyReport(result, ko) {
@@ -124,18 +160,8 @@ function applyReport(result, ko) {
     lines.push(status[client.status], clientNextStep(client.status, ko));
   }
   if (npm.needsUpdate || npmFailed) {
-    const reasons = ko ? {
-      permission: '권한 부족', npm_missing: 'npm을 찾을 수 없음', not_global: '전역 npm 설치본이 아님',
-      busy: '다른 업데이트가 진행 중', timeout: '시간 초과', verification_failed: '설치 확인 실패',
-      install_failed: '설치 실패', check_failed: '버전 확인 실패',
-    } : {
-      permission: 'insufficient permissions', npm_missing: 'npm not found', not_global: 'not a global npm installation',
-      busy: 'another update is running', timeout: 'timed out', verification_failed: 'installation verification failed',
-      install_failed: 'installation failed', check_failed: 'version check failed',
-    };
     lines.push(npmFailed
-      ? (ko ? `npm 패키지 자동 업데이트를 하지 못했습니다 (${reasons[result.npmInstall.reason] ?? reasons.install_failed}).`
-        : `Could not update the npm package automatically (${reasons[result.npmInstall.reason] ?? reasons.install_failed}).`)
+      ? npmFailureMessage(result.npmInstall, ko)
       : (ko ? 'npm 패키지 업데이트가 필요합니다.' : 'The npm package needs an update.'));
     lines.push(`${ko ? '업데이트' : 'Update'}: ${NPM_UPDATE_COMMAND}`);
   } else if (npm.status === 'check_failed') {

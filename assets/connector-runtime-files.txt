@@ -53,4 +53,10 @@ src/sync/etag.mjs
 src/sync/hook-sync.mjs
 src/sync/io.mjs
 src/sync/merge.mjs
+src/update/manifest.mjs
+src/update/npm-cli.mjs
+src/update/npm.mjs
+src/update/registry.mjs
+src/update/report.mjs
+src/update/state.mjs
 src/work-watch.mjs

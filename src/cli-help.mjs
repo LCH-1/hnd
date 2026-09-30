@@ -30,11 +30,13 @@ Git 설치나 git init 없이도 룰·작업·지식을 사용할 수 있습니�
   hnd notify help    Slack·Discord 작업 완료 알림
   hnd sync help      자동 동기화·복구
   hnd setup help     PC 연결·에이전트 설정
+  hnd npm help       npm 패키지 버전·업데이트
   hnd advanced help  진단·내부·이전 호환 명령
   hnd lang help      표시 언어
 
 같은 방식으로 hnd rule --help도 사용할 수 있습니다.
-버전 확인: hnd --version
+실행 버전 확인: hnd --version
+npm 패키지 버전 확인: hnd npm version
 `;
 
 const HELP_EN = `hnd — shared rules and progress for coding agents
@@ -69,12 +71,14 @@ Topic help:
   hnd notify help    Slack and Discord turn completion notifications
   hnd sync help      Automatic sync and recovery
   hnd setup help     PC connection and agent setup
+  hnd npm help       npm package versions and updates
   hnd advanced help  Diagnostics, internals, and legacy commands
   hnd lang help      Display language
 
 hnd rule --help works the same way.
 Language: hnd lang set <ko|en> · hnd lang auto
-Version: hnd --version
+Execution version: hnd --version
+npm package version: hnd npm version
 `;
 
 const PROJECT_HELP = `hnd project — 프로젝트 등록과 환경
@@ -245,6 +249,8 @@ const SETUP_HELP = `hnd setup — PC 연결과 에이전트 설정
   hnd update apply      업데이트 적용
   hnd update rollback   이전 버전으로 복구
   hnd update help       업데이트 도움말
+  hnd npm version       npm 패키지의 설치·최신 버전 확인
+  hnd npm update        npm 패키지 업데이트
 `;
 
 const ADVANCED_HELP = `hnd advanced — 진단·내부·이전 호환 명령
@@ -281,6 +287,16 @@ kr, ko-KR, en-US 같은 입력 별칭도 사용할 수 있습니다.
 `;
 
 const TOPICS_EN = Object.freeze({
+  npm: `hnd npm — npm package versions and updates
+
+  hnd npm [version] [--json]  Show installed and latest @lch-1/hnd versions
+  hnd npm update [--json]     Update @lch-1/hnd to the latest version
+  hnd npm help               Show this help
+
+Works without a Git project or an HND server connection.
+Updates the active global npm installation. On failure, a manual command is shown.
+Use hnd update apply to update both the HND execution code and the npm package.
+`,
   project: `hnd project — project registration and environments
 
 Recommended flow:
@@ -439,6 +455,8 @@ Updates:
   hnd update apply      Update this PC client (does not update the server)
   hnd update rollback   Restore the previous verified client
   hnd update help       Explain npm launcher and server update methods
+  hnd npm version       Show installed and latest npm package versions
+  hnd npm update        Update the npm package
 `,
   advanced: `hnd advanced — diagnostics, internals, and legacy commands
 
@@ -474,6 +492,16 @@ Input aliases such as kr, ko-KR, and en-US are accepted.
 });
 
 const TOPICS = Object.freeze({
+  npm: `hnd npm — npm 패키지 버전·업데이트
+
+  hnd npm [version] [--json]  @lch-1/hnd 설치 버전·최신 버전 확인
+  hnd npm update [--json]     @lch-1/hnd를 최신 버전으로 업데이트
+  hnd npm help               도움말
+
+Git 프로젝트나 HND 서버 연결 없이 사용할 수 있습니다.
+현재 실행 중인 전역 npm 설치본을 갱신하고, 실패하면 수동 명령을 안내합니다.
+HND 실행 코드도 함께 갱신하려면 hnd update apply를 사용하세요.
+`,
   project: PROJECT_HELP,
   rule: RULE_HELP,
   work: WORK_HELP,
