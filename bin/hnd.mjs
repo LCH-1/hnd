@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
-import { launcherMain } from '../src/launcher.mjs';
+import { suppressSqliteExperimentalWarning } from '../src/node-warnings.mjs';
+
+suppressSqliteExperimentalWarning();
+
+// The launcher graph imports node:sqlite. A static import would load it before
+// the warning filter above is installed.
+const { launcherMain } = await import('../src/launcher.mjs');
 
 launcherMain(process.argv.slice(2)).catch((error) => {
   const message = error?.message || String(error);

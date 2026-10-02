@@ -43,6 +43,7 @@ src/input.mjs
 src/launcher-version.mjs
 src/launcher.mjs
 src/materialize.mjs
+src/node-warnings.mjs
 src/paths.mjs
 src/presentation.mjs
 src/remote-cli.mjs
