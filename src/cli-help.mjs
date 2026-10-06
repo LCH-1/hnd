@@ -2,8 +2,8 @@ export const HELP = `hnd — 코딩 에이전트 룰·진행 상태 공유
 
 처음 한 번:
   1. HND 웹의 [기기 → PC 연결]에서 만든 명령 실행
-  2. hnd setup
-  3. 프로젝트 폴더에서 AI 세션 시작 (프로젝트 자동 등록)
+     PC 연결 후 에이전트 설정은 자동 적용됩니다.
+  2. 프로젝트 폴더에서 AI 세션 시작 (프로젝트 자동 등록)
 
 평소에 필요한 명령:
   hnd status                         현재 프로젝트·환경·동기화 확인
@@ -43,8 +43,8 @@ const HELP_EN = `hnd — shared rules and progress for coding agents
 
 One-time setup:
   1. Run the command created under [Devices → Connect PC] in the HND web app
-  2. hnd setup
-  3. Start an AI session in a project folder (the project is registered automatically)
+     Agent settings are applied automatically after connecting the PC.
+  2. Start an AI session in a project folder (the project is registered automatically)
 
 Everyday commands:
   hnd status                         Check the current project, environment, and sync
@@ -233,6 +233,8 @@ const SETUP_HELP = `hnd setup — PC 연결과 에이전트 설정
 
 권장 흐름:
   HND 웹의 [기기 → PC 연결]에서 OS와 설치 상태를 선택하고 표시된 명령을 실행합니다.
+  PC 연결 후 Claude Code·Codex·Cursor 설정을 자동 적용합니다.
+  hnd setup은 설정을 다시 적용하거나 점검할 때 사용합니다.
 
 사용법:
   hnd connect --url URL (--code CODE | --code-stdin) [--name DEVICE]
@@ -439,6 +441,8 @@ If the server is unavailable, HND keeps working from the local copy and retries 
 Recommended flow:
   In the HND web app, open [Devices → Connect PC], select the OS and installation state,
   then run the displayed command.
+  Connecting the PC automatically installs Claude Code, Codex, and Cursor settings.
+  Use hnd setup to reapply or check the settings.
 
 Usage:
   hnd connect --url URL (--code CODE | --code-stdin) [--name DEVICE]

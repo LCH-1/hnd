@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { main } from '../src/cli.mjs';
+import { agentPaths } from '../src/paths.mjs';
 import { formatDeviceInvite, snapshotDigest } from '../src/remote-cli.mjs';
 import { captureSyncSnapshot } from '../src/sync/capture.mjs';
 import {
@@ -298,6 +299,9 @@ test('remote CLI syncs two devices with encrypted snapshots, conflicts, deletion
   ])).stdout;
   assert.match(legacyEnrollmentText, /^이전 방식 PC 연결 완료: device-a/u);
   assert.doesNotMatch(legacyEnrollmentText, /PC 등록 완료/u);
+  for (const file of [agentPaths(envA).claude.settings, agentPaths(envA).codex.hooks, agentPaths(envA).cursor.hooks]) {
+    assert.ok((await fs.stat(file)).isFile());
+  }
   const enrolledA = JSON.parse((await runA(['remote', 'status', '--json'])).stdout);
   assert.equal(enrolledA.enrolled, true);
   assert.match((await runA(['remote', 'status'])).stdout, /^HND 계정 연결: 완료/u);
@@ -357,11 +361,26 @@ test('remote CLI syncs two devices with encrypted snapshots, conflicts, deletion
     () => runB(['remote', 'join', '--url', address.url, '--invite', tamperedInvitation]),
     /checksum/,
   );
-  const enrolledB = JSON.parse((await runB([
+  await assert.rejects(fs.stat(agentPaths(envB).claude.settings), { code: 'ENOENT' });
+  await fs.mkdir(path.dirname(agentPaths(envB).claude.settings), { recursive: true });
+  await fs.writeFile(agentPaths(envB).claude.settings, JSON.stringify({
+    hooks: { Notification: [{ hooks: [{ type: 'command', command: 'keep-my-hook' }] }] },
+  }));
+  const connectedB = await runB([
     'connect', '--url', address.url, '--code-stdin',
     '--name', 'device-b', '--json',
-  ], invitation)).stdout);
+  ], invitation);
+  const enrolledB = JSON.parse(connectedB.stdout);
   assert.equal(enrolledB.joined, true);
+  assert.match(connectedB.stderr, /설정 완료|[Ss]etup complete/u);
+  for (const agent of ['claude', 'codex', 'cursor']) {
+    assert.ok((await fs.stat(agentPaths(envB)[agent].skill)).isFile());
+  }
+  const claudeConfig = JSON.parse(await fs.readFile(agentPaths(envB).claude.settings, 'utf8'));
+  assert.equal(claudeConfig.hooks.Notification[0].hooks[0].command, 'keep-my-hook');
+  assert.equal(claudeConfig.hooks.SessionStart[0].hooks.length, 1);
+  assert.match((await runB(['setup'])).stdout, /공통 설정은 이미 완료|Shared settings are already configured/u);
+  assert.match(connectedB.stderr, /프로젝트 설정은.+자동 적용|Project settings are applied automatically/u);
   await runB(['sync', 'auto', 'off']);
   await assert.rejects(
     () => runner({ ...envB, HND_HOME: path.join(root, 'replay-state') }, deviceBRoot)([
@@ -451,6 +470,33 @@ test('remote CLI syncs two devices with encrypted snapshots, conflicts, deletion
     () => runB(['remote', 'pull']),
     (error) => error.status === 401,
   );
+});
+
+test('a setup conflict preserves a successful PC connection and can be repaired without reusing the code', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-connect-setup-conflict-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const server = await createSyncServer({ dataDirectory: path.join(root, 'server') });
+  const address = await server.listen({ host: '127.0.0.1', port: 0 });
+  t.after(() => server.close());
+  const env = { ...process.env, HND_HOME: path.join(root, 'state'), HND_USER_HOME: path.join(root, 'user') };
+  const paths = agentPaths(env);
+  await fs.mkdir(path.dirname(paths.claude.skill), { recursive: true });
+  await fs.writeFile(paths.claude.skill, 'my own skill');
+  const run = runner(env, root);
+  const enrollment = await server.createEnrollmentKey('conflict-tenant');
+  const connected = await run([
+    'remote', 'enroll', '--url', address.url, '--key', enrollment.enrollmentKey,
+    '--name', 'setup-conflict', '--create-vault-key', '--json',
+  ]);
+  assert.equal(JSON.parse(connected.stdout).enrolled, true);
+  assert.match(connected.stderr, /PC 연결은 완료됐지만|PC connected, but/u);
+  assert.match(connected.stderr, /hnd setup/u);
+  assert.equal(await fs.readFile(paths.claude.skill, 'utf8'), 'my own skill');
+  assert.equal(JSON.parse((await run(['sync', 'status', '--json'])).stdout).enrolled, true);
+  await fs.rename(paths.claude.skill, path.join(root, 'original-skill'));
+  await run(['setup']);
+  assert.ok(JSON.parse(await fs.readFile(paths.claude.settings, 'utf8')).hooks.SessionStart);
+  assert.equal(await fs.readFile(path.join(root, 'original-skill'), 'utf8'), 'my own skill');
 });
 
 test('remote merge applies independent edits and records local-wins conflicts', async (t) => {

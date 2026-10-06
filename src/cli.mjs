@@ -1128,6 +1128,7 @@ async function handleAdapters({
   jsonOutput,
   execPath,
   binPath,
+  automatic = false,
 }) {
   assertOptions(options, ['agents', 'dry_run']);
   const agents = selectAgents(options.agents);
@@ -1181,7 +1182,11 @@ async function handleAdapters({
         : ct(item.action === 'write' ? '저장' : '삭제');
       writeText(stdout, `  ${verb}  ${item.path}`);
     }
-    if (materialized.skipped) {
+    if (materialized.skipped && automatic && materialized.skipped !== 'GIT_UNAVAILABLE') {
+      writeText(stdout, cliLanguage() === 'ko'
+        ? '프로젝트 설정은 해당 폴더에서 AI 세션을 시작하면 자동 적용됩니다.'
+        : 'Project settings are applied automatically when an AI session starts in that folder.');
+    } else if (materialized.skipped) {
       const unregistered = materialized.skipped === 'REPOSITORY_NOT_REGISTERED';
       const unavailable = materialized.skipped === 'GIT_UNAVAILABLE';
       writeText(stdout, unavailable
@@ -2352,8 +2357,19 @@ async function mainImpl(argv = process.argv.slice(2), {
     });
     if (['enroll', 'join', 'connect'].includes(subcommand)) {
       await runMutationAutomaticSync({ core, env: runtimeEnv });
+      try {
+        await handleAdapters({
+          action: 'install', options: {}, core, cwd: invocationCwd,
+          env: runtimeEnv, stdout: jsonOutput ? stderr : stdout,
+          jsonOutput: false, execPath, binPath, automatic: true,
+        });
+      } catch (error) {
+        writeText(stderr, cliLanguage() === 'ko'
+          ? `PC 연결은 완료됐지만 에이전트 자동 설정에 실패했습니다: ${error.message}\n다시 시도: hnd setup`
+          : `PC connected, but automatic agent setup failed: ${error.message}\nRetry: hnd setup`);
+      }
     }
-    if (['pull', 'merge', 'restore', 'join', 'connect'].includes(subcommand)) await refreshCursorOnly();
+    if (['pull', 'merge', 'restore'].includes(subcommand)) await refreshCursorOnly();
     return result;
   }
 

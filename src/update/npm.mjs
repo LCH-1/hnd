@@ -48,6 +48,25 @@ async function installedPackage(packageRoot) {
   return value.name === '@lch-1/hnd' && !value.private && isVersion(value.version) ? value : null;
 }
 
+async function activeGlobalPrefix(packageRoot, platform) {
+  // A configured npm prefix can change after installation. Accept the old
+  // Unix prefix only when its global bin still points to this exact package;
+  // a local/node_modules or npx installation has no such global launcher.
+  if (platform === 'win32') return null;
+  const prefix = path.resolve(packageRoot, '..', '..', '..', '..');
+  const target = path.join(prefix, 'lib', 'node_modules', '@lch-1', 'hnd');
+  if (path.resolve(packageRoot) !== target) return null;
+  try {
+    const bin = path.join(prefix, 'bin', 'hnd');
+    if (!(await fs.lstat(bin)).isSymbolicLink()) return null;
+    return await fs.realpath(bin) === await fs.realpath(path.join(target, 'bin', 'hnd.mjs'))
+      ? prefix : null;
+  } catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+    return null;
+  }
+}
+
 function failureReason(error) {
   // Never return npm stdout/stderr: it may contain registry credentials or
   // private configuration. Only a small, predictable reason reaches the CLI.
@@ -73,8 +92,15 @@ export async function applyNpmUpdate({
       timeout: 5_000, windowsHide: true, shell: false,
     };
     const { stdout } = await run(execPath, [npmCli, 'prefix', '--global'], options);
-    const prefix = stdout.trim();
+    let prefix = stdout.trim();
     if (!path.isAbsolute(prefix) || /[\r\n\0]/.test(prefix)) return { status: 'skipped', reason: 'not_global' };
+    const configuredTarget = platform === 'win32'
+      ? path.join(prefix, 'node_modules', '@lch-1', 'hnd')
+      : path.join(prefix, 'lib', 'node_modules', '@lch-1', 'hnd');
+    if (path.resolve(packageRoot) !== configuredTarget) {
+      prefix = await activeGlobalPrefix(packageRoot, platform);
+      if (!prefix) return { status: 'skipped', reason: 'not_global' };
+    }
     const globalRoot = platform === 'win32' ? path.join(prefix, 'node_modules') : path.join(prefix, 'lib', 'node_modules');
     const target = path.join(globalRoot, '@lch-1', 'hnd');
     if ((await fs.lstat(path.dirname(target))).isSymbolicLink()

@@ -69,6 +69,40 @@ test('npm failure is bounded and sanitized, including permissions, timeouts and 
   }
 });
 
+test('a changed npm prefix updates the verified active global launcher without touching the new prefix', async (t) => {
+  if (process.platform === 'win32') return;
+  const f = await fixture(t);
+  const entrypoint = path.join(f.packageRoot, 'bin', 'hnd.mjs');
+  await fs.mkdir(path.dirname(entrypoint));
+  await fs.writeFile(entrypoint, '');
+  await fs.mkdir(path.join(f.prefix, 'bin'));
+  await fs.symlink(entrypoint, path.join(f.prefix, 'bin', 'hnd'));
+  const configuredPrefix = path.join(path.dirname(f.prefix), 'new npm prefix');
+  const otherPackage = path.join(configuredPrefix, 'lib', 'node_modules', '@lch-1', 'hnd');
+  await fs.mkdir(otherPackage, { recursive: true });
+  const otherMetadata = JSON.stringify({ name: '@lch-1/hnd', version: '0.3.0' });
+  await fs.writeFile(path.join(otherPackage, 'package.json'), otherMetadata);
+  let installs = 0;
+  const result = await applyNpmUpdate({ ...f, run: async (_command, args) => {
+    if (args[1] === 'prefix') return { stdout: configuredPrefix };
+    installs++;
+    assert.equal(args[args.indexOf('--prefix') + 1], f.prefix);
+    await f.writeVersion(f.latestVersion);
+    return { stdout: '' };
+  } });
+  assert.deepEqual(result, { status: 'updated', previousVersion: '0.2.4', version: f.latestVersion });
+  assert.equal(installs, 1);
+  assert.equal(await fs.readFile(path.join(otherPackage, 'package.json'), 'utf8'), otherMetadata);
+
+  // An unrelated launcher cannot establish ownership of this package.
+  await fs.unlink(path.join(f.prefix, 'bin', 'hnd'));
+  await fs.symlink(path.join(f.env.PATH, 'node'), path.join(f.prefix, 'bin', 'hnd'));
+  assert.deepEqual(await applyNpmUpdate({ ...f, run: async (_command, args) => {
+    assert.equal(args[1], 'prefix');
+    return { stdout: configuredPrefix };
+  } }), { status: 'skipped', reason: 'not_global' });
+});
+
 test('source checkouts, invalid versions, npm links and different prefixes never trigger installation', async (t) => {
   const f = await fixture(t);
   for (const latestVersion of [null, '0.2.5\n', '1.0.0;command']) {

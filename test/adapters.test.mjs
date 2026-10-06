@@ -265,6 +265,19 @@ test('setup is idempotent and consolidates duplicate managed entries without tou
   assert.deepEqual(await planInstall(setupOptions), []);
 });
 
+test('setup preserves healthy hook configuration bytes after an agent reformats the file', async (t) => {
+  const fixture = await makeHome(t);
+  const setupOptions = options(fixture.env);
+  await applyOperations(await planInstall(setupOptions));
+  for (const file of [fixture.paths.claude.settings, fixture.paths.codex.hooks, fixture.paths.cursor.hooks]) {
+    const config = await readJson(file);
+    const reformatted = `${JSON.stringify(config)}\n\n`;
+    await write(file, reformatted);
+    assert.deepEqual(await planInstall(setupOptions), []);
+    assert.equal(await fs.readFile(file, 'utf8'), reformatted);
+  }
+});
+
 test('setup migrates standalone launcher hooks and uninstall removes the npm hooks', async (t) => {
   const fixture = await makeHome(t);
   const oldOptions = options(fixture.env, {

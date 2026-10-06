@@ -218,7 +218,9 @@ export async function planAgentInstall(agent, options = {}) {
       commands: runtime.commands,
       filePath: runtime.configPath,
     });
-  const nextConfig = serializeJsonDocument(nextValue, document.format);
+  const nextConfig = inspection.status === 'ok'
+    ? currentConfig
+    : serializeJsonDocument(nextValue, document.format);
   const operations = [];
   if (nextConfig !== currentConfig) {
     operations.push(makeWriteOperation({
