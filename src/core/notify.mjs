@@ -25,6 +25,7 @@ import { redactSensitiveText } from './privacy.mjs';
 const TURN_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SEND_TIMEOUT_MS = 4_000;
 const MAX_FIELD_LENGTH = 300;
+const MAX_RESPONSE_LENGTH = 6_000;
 
 function settingsFile(env) {
   return path.join(statePaths(env).home, APP_SETTINGS_PATH);
@@ -216,7 +217,7 @@ function turnDirectory(env) {
 async function pruneTurnMarkers(directory, clock) {
   const now = clock.now();
   for (const file of await listFiles(directory, { suffix: '.json' }).catch(() => [])) {
-    const marker = await readJson(file, { optional: true });
+    const marker = await readJson(file, { optional: true }).catch(() => null);
     const startedAt = Date.parse(marker?.startedAt ?? '');
     if (!Number.isFinite(startedAt) || now - startedAt > TURN_RETENTION_MS) {
       await removeFile(file).catch(() => {});
@@ -234,34 +235,59 @@ async function pruneTurnMarkers(directory, clock) {
  * check and one write, and never scans the directory; expiry is swept in
  * consumeTurnStart, which runs under the five-second stop budget instead.
  */
-export async function markTurnStart({ env = process.env, agent, sessionKey, clock = Date } = {}) {
+export async function markTurnStart({ env = process.env, agent, sessionKey, turnId, clock = Date, onError } = {}) {
+  if (!sessionKey) return false;
   try {
     const directory = turnDirectory(env);
     await ensureDirectory(directory, undefined, { trustedRoot: statePaths(env).home });
     await writeJsonAtomic(path.join(directory, `${turnKey(agent, sessionKey)}.json`), {
       startedAt: new Date(clock.now()).toISOString(),
+      turnId: typeof turnId === 'string' ? turnId : null,
     });
     return true;
-  } catch {
+  } catch (error) {
+    onError?.(error);
     return false;
   }
 }
 
-export async function consumeTurnStart({ env = process.env, agent, sessionKey, clock = Date } = {}) {
+export async function consumeTurnStart({ env = process.env, agent, sessionKey, turnId, clock = Date, details = false } = {}) {
+  const result = (elapsedSeconds = null, issue = null) => details ? { elapsedSeconds, issue } : elapsedSeconds;
+  if (!sessionKey) return result(null, 'session_missing');
   try {
     const directory = turnDirectory(env);
     const file = path.join(directory, `${turnKey(agent, sessionKey)}.json`);
     const marker = await readJson(file, { optional: true });
-    await removeFile(file).catch(() => {});
+    // Never reuse a marker that could not be consumed (including EROFS).
+    // A later hook would otherwise report another turn's elapsed time.
+    const consumed = await removeFile(file);
     // Sweep abandoned markers here rather than on the prompt path: a session
     // that ends without a stop hook would otherwise leave a file behind.
     await pruneTurnMarkers(directory, clock);
     const startedAt = Date.parse(marker?.startedAt ?? '');
-    if (!Number.isFinite(startedAt)) return null;
-    return Math.max(0, (clock.now() - startedAt) / 1000);
-  } catch {
-    return null;
+    if (!consumed || !Number.isFinite(startedAt)) return result(null, 'start_missing');
+    if (marker.turnId && marker.turnId !== turnId) return result(null, 'turn_mismatch');
+    const elapsed = clock.now() - startedAt;
+    if (elapsed < 0 || elapsed > TURN_RETENTION_MS) return result(null, 'start_expired');
+    return result(elapsed / 1000);
+  } catch (error) {
+    return result(null, ['EROFS', 'EACCES', 'EPERM', 'STATE_CORRUPT'].includes(error.code) ? error.code : 'state_unavailable');
   }
+}
+
+/** Stop payloads belong to this response; selected work and transcripts may not. */
+export function hookFinalResponse(payload = {}) {
+  return [payload.last_assistant_message, payload.lastAssistantMessage, payload.assistant_message]
+    .find((value) => typeof value === 'string' && value.trim()) ?? '';
+}
+
+function trimResponse(value) {
+  if (typeof value !== 'string') return '';
+  const redacted = redactSensitiveText(value).text
+    .replace(/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gu, '[REDACTED:webhook]')
+    .replace(/https:\/\/(?:discord(?:app)?\.com|(?:ptb|canary)\.discord\.com)\/api\/(?:v\d+\/)?webhooks\/\d+\/[\w-]+/gu, '[REDACTED:webhook]')
+    .replaceAll(/\r\n?/gu, '\n').replaceAll(/\u0000/gu, '').trim();
+  return redacted.length > MAX_RESPONSE_LENGTH ? `${redacted.slice(0, MAX_RESPONSE_LENGTH - 1)}…` : redacted;
 }
 
 function trimField(value) {
@@ -280,6 +306,9 @@ export function buildNotifyEvent({
   changedCount,
   elapsedSeconds,
   work,
+  response,
+  responseStatus,
+  timingIssue,
 } = {}) {
   return {
     phase,
@@ -292,6 +321,9 @@ export function buildNotifyEvent({
     title: trimField(work?.task ?? work?.title),
     currentState: trimField(work?.currentState),
     nextStep: trimField(Array.isArray(work?.nextSteps) ? work.nextSteps[0] : work?.nextSteps),
+    response: trimResponse(response),
+    responseStatus: responseStatus === 'missing' ? 'missing' : null,
+    timingIssue: ['EROFS', 'EACCES', 'EPERM', 'STATE_CORRUPT', 'session_missing', 'start_missing', 'turn_mismatch', 'start_expired', 'state_unavailable'].includes(timingIssue) ? timingIssue : null,
   };
 }
 

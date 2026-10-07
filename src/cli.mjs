@@ -20,7 +20,7 @@ import {
   VERSION,
 } from './constants.mjs';
 import { createCore } from './core/index.mjs';
-import { buildNotifyEvent, consumeTurnStart, getNotifySettings, markTurnStart } from './core/notify.mjs';
+import { buildNotifyEvent, consumeTurnStart, getNotifySettings, hookFinalResponse, markTurnStart } from './core/notify.mjs';
 import {
   NOTIFY_DEFAULT_THRESHOLD_SECONDS,
   NOTIFY_DEFAULT_TRIGGER,
@@ -1517,12 +1517,13 @@ const AGENT_LABELS = Object.freeze({ claude: 'Claude Code', codex: 'Codex', curs
  * Posts the end-of-turn notification. Every failure here is reported to stderr
  * and swallowed: a webhook outage must never fail the agent's turn.
  */
-async function notifyFromHook({ agent, phase, cwd, capture, env, sessionKey, stderr, lockDeadlineAt }) {
-  let elapsedSeconds = null;
+async function notifyFromHook({ agent, phase, payload, cwd, capture, captureComplete, env, sessionKey, stderr, lockDeadlineAt }) {
   try {
     // The marker is always consumed, even when no channel is configured, so a
     // later turn can never inherit a stale start time.
-    elapsedSeconds = await consumeTurnStart({ env, agent, sessionKey });
+    const { elapsedSeconds, issue: timingIssue } = await consumeTurnStart({
+      env, agent, sessionKey, turnId: payload.turn_id ?? payload.prompt_id ?? payload.generation_id, details: true,
+    });
     // Read the channel list straight from disk rather than through the state
     // lock. It is a single file with no cross-record invariant, and taking the
     // generation lock here would make every stop hook contend with every other
@@ -1530,18 +1531,32 @@ async function notifyFromHook({ agent, phase, cwd, capture, env, sessionKey, std
     const { channels } = await getNotifySettings({ env });
     if (!channels.length) return null;
     const notifyCore = createCore({ env, cwd, sessionKey, agent, lockDeadlineAt });
-    const work = await notifyCore.handoff.show().catch(() => null);
-    const event = buildNotifyEvent({
-      phase,
-      agentLabel: AGENT_LABELS[agent] ?? agent,
-      repository: cwd ? path.basename(cwd) : '',
-      branch: capture?.checkpoint?.branch,
-      changed: capture?.changed === true,
-      changedCount: capture?.checkpoint?.totalChanges,
-      elapsedSeconds,
-      work,
+    const response = hookFinalResponse(payload);
+    const send = (selected, progress) => notifyCore.notify.send({
+      event: buildNotifyEvent({
+        phase,
+        agentLabel: AGENT_LABELS[agent] ?? agent,
+        repository: cwd ? path.basename(cwd) : '',
+        branch: progress?.checkpoint?.branch,
+        changed: progress?.changed === true,
+        changedCount: progress?.checkpoint?.totalChanges,
+        elapsedSeconds,
+        response,
+        responseStatus: response ? null : 'missing',
+        timingIssue,
+      }),
+      language: cliLanguage(), channels: selected,
     });
-    const result = await notifyCore.notify.send({ event, language: cliLanguage(), channels });
+    // Only changed-files channels depend on a checkpoint. Ordinary response
+    // notifications can arrive while capture/heartbeat waits on a state lock.
+    const immediate = channels.filter((channel) => channel.trigger !== 'changed-files');
+    const afterCapture = channels.filter((channel) => channel.trigger === 'changed-files');
+    const deliveries = [send(immediate, capture())];
+    if (afterCapture.length) {
+      deliveries.push(captureComplete.then(() => send(afterCapture, capture())));
+    }
+    const completed = await Promise.all(deliveries);
+    const result = { sent: completed.reduce((sum, item) => sum + item.sent, 0), results: completed.flatMap((item) => item.results) };
     const failed = result.results.filter((entry) => !entry.delivered);
     if (failed.length) {
       writeText(stderr, `hnd hook: notification not delivered (${failed.map((entry) => `${entry.id}:${entry.reason}`).join(', ')}).`);
@@ -2074,43 +2089,50 @@ async function mainImpl(argv = process.argv.slice(2), {
       agent === 'cursor' ? runtimeEnv.CURSOR_PROJECT_DIR : undefined,
     );
     if (!['start', 'prompt'].includes(phase)) {
-      if (phase === 'stop' || phase === 'precompact') {
-        for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr, lockDeadlineAt: hookLockDeadline });
-      }
       const captures = new Map();
-      try {
-        if (await hookScopedCore.auto.get()) {
-          for (const hookCwd of hookCwds) {
-            try {
-              const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent, lockDeadlineAt: hookLockDeadline });
-              captures.set(hookCwd, await hookCore.auto.capture({ agent }));
-            } catch (error) {
-              if (!optionalMaterializationErrors.has(error?.code)) {
-                writeText(
-                  stderr,
-                  `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
-                );
+      const captureProgress = async () => {
+        if (phase === 'stop' || phase === 'precompact') {
+          for (const hookCwd of hookCwds) await renewHookWork({ cwd: hookCwd, env: runtimeEnv, sessionKey: hookSessionKey, agent, stderr, lockDeadlineAt: hookLockDeadline });
+        }
+        try {
+          if (await hookScopedCore.auto.get()) {
+            for (const hookCwd of hookCwds) {
+              try {
+                const hookCore = createCore({ env: runtimeEnv, cwd: hookCwd, sessionKey: hookSessionKey, agent, lockDeadlineAt: hookLockDeadline });
+                captures.set(hookCwd, await hookCore.auto.capture({ agent }));
+              } catch (error) {
+                if (!optionalMaterializationErrors.has(error?.code)) {
+                  writeText(
+                    stderr,
+                    `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
+                  );
+                }
               }
             }
           }
+        } catch (error) {
+          writeText(
+            stderr,
+            `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
+          );
         }
-      } catch (error) {
-        writeText(
-          stderr,
-          `hnd hook: automatic progress unavailable (${error.code || error.name || 'ERROR'}).`,
-        );
-      }
+      };
+      const captureComplete = captureProgress();
       if (phase === 'stop' || phase === 'end') {
-        await notifyFromHook({
+        await Promise.all([captureComplete, notifyFromHook({
           agent,
           phase,
+          payload,
           cwd: hookCwds[0],
-          capture: captures.get(hookCwds[0]) ?? null,
+          capture: () => captures.get(hookCwds[0]) ?? null,
+          captureComplete,
           env: runtimeEnv,
           sessionKey: hookSessionKey,
           stderr,
           lockDeadlineAt: hookLockDeadline,
-        });
+        })]);
+      } else {
+        await captureComplete;
       }
       await suggestKnowledgeFromSession({
         core: hookScopedCore,
@@ -2141,7 +2163,11 @@ async function mainImpl(argv = process.argv.slice(2), {
     // A turn's start time is what separates a quick answer from a long build.
     // It is recorded before any network work so a slow sync cannot skew it.
     if (phase === 'prompt') {
-      await markTurnStart({ env: runtimeEnv, agent, sessionKey: hookSessionKey });
+      await markTurnStart({
+        env: runtimeEnv, agent, sessionKey: hookSessionKey,
+        turnId: payload.turn_id ?? payload.prompt_id ?? payload.generation_id,
+        onError: (error) => writeText(stderr, `hnd hook: turn timing unavailable (${error.code || error.name || 'ERROR'}); final-response notifications remain independent of work recording.`),
+      });
     }
     await runHookAutomaticSync({
       core: hookScopedCore,

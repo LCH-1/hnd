@@ -539,7 +539,7 @@ Claude Code·Codex·Cursor의 stop/SessionEnd 훅에서 보냅니다. 룰이 아
 모델이 지시를 따르는지와 무관하게 동작합니다.
 웹훅 주소는 종단간 암호화된 설정에만 저장하고 룰이나 프롬프트에는 넣지 않습니다.
 서버는 내용을 읽을 수 없습니다. hooks.slack.com과 discord.com 주소만 허용합니다.
-메시지에는 저장소·브랜치·소요 시간과 hnd work 기록 요약이 들어가며,
+메시지에는 저장소·브랜치·소요 시간과 종료 훅이 제공한 이번 최종 답변이 들어가며,
 알려진 형식의 credential은 보내기 전에 가림 처리합니다.
 `,
   privacy: `hnd privacy — 자동 수집·민감정보·보존
@@ -644,7 +644,7 @@ Delivered from the stop and SessionEnd hooks of Claude Code, Codex, and Cursor. 
 this is a hook rather than a rule, it does not depend on the model following an instruction.
 Webhook addresses are stored only in the end-to-end encrypted settings, never in a rule or
 prompt. The server cannot read them. Only hooks.slack.com and discord.com hosts are accepted.
-Messages carry the repository, branch, elapsed time, and a summary of the hnd work record;
+Messages carry the repository, branch, elapsed time, and the final response supplied by the completion hook;
 credentials in known formats are masked before sending.
 `,
     privacy: `hnd privacy — collection, sensitive data, and retention

@@ -9,6 +9,7 @@ import { createCore } from '../src/core/index.mjs';
 import {
   buildNotifyEvent,
   consumeTurnStart,
+  hookFinalResponse,
   markTurnStart,
   sendNotification,
 } from '../src/core/notify.mjs';
@@ -136,6 +137,39 @@ test('message fields are collapsed and screened for secrets', () => {
   assert.equal(event.title, 'Ship it');
 });
 
+test('final response wins over selected work and preserves paragraphs while redacting secrets', () => {
+  const response = hookFinalResponse({ last_assistant_message: `CURRENT ANSWER\n\nBearer ${'a'.repeat(30)}\n${SLACK_URL}` });
+  const event = buildNotifyEvent({
+    phase: 'stop', response,
+    work: { task: 'OLD WORK', currentState: 'OLD STATE', nextSteps: ['OLD NEXT'] },
+  });
+  for (const provider of ['slack', 'discord']) {
+    const rendered = renderNotifyText(event, { language: 'ko', provider });
+    assert.match(rendered, /CURRENT ANSWER\n\n/u);
+    assert.doesNotMatch(rendered, /OLD WORK|OLD STATE|OLD NEXT/u);
+    assert.doesNotMatch(rendered, new RegExp('a'.repeat(30), 'u'));
+    assert.ok(!rendered.includes(SLACK_URL));
+    assert.match(rendered, /REDACTED/u);
+  }
+  const rendered = renderNotifyText(buildNotifyEvent({ response: '답변'.repeat(5_000) }), { provider: 'discord' });
+  assert.ok(rendered.length <= 1_800);
+  assert.ok(rendered.endsWith('…'));
+});
+
+test('missing final response and unavailable timing are explicit instead of borrowing an old task', () => {
+  const event = buildNotifyEvent({
+    responseStatus: 'missing', timingIssue: 'EROFS',
+    work: { task: 'OLD WORK', currentState: 'OLD STATE' },
+  });
+  const rendered = renderNotifyText(event, { language: 'ko' });
+  assert.match(rendered, /최종 답변을 종료 훅에서 받지 못했습니다/u);
+  assert.match(rendered, /소요 시간 측정 불가 \(EROFS\)/u);
+  assert.doesNotMatch(rendered, /OLD WORK|OLD STATE/u);
+  assert.equal(hookFinalResponse({ prompt: 'USER INPUT', text: 'THOUGHT', transcript_path: '/old.jsonl' }), '');
+  assert.equal(hookFinalResponse({ lastAssistantMessage: 'alias answer' }), 'alias answer');
+  assert.match(renderNotifyText({ phase: 'end', changedCount: 2 }, { language: 'ko' }), /세션 종료[\s\S]+미커밋 파일 2개/u);
+});
+
 test('delivery failures are reported as a reason instead of throwing', async () => {
   const ok = await sendNotification({ channel: channel(), fetchImpl: async () => ({ ok: true, status: 200 }) });
   assert.deepEqual(ok, { id: 'ch1', delivered: true, reason: null });
@@ -214,6 +248,25 @@ test('turn duration is measured from the prompt hook and consumed once', async (
   // Sessions are keyed separately so two agents cannot read each other's turn.
   await markTurnStart({ env, agent: 'codex', sessionKey: 's1', clock });
   assert.equal(await consumeTurnStart({ env, agent: 'claude', sessionKey: 's1', clock }), null);
+});
+
+test('turn markers reject other turns, missing identities and expired timestamps', async (t) => {
+  const { env } = await fixture(t);
+  let now = 3_000_000;
+  const clock = { now: () => now };
+  assert.equal(await markTurnStart({ env, agent: 'codex', sessionKey: null, clock }), false);
+  await markTurnStart({ env, agent: 'codex', sessionKey: 's1', turnId: 'old', clock });
+  assert.deepEqual(await consumeTurnStart({ env, agent: 'codex', sessionKey: 's1', turnId: 'new', clock, details: true }), {
+    elapsedSeconds: null, issue: 'turn_mismatch',
+  });
+  await markTurnStart({ env, agent: 'codex', sessionKey: 's1', turnId: 'new', clock });
+  now += 1_500;
+  assert.equal(await consumeTurnStart({ env, agent: 'codex', sessionKey: 's1', turnId: 'new', clock }), 1.5);
+  await markTurnStart({ env, agent: 'codex', sessionKey: 's1', clock });
+  now += 25 * 60 * 60 * 1_000;
+  assert.deepEqual(await consumeTurnStart({ env, agent: 'codex', sessionKey: 's1', clock, details: true }), {
+    elapsedSeconds: null, issue: 'start_expired',
+  });
 });
 
 test('the prompt-phase write stays off the directory-scanning path', async (t) => {

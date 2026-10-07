@@ -137,18 +137,33 @@ function summaryLines(event, language) {
   const ko = language === 'ko';
   const lines = [];
   const scope = [event.repository, event.branch && `(${event.branch})`].filter(Boolean).join(' ');
-  lines.push(`${ko ? '✅ 작업 완료' : '✅ Turn complete'}${scope ? ` · ${scope}` : ''}`);
+  const heading = event.phase === 'end'
+    ? (ko ? '✅ 세션 종료' : '✅ Session ended')
+    : (ko ? '✅ 작업 완료' : '✅ Turn complete');
+  lines.push(`${heading}${scope ? ` · ${scope}` : ''}`);
   const facts = [
     event.agentLabel,
     formatDuration(event.elapsedSeconds, language),
     typeof event.changedCount === 'number' && event.changedCount > 0
-      ? (ko ? `변경 ${event.changedCount}개` : `${event.changedCount} changed`)
+      ? (ko ? `미커밋 파일 ${event.changedCount}개` : `${event.changedCount} uncommitted files`)
       : '',
   ].filter(Boolean);
   if (facts.length) lines.push(facts.join(' · '));
-  if (event.title) lines.push(`*${event.title}*`);
-  if (event.currentState) lines.push(`${ko ? '지금' : 'Now'}: ${event.currentState}`);
-  if (event.nextStep) lines.push(`${ko ? '다음' : 'Next'}: ${event.nextStep}`);
+  if (event.timingIssue) {
+    const cause = ['EROFS', 'EACCES', 'EPERM', 'STATE_CORRUPT'].includes(event.timingIssue) ? ` (${event.timingIssue})` : '';
+    lines.push(ko ? `소요 시간 측정 불가${cause}` : `Turn duration unavailable${cause}`);
+  }
+  if (event.response) {
+    lines.push('', event.response);
+  } else if (event.responseStatus === 'missing') {
+    lines.push(ko
+      ? '최종 답변을 종료 훅에서 받지 못했습니다. 에이전트 업데이트와 훅 설정을 확인하세요.'
+      : 'The completion hook did not receive the final response. Check the agent version and hook settings.');
+  } else {
+    if (event.title) lines.push(`*${event.title}*`);
+    if (event.currentState) lines.push(`${ko ? '지금' : 'Now'}: ${event.currentState}`);
+    if (event.nextStep) lines.push(`${ko ? '다음' : 'Next'}: ${event.nextStep}`);
+  }
   return lines;
 }
 
