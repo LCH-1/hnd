@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { optionString, parseArgs, UsageError } from './args.mjs';
 
 import { main as fallbackMain } from './cli.mjs';
 import { VERSION as FALLBACK_RUNTIME_VERSION } from './constants.mjs';
@@ -271,6 +272,25 @@ export async function scheduleAutomaticUpdate(env, {
   return true;
 }
 
+function launcherStateHome(argv, env) {
+  const { options } = parseArgs(argv);
+  const stateHome = optionString(options, 'state_home');
+  if (stateHome === undefined) return { env, argv };
+  if (!path.isAbsolute(stateHome)) throw new UsageError('--state-home must be an absolute path.');
+  const filtered = [];
+  let passthrough = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--') passthrough = true;
+    if (!passthrough && /^--state[-_]home(?:=|$)/u.test(token)) {
+      if (!token.includes('=')) index += 1;
+      continue;
+    }
+    filtered.push(token);
+  }
+  return { env: { ...env, HND_HOME: stateHome }, argv: filtered };
+}
+
 export async function launcherMain(argv = process.argv.slice(2), {
   env = process.env,
   cwd = process.cwd(),
@@ -282,14 +302,22 @@ export async function launcherMain(argv = process.argv.slice(2), {
   fetchImpl = fetch,
   npmUpdate = applyNpmUpdate,
 } = {}) {
-  if (argv[0] === 'update') {
-    await runUpdateCommand(argv, { env, stdout, stderr, fetchImpl, execPath, npmUpdate });
+  let selected;
+  try {
+    selected = launcherStateHome(argv, env);
+  } catch {
+    // The CLI owns validation and the fail-open boundary for malformed hooks.
+    return fallbackMain(argv, { env, cwd, stdin, stdout, stderr, execPath, binPath });
+  }
+  const runtimeEnv = selected.env;
+  if (selected.argv[0] === 'update') {
+    await runUpdateCommand(selected.argv, { env: runtimeEnv, stdout, stderr, fetchImpl, execPath, npmUpdate });
     return;
   }
-  const runtime = await selectRuntime(env);
-  scheduleAutomaticUpdate(env, { execPath }).catch(() => {});
+  const runtime = await selectRuntime(runtimeEnv);
+  scheduleAutomaticUpdate(runtimeEnv, { execPath }).catch(() => {});
   return runtime.main(argv, {
-    env,
+    env: runtimeEnv,
     cwd,
     stdin,
     stdout,

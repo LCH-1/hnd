@@ -277,6 +277,24 @@ test('CLI delivers the local-first policy and cross-agent handoff workflow', asy
   assert.equal(diagnosis.ok, true);
   assert.ok(diagnosis.adapters.every((adapter) => adapter.ok));
 
+  const pendingFile = path.join(stateHome, 'cache', 'auto-sync-pending.json');
+  await writeJson(pendingFile, {
+    schemaVersion: 1, pending: true, kind: 'attention', reason: 'local_state', attempts: 1,
+    firstPendingAt: '2026-09-28T00:00:00Z', lastAttemptAt: '2026-09-28T00:00:00Z',
+  });
+  const blockedSync = JSON.parse((await run(['doctor', '--json'])).stdout);
+  assert.equal(blockedSync.ok, false);
+  assert.equal(blockedSync.sync.pending.reason, 'local_state');
+  assert.ok(blockedSync.issues.some((issue) => issue.code === 'SYNC_NEEDS_ATTENTION'));
+  await fs.unlink(pendingFile);
+  const unregistered = path.join(root, 'unregistered');
+  await fs.mkdir(unregistered);
+  git(unregistered, 'init', '--initial-branch=main');
+  const missingBinding = JSON.parse((await run(['doctor', '--cwd', unregistered, '--json'])).stdout);
+  assert.equal(missingBinding.ok, false);
+  assert.equal(missingBinding.repositoryError.code, 'REPOSITORY_NOT_REGISTERED');
+  assert.equal(missingBinding.environment, null);
+
   await run(['uninstall', '--agents', 'all']);
   const uninstalledClaude = JSON.parse(await fs.readFile(claudeSettings, 'utf8'));
   const uninstalledCodex = JSON.parse(await fs.readFile(codexHooks, 'utf8'));

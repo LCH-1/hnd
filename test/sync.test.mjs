@@ -55,6 +55,28 @@ async function temporaryDirectory(t, prefix) {
   return directory;
 }
 
+test('successive sync requests share an operation deadline instead of resetting the timeout', async () => {
+  let calls = 0;
+  const client = new SyncClient({
+    baseUrl: 'https://sync.example.invalid', deviceToken: 'diagnostic-token',
+    timeoutMs: 1_000, deadlineAt: Date.now() + 200,
+    fetchImpl: async (_, { signal }) => {
+      calls += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', aborted);
+          resolve(new Response(null, { status: 304 }));
+        }, calls === 1 ? 100 : 1_000);
+        function aborted() { clearTimeout(timer); reject(signal.reason); }
+        signal.addEventListener('abort', aborted, { once: true });
+      });
+    },
+  });
+  assert.equal((await client.getEncryptedSnapshot()).notModified, true);
+  await assert.rejects(client.getEncryptedSnapshot(), { name: 'TimeoutError' });
+  assert.ok(calls <= 2);
+});
+
 async function startServer(t, options = {}) {
   const dataDirectory = await temporaryDirectory(t, 'hnd-sync-server-');
   const errors = [];

@@ -273,7 +273,7 @@ test('the prompt-phase write stays off the directory-scanning path', async (t) =
   const { env } = await fixture(t);
   let now = 2_000_000;
   const clock = { now: () => now };
-  // UserPromptSubmit runs under a two-second vendor timeout, so marking a turn
+  // UserPromptSubmit runs under a short vendor timeout, so marking a turn
   // must not grow with the number of sessions that ever ran on this machine.
   for (const sessionKey of ['a', 'b', 'c']) await markTurnStart({ env, agent: 'codex', sessionKey, clock });
   const directory = path.join(env.HND_HOME, 'runtime', 'turns');

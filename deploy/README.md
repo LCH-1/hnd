@@ -54,7 +54,7 @@ client ── https://hnd.example.com ──> host nginx ──> 127.0.0.1:8787
    ```sh
    curl --fail --output /dev/null https://hnd.example.com/
    curl --fail https://hnd.example.com/healthz
-   npm view '@lch-1/hnd@0.2.2' version
+   npm view '@lch-1/hnd@latest' version
    ```
 
 5. 브라우저에서 domain을 열고 첫 소유자를 설정합니다. 계정이 없을 때는 로그인

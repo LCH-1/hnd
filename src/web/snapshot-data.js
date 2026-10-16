@@ -1,5 +1,6 @@
 import { ApiError } from "./api.js";
 import { APP_SETTINGS_PATH, effectiveAppSettings, validAppSettings } from "../shared/app-settings.mjs";
+import { mergeHandoffRecords, mergeCheckpointRecords } from "../shared/record-merge.mjs";
 import {
   loadEncryptedSnapshot,
   openBrowserValue,
@@ -29,6 +30,7 @@ const ACTIVE_WORK_PATTERN =
   /^repositories\/([0-9a-f-]{36})\/handoffs\/([0-9a-f-]{36})\.json$/i;
 const CLOSED_WORK_PATTERN =
   /^repositories\/([0-9a-f-]{36})\/archive\/([0-9a-f-]{36})\.json$/i;
+const CHECKPOINT_PATTERN = /^repositories\/([0-9a-f-]{36})\/checkpoints\/([a-f0-9]{64})\.json$/i;
 const KNOWLEDGE_PATTERN = /^knowledge\/([0-9a-f-]{36})\.json$/i;
 const KNOWLEDGE_TYPES = new Set([
   "note", "decision", "solution", "failure", "caution", "command",
@@ -37,6 +39,7 @@ const KNOWLEDGE_TYPES = new Set([
 const KNOWLEDGE_STATES = new Set([
   "verified", "review_needed", "contradicted", "retired", "superseded",
 ]);
+const EXPERIMENT_SOURCE_PREFIX = "hnd:experiment:v1:";
 const textEncoder = new TextEncoder();
 const strictTextDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -1861,7 +1864,7 @@ function mergeJsonValue(base, local, remote) {
       ...Object.keys(local),
       ...Object.keys(remote),
     ]);
-    const value = {};
+    const value = Object.create(null);
     let conflicted = false;
     for (const key of [...keys].sort(compareCodePoints)) {
       const merged = mergeJsonValue(
@@ -1903,6 +1906,14 @@ function parsedJsonFile(file) {
 }
 
 async function mergeJsonFile(path, base, local, remote) {
+  const checkpoint = CHECKPOINT_PATTERN.exec(path);
+  if (checkpoint) {
+    const parsed = [base, local, remote].map((file) => file === null ? null : parsedJsonFile(file));
+    if (parsed.some((value, index) => [base, local, remote][index] !== null
+      && (!value || value.repoId !== checkpoint[1] || value.key !== checkpoint[2]))) return null;
+    const merged = mergeCheckpointRecords(...parsed);
+    return merged ? { file: merged.value === null ? null : await makeTextFile(path, jsonText(merged.value)), conflicted: false } : null;
+  }
   if (!mergeableJsonPath(path) || local === null || remote === null) return null;
   const parsedBase = parsedJsonFile(base);
   const parsedLocal = parsedJsonFile(local);
@@ -1989,8 +2000,19 @@ export async function mergeBrowserSnapshots(base, local, remote) {
     } else if (workFileGroupsEqual(remoteGroup, baseGroup)) {
       selected = localGroup;
     } else {
-      selected = localGroup;
-      conflicted = true;
+      // Moves and deletes still merge as logical IDs. Only a single active
+      // file on the same path can use the shared lease/progress merge rule.
+      let merged = null;
+      if ([baseGroup, localGroup, remoteGroup].every((group) => group.length === 1)
+        && baseGroup[0].path === localGroup[0].path && localGroup[0].path === remoteGroup[0].path) {
+        const match = ACTIVE_WORK_PATTERN.exec(localGroup[0].path);
+        const parsed = [baseGroup[0], localGroup[0], remoteGroup[0]].map(parsedJsonFile);
+        if (match && parsed.every((value) => value && value.repoId === match[1] && value.id === match[2])) {
+          merged = mergeHandoffRecords(...parsed);
+        }
+      }
+      selected = merged ? [await makeTextFile(localGroup[0].path, jsonText(merged.value))] : localGroup;
+      conflicted = !merged;
     }
 
     const chosen = preferredWorkFile(selected);
@@ -2255,36 +2277,48 @@ function workRecord(values, current = null) {
   const parentId = String(values.parentId ?? current?.parentId ?? "").trim() || null;
   if (parentId && !UUID_PATTERN.test(parentId))
     throw new Error("상위 작업 ID는 UUID 형식이어야 합니다.");
+  const existing = current ? structuredClone(current) : {};
+  for (const key of [
+    "repository", "name", "goal", "current", "next", "decision", "rejected",
+    "ready", "stale", "claimActive", "_rawStatus", "_path",
+  ]) delete existing[key];
+  const status = current?._rawStatus || current?.status || "active";
+  const requestedOwner = values.claimedBy === undefined ? current?.claimedBy : values.claimedBy;
+  const claimedBy = status === "closed"
+    ? null
+    : String(requestedOwner ?? "").trim() || null;
+  const sameOwner = claimedBy !== null && claimedBy === current?.claimedBy;
   return {
+    ...existing,
     schemaVersion: STATE_SCHEMA_VERSION,
     id: current?.id || crypto.randomUUID(),
     repoId: values.repoId,
-    status: current?._rawStatus || current?.status || "active",
-    task: requiredText(values.name, "작업 이름", {
+    status,
+    task: requiredText(values.name ?? current?.task, "작업 이름", {
       max: 200,
       singleLine: true,
     }),
-    objective: requiredText(values.goal, "목표"),
-    currentState: requiredText(values.current || "", "현재 상태", {
+    objective: requiredText(values.goal ?? current?.objective, "목표"),
+    currentState: requiredText(values.current ?? current?.currentState ?? "", "현재 상태", {
       allowEmpty: true,
     }),
     priority,
     workflowStatus,
     dependencies: [...new Set(dependencies)],
     parentId,
-    claimedBy: String(values.claimedBy ?? current?.claimedBy ?? "").trim() || null,
-    claimExpiresAt: String(values.claimedBy ?? current?.claimedBy ?? "").trim()
-      ? current?.claimedBy === String(values.claimedBy ?? current?.claimedBy).trim()
-        ? current?.claimExpiresAt || addHours(now, 2)
-        : addHours(now, 2)
+    claimedBy,
+    claimSessionKey: sameOwner ? current?.claimSessionKey ?? null : null,
+    claimExpiresAt: claimedBy
+      ? sameOwner ? current?.claimExpiresAt ?? null : addHours(now, 2)
       : null,
-    blockedReason: requiredText(values.blockedReason || "", "차단 원인", { allowEmpty: true, max: 4000 }),
-    unblockCriteria: requiredText(values.unblockCriteria || "", "해제 조건", { allowEmpty: true, max: 4000 }),
-    decisions: lines(values.decision),
-    failedApproaches: lines(values.rejected),
+    plannedFiles: current?.plannedFiles || [],
+    blockedReason: requiredText(values.blockedReason ?? current?.blockedReason ?? "", "차단 원인", { allowEmpty: true, max: 4000 }),
+    unblockCriteria: requiredText(values.unblockCriteria ?? current?.unblockCriteria ?? "", "해제 조건", { allowEmpty: true, max: 4000 }),
+    decisions: lines(values.decision ?? current?.decisions),
+    failedApproaches: lines(values.rejected ?? current?.failedApproaches),
     changedFiles: current?.changedFiles || [],
     validation: current?.validation || [],
-    nextSteps: lines(values.next),
+    nextSteps: lines(values.next ?? current?.nextSteps),
     openQuestions: current?.openQuestions || [],
     notes: current?.notes || [],
     worktree: current?.worktree || "web",
@@ -2398,31 +2432,65 @@ function knowledgeLocation(snapshot, values, current = null) {
   return { scope, repoId: repository.id, environment };
 }
 
+function experimentMarkers(entry) {
+  return (entry?.sources || []).filter((source) => source.kind === "import"
+    && typeof source.ref === "string" && source.ref.startsWith(EXPERIMENT_SOURCE_PREFIX));
+}
+
+function assertKnowledgeEditable(current, { review = false } = {}) {
+  if (!experimentMarkers(current).length) return;
+  if (current.state === "superseded") {
+    throw new Error("이미 채택한 실험 지식은 변경할 수 없습니다. 새 실험을 만들어 주세요.");
+  }
+  if (review) {
+    throw new Error("실험 지식은 PC에서 hnd know branch diff로 검토한 뒤 adopt로 채택해 주세요.");
+  }
+}
+
+function knowledgeSources(values, current) {
+  const sources = structuredClone(current?.sources || []);
+  if (values.sourceRef === undefined && values.sourceCommit === undefined) return sources;
+  const first = sources[0];
+  const ref = String(values.sourceRef ?? first?.ref ?? "").trim();
+  if (!ref) return sources.slice(1);
+  const sameRef = ref === first?.ref;
+  const commit = String(values.sourceCommit ?? (sameRef ? first?.commit : "") ?? "").trim() || null;
+  if (sameRef && commit === (first?.commit ?? null)) return sources;
+  const replacement = {
+    kind: /^https?:\/\//iu.test(ref) ? "url" : sameRef ? first.kind : "file",
+    ref,
+    label: sameRef ? first.label ?? null : null,
+    hash: sameRef ? first.hash ?? null : null,
+    commit,
+  };
+  return [replacement, ...sources.slice(1)];
+}
+
 function knowledgeRecord(snapshot, values, current = null) {
+  assertKnowledgeEditable(current);
   const now = new Date().toISOString();
   const type = String(values.type || current?.type || "note");
   const knowledgeState = String(values.state || current?.state || "verified");
   if (!KNOWLEDGE_TYPES.has(type)) throw new Error("지식 유형을 확인해 주세요.");
   if (!KNOWLEDGE_STATES.has(knowledgeState)) throw new Error("지식 상태를 확인해 주세요.");
-  const sourceRef = String(
-    values.sourceRef ?? current?.sources?.[0]?.ref ?? "",
-  ).trim();
-  const sourceCommit = String(
-    values.sourceCommit ?? current?.sources?.[0]?.commit ?? "",
-  ).trim();
-  const sources = sourceRef
-    ? [{
-        kind: /^https?:\/\//iu.test(sourceRef)
-          ? "url"
-          : current?.sources?.[0]?.kind === "url"
-            ? "file"
-            : current?.sources?.[0]?.kind || "file",
-        ref: sourceRef,
-        label: current?.sources?.[0]?.label || null,
-        hash: current?.sources?.[0]?.hash || null,
-        commit: sourceCommit || null,
-      }]
-    : (current?.sources || []);
+  const sources = knowledgeSources(values, current);
+  const location = knowledgeLocation(snapshot, values, current);
+  const approval = values.approval || current?.approval || "approved";
+  if (!["approved", "pending", "rejected"].includes(approval)) {
+    throw new Error("지식 검토 상태를 확인해 주세요.");
+  }
+  if (experimentMarkers(current).length) {
+    if (knowledgeState === "superseded" || approval !== "pending"
+      || JSON.stringify(experimentMarkers({ sources })) !== JSON.stringify(experimentMarkers(current))) {
+      throw new Error("실험 지식의 출처와 검토 상태는 유지해야 합니다. diff/adopt로 채택해 주세요.");
+    }
+    if (location.scope !== current.scope || location.repoId !== current.repoId
+      || location.environment !== current.environment) {
+      throw new Error("실험 지식은 프로젝트나 환경을 변경할 수 없습니다.");
+    }
+  } else if (experimentMarkers({ sources }).length) {
+    throw new Error("실험 지식은 PC에서 hnd know branch new로 만들어 주세요.");
+  }
   const before = current ? {
     title: current.title,
     body: current.body,
@@ -2441,12 +2509,12 @@ function knowledgeRecord(snapshot, values, current = null) {
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     id: current?.id || crypto.randomUUID(),
-    title: requiredText(values.title, "제목", { max: 200 }),
-    body: requiredText(values.content ?? values.body ?? "", "본문", {
+    title: requiredText(values.title ?? current?.title, "제목", { max: 200 }),
+    body: requiredText(values.content ?? values.body ?? current?.body ?? "", "본문", {
       allowEmpty: true,
       max: MAX_FILE_BYTES / 2,
     }),
-    tags: normalizedTags(values.tags || []),
+    tags: normalizedTags(values.tags ?? current?.tags ?? []),
     type,
     state: knowledgeState,
     pinned:
@@ -2456,7 +2524,7 @@ function knowledgeRecord(snapshot, values, current = null) {
     sources,
     relationships: current?.relationships || [],
     feedback: current?.feedback || { helpful: 0, wrong: 0, irrelevant: 0 },
-    approval: values.approval || current?.approval || "approved",
+    approval,
     history: [
       ...(current?.history || []),
       {
@@ -2468,7 +2536,7 @@ function knowledgeRecord(snapshot, values, current = null) {
         before,
       },
     ].slice(-20),
-    ...knowledgeLocation(snapshot, values, current),
+    ...location,
     createdAt: current?.createdAt || now,
     updatedAt: now,
   };
@@ -3517,6 +3585,9 @@ export class SnapshotDataStore {
         ...current,
         status: "closed",
         workflowStatus: "done",
+        claimedBy: null,
+        claimSessionKey: null,
+        claimExpiresAt: null,
         updatedAt: now,
         closedAt: now,
         history: [
@@ -3632,6 +3703,7 @@ export class SnapshotDataStore {
       throw new Error("검토 동작을 확인해 주세요.");
     return this._commit(async (snapshot) => {
       const current = findKnowledge(snapshot, id);
+      assertKnowledgeEditable(current, { review: true });
       const now = new Date().toISOString();
       const record = {
         ...current,
@@ -3666,6 +3738,7 @@ export class SnapshotDataStore {
       throw new Error("평가 값을 확인해 주세요.");
     return this._commit(async (snapshot) => {
       const current = findKnowledge(snapshot, id);
+      assertKnowledgeEditable(current);
       const now = new Date().toISOString();
       const feedback = {
         helpful: 0,

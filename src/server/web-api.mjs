@@ -842,12 +842,13 @@ export class WebApiRouter {
     }
     if (pathname === '/api/web/settings' && req.method === 'GET') {
       const { authenticated } = this.#authenticate(req);
+      const signup = this.auth.publicSignupStatus();
       sendJson(res, 200, {
         user: authenticated.user,
         role: roleFor(authenticated),
         serverOwner: this.accounts.isServerOwner(authenticated.user.id),
-        signup: this.auth.publicSignupStatus(),
-        signupMode: this.auth.signupMode,
+        signup,
+        signupMode: signup.configuredMode,
         revisionRetention: this.snapshots.maxRevisionsPerTenant,
       });
       return;

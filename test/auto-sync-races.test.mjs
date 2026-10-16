@@ -7,7 +7,7 @@ import test from 'node:test';
 import { withFileLock, writeJsonAtomic } from '../src/core/fs.mjs';
 import { statePaths } from '../src/paths.mjs';
 import { snapshotDigest } from '../src/remote-cli.mjs';
-import { autoSync, readAutoSyncPending } from '../src/sync/auto.mjs';
+import { autoSync, readAutoSyncFailure, readAutoSyncPending } from '../src/sync/auto.mjs';
 import { captureSyncSnapshot } from '../src/sync/capture.mjs';
 import { readHookSyncMarker, syncForHook } from '../src/sync/hook-sync.mjs';
 
@@ -58,6 +58,49 @@ test('a hook waiting for the sync lock cannot erase a conflict or authentication
       assert.equal(reconciled, false);
     });
   }
+});
+
+test('legacy local-state attention revalidates and recovers without clearing protected barriers', async (t) => {
+  const { env } = await fixture(t);
+  let now = Date.parse('2026-10-16T00:00:00Z');
+  const clock = { now: () => now };
+  await autoSync({ env, clock, reconcile: async () => { throw Object.assign(new Error('private detail'), { code: 'EIO' }); } });
+  assert.equal((await readAutoSyncFailure({ env })).errorCode, 'EIO');
+  let calls = 0;
+  const reconcile = async () => { calls += 1; return { status: 'synced' }; };
+  assert.equal((await autoSync({ env, clock, reconcile })).blocked, true);
+  assert.equal(calls, 0);
+  now += 61_000;
+  assert.equal((await autoSync({ env, clock, reconcile })).status, 'synced');
+  assert.equal(calls, 1);
+  assert.equal(await readAutoSyncPending({ env }), null);
+
+  for (const reason of ['authentication', 'integrity', 'schema']) {
+    await writeJsonAtomic(path.join(env.HND_HOME, 'cache', 'auto-sync-pending.json'), {
+      schemaVersion: 1, pending: true, kind: 'attention', reason, attempts: 1,
+      firstPendingAt: '2026-01-01T00:00:00Z', lastAttemptAt: '2026-01-01T00:00:00Z',
+    });
+    assert.equal((await autoSync({ env, clock, reconcile })).blocked, true);
+  }
+  assert.equal(calls, 1);
+});
+
+test('local-state recovery validates JSON before making any sync request', async (t) => {
+  const { env, paths } = await fixture(t);
+  let now = Date.parse('2026-10-16T00:00:00Z');
+  const clock = { now: () => now };
+  await autoSync({ env, clock, reconcile: async () => { throw new Error('private'); } });
+  await fs.writeFile(paths.repoIndex, '{broken');
+  now += 61_000;
+  let calls = 0;
+  const reconcile = async () => { calls += 1; return { status: 'synced' }; };
+  assert.equal((await autoSync({ env, clock, reconcile })).blocked, true);
+  assert.equal(calls, 0);
+  assert.equal((await readAutoSyncPending({ env })).attempts, 2);
+  await fs.writeFile(paths.repoIndex, '{"schemaVersion":1,"repositories":{}}');
+  now += 61_000;
+  assert.equal((await autoSync({ env, clock, reconcile })).status, 'synced');
+  assert.equal(calls, 1);
 });
 
 test('a hook that cannot acquire the sync lock does not fabricate a persisted retry', async (t) => {

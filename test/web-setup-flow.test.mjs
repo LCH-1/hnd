@@ -2,24 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { versionAtLeast } from '../src/update/manifest.mjs';
 import {
   CONNECTOR_PACKAGE_NAME,
   CONNECTOR_PACKAGE_SPEC,
-  CONNECTOR_PACKAGE_VERSION,
 } from '../src/web/connector-release.js';
 
-test('web connector install pins an exact stable release no newer than the prepared launcher', async () => {
-  const rootPackage = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+test('web connector install follows the published npm latest tag', () => {
   assert.equal(CONNECTOR_PACKAGE_NAME, '@lch-1/hnd');
-  assert.match(CONNECTOR_PACKAGE_VERSION, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u);
-  assert.equal(CONNECTOR_PACKAGE_SPEC, `${CONNECTOR_PACKAGE_NAME}@${CONNECTOR_PACKAGE_VERSION}`);
-  // A prepared launcher may not be published yet. Keep the web pin on the
-  // published release; deployment verifies registry availability and minimum compatibility.
-  assert.ok(
-    versionAtLeast(rootPackage.version, CONNECTOR_PACKAGE_VERSION),
-    'The web install pin must not be newer than the prepared launcher',
-  );
+  assert.equal(CONNECTOR_PACKAGE_SPEC, `${CONNECTOR_PACKAGE_NAME}@latest`);
 });
 
 test('setup keeps a server retry path and lets users defer the optional PC connection', async () => {

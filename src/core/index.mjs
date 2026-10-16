@@ -1,4 +1,5 @@
-import { composeEffectiveContext } from './compose.mjs';
+import { composeEffectiveContext, finalizeContextFreshness } from './compose.mjs';
+import { fileLockDeadline, withFileLockDeadline } from './fs.mjs';
 import { captureCheckpoint, getCheckpoint } from './checkpoints.mjs';
 import { readAppSettings } from './app-settings.mjs';
 import { withStateLock } from './mutation-lock.mjs';
@@ -143,6 +144,7 @@ async function validatePolicyCandidate(candidate, defaults) {
     clock: defaults.clock,
     createRepository: false,
     policyOverrides: { [candidate.scope]: candidate.content },
+    deferKnowledgeFreshness: true,
   };
   if (repoId) options.repoId = repoId;
   if (candidate.environment) options.environment = candidate.environment;
@@ -157,8 +159,10 @@ async function validateHandoffCandidate(candidate, defaults) {
     clock: defaults.clock,
     createRepository: false,
     handoffOverride: candidate,
+    deferKnowledgeFreshness: true,
   });
 }
+
 
 const MINIMUM_LOCK_WAIT_MS = 50;
 
@@ -188,14 +192,16 @@ export function createCore({
     if (Number.isFinite(lockDeadlineAt)) {
       // Never zero: a lock that happens to be free should still be taken even
       // once the budget is spent, and publishing it costs a single syscall.
-      return Math.max(MINIMUM_LOCK_WAIT_MS, lockDeadlineAt - clock.now());
+      return Math.max(MINIMUM_LOCK_WAIT_MS, lockDeadlineAt - Date.now());
     }
     return Number.isFinite(lockTimeoutMs) ? lockTimeoutMs : undefined;
   };
-  const locked = (callback) => {
+  const scoped = (callback) => Number.isFinite(lockDeadlineAt)
+    ? withFileLockDeadline(Math.min(fileLockDeadline() ?? Infinity, lockDeadlineAt), callback) : callback();
+  const locked = (callback) => scoped(() => {
     const timeoutMs = lockWaitMs();
     return withStateLock(callback, { env, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
-  };
+  });
   const workMutation = (callback) => locked(async () => {
     const result = await callback();
     try {
@@ -236,9 +242,10 @@ export function createCore({
         if (pending.some((entry) => entry.body === candidate.body)) return null;
         return addKnowledge({ ...candidate, repoId: policy.repoId, actor: 'hook', env, clock });
       }),
-      capture: (options = {}) => locked(() => captureCheckpoint({
+      capture: (options = {}) => scoped(() => captureCheckpoint({
         ...withDefaults(options, defaults, { cwd: true }),
         agent: options.agent ?? defaults.agent ?? 'unknown',
+        stateLock: locked,
       })),
       show: (options = {}) => locked(async () => {
         const resolved = await resolveRepositoryBinding({
@@ -262,6 +269,7 @@ export function createCore({
       ),
     }),
     repo: Object.freeze({
+      binding: (options = {}) => locked(() => resolveRepositoryBinding(withDefaults(options, defaults, { cwd: true }))),
       init: (options = {}) =>
         locked(() => initializeRepository(withDefaults(options, defaults, { cwd: true }))),
       resolve: (options = {}) =>
@@ -413,10 +421,13 @@ export function createCore({
       duplicates: (options = {}) => locked(() => findKnowledgeDuplicates(withDefaults(options, defaults))),
       merge: (options = {}) => locked(() => mergeKnowledge(withDefaults({ actor: 'cli', ...options }, defaults))),
     }),
-    compose: (options = {}) =>
-      locked(() => composeEffectiveContext(
-        withDefaults(options, defaults, { cwd: options.globalOnly !== true && !options.repoId }),
-      )),
+    compose: (options = {}) => scoped(async () => {
+      const composition = await locked(() => composeEffectiveContext({
+        ...withDefaults(options, defaults, { cwd: options.globalOnly !== true && !options.repoId }),
+        deferKnowledgeFreshness: true,
+      }));
+      return finalizeContextFreshness(composition);
+    }),
   });
 }
 

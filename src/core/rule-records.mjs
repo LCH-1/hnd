@@ -5,7 +5,8 @@ import { STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { repositoryPaths, statePaths } from '../paths.mjs';
 import { CoreError } from './errors.mjs';
 import { listFiles, readJson, removeFile, withFileLock, writeJsonAtomic } from './fs.mjs';
-import { getRepository, listRepositories, resolveRepository } from './repositories.mjs';
+import { getRepository, listBindings, listRepositories, resolveRepository } from './repositories.mjs';
+import { listPolicies } from './policies.mjs';
 import {
   initializeRepositoryDirectory,
   initializeState,
@@ -19,6 +20,14 @@ import {
 export const RULE_RECORD_SCOPES = Object.freeze(['global', 'repo', 'env']);
 export const RULE_RECORD_STATUSES = Object.freeze(['draft', 'active']);
 export const RULE_RECORD_ACTIVATIONS = Object.freeze(['always', 'manual']);
+const MAX_SERIALIZED_RULE_BYTES = 1024 * 1024;
+
+function assertRuleRecordSize(record) {
+  const bytes = Buffer.byteLength(`${JSON.stringify(record, null, 2)}\n`);
+  if (bytes > MAX_SERIALIZED_RULE_BYTES) throw new CoreError('RULE_RECORD_TOO_LARGE',
+    'Rule including its audit history exceeds the 1 MiB sync limit. Export/back up the rule before creating a smaller replacement; the existing rule was not changed.',
+    { id: record.id, bytes, maxBytes: MAX_SERIALIZED_RULE_BYTES });
+}
 
 function text(value, field, { max = 16_000, allowEmpty = false } = {}) {
   if (typeof value !== 'string' || value.includes('\0')) {
@@ -113,10 +122,35 @@ export async function listRuleRecords({ repoId, cwd, environment, env = process.
   return values.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+export async function validateRuleContexts({ candidate, manualRules, env = process.env, clock = Date } = {}) {
+  const { composeEffectiveContext } = await import('./compose.mjs');
+  const base = { env, clock, createRepository: false,
+    deferKnowledgeFreshness: true,
+    ...(candidate ? { ruleRecordOverrides: { [candidate.id]: candidate } } : {}),
+    ...(manualRules ? { manualRulesOverride: manualRules } : {}) };
+  if (!candidate || candidate.scope === 'global') await composeEffectiveContext({ ...base, environment: null });
+  const repositories = candidate && candidate.scope !== 'global'
+    ? [await getRepository({ repoId: candidate.repoId, env, clock })]
+    : await listRepositories({ env, clock });
+  const bindings = await listBindings({ env, clock });
+  const config = await readConfig({ env, clock });
+  for (const repository of repositories) {
+    const policies = await listPolicies({ repoId: repository.id, env, clock });
+    const rules = await listRuleRecords({ repoId: repository.id, env, clock });
+    const environments = candidate?.scope === 'env' ? [candidate.environment]
+      : [...new Set([null, config.activeEnvironment, ...policies.map((entry) => entry.environment),
+        ...rules.filter((entry) => entry.scope === 'env').map((entry) => entry.environment),
+        ...bindings.filter((entry) => entry.repoId === repository.id).map((entry) => entry.environment)]
+        .filter((value) => value !== undefined))];
+    for (const environment of environments) await composeEffectiveContext({ ...base, repoId: repository.id, environment });
+  }
+}
+
 export async function addRuleRecord({
   title, content, scope = 'global', repoId, cwd, environment,
   status = 'active', activation = 'always', paths = [], files = [],
   actor, env = process.env, clock = Date,
+  validate,
 } = {}) {
   const resolved = await location({ scope, repoId, cwd, environment, env, clock });
   const now = isoNow(clock);
@@ -137,12 +171,15 @@ export async function addRuleRecord({
     updatedAt: now,
   };
   await withFileLock(path.join(statePaths(env).locks, 'rule-records.lock'), async () => {
+    assertRuleRecordSize(record);
+    await validateRuleContexts({ candidate: record, env, clock });
+    if (validate) await validate(structuredClone(record));
     await writeJsonAtomic(path.join(resolved.directory, `${record.id}.json`), record, { overwrite: false });
   });
   return structuredClone(record);
 }
 
-export async function updateRuleRecord({ id, patch = {}, actor, env = process.env, clock = Date } = {}) {
+export async function updateRuleRecord({ id, patch = {}, actor, env = process.env, clock = Date, validate } = {}) {
   if (!isUuid(id)) throw new CoreError('INVALID_RULE_RECORD', 'Rule id must be a UUID');
   return withFileLock(path.join(statePaths(env).locks, 'rule-records.lock'), async () => {
     const all = await listRuleRecords({ env, clock });
@@ -180,6 +217,9 @@ export async function updateRuleRecord({ id, patch = {}, actor, env = process.en
       updatedAt: now,
     };
     const directory = current.scope === 'global' ? state.rules : repositoryPaths(current.repoId, env).rules;
+    assertRuleRecordSize(next);
+    await validateRuleContexts({ candidate: next, env, clock });
+    if (validate) await validate(structuredClone(next));
     await writeJsonAtomic(path.join(directory, `${id}.json`), next);
     return structuredClone(next);
   });
@@ -198,13 +238,17 @@ export async function removeRuleRecord({ id, env = process.env, clock = Date } =
   return { id, removed: await removeFile(path.join(directory, `${id}.json`)) };
 }
 
-export async function setManualRule({ id, enabled, env = process.env, clock = Date } = {}) {
+export async function setManualRule({ id, enabled, env = process.env, clock = Date, validate } = {}) {
   if (!isUuid(id)) throw new CoreError('INVALID_RULE_RECORD', 'Rule id must be a UUID');
-  const config = await readConfig({ env, clock });
-  const selected = new Set(config.manualRules || []);
-  if (enabled) selected.add(id); else selected.delete(id);
-  await updateConfig({ manualRules: [...selected].sort() }, { env, clock });
-  return { id, enabled: selected.has(id) };
+  return withFileLock(path.join(statePaths(env).locks, 'rule-records.lock'), async () => {
+    const config = await readConfig({ env, clock });
+    const selected = new Set(config.manualRules || []);
+    if (enabled) selected.add(id); else selected.delete(id);
+    if (enabled) await validateRuleContexts({ manualRules: [...selected].sort(), env, clock });
+    if (enabled && validate) await validate([...selected].sort());
+    await updateConfig({ manualRules: [...selected].sort() }, { env, clock });
+    return { id, enabled: selected.has(id) };
+  });
 }
 
 function globExpression(pattern) {

@@ -1906,3 +1906,189 @@ test('web knowledge review, named rules, task readiness, diagnostics, and briefi
   diagnostics = await store.diagnostics();
   assert.equal(diagnostics.knowledgeAttention, 0);
 });
+
+function ownedHandoffRecord(repositoryId, workId) {
+  return {
+    schemaVersion: 1, id: workId, repoId: repositoryId, status: 'active',
+    task: 'owned task', objective: 'keep coordination', currentState: 'before',
+    worktree: '/workspace', branch: 'main', head: null, staleHours: 72,
+    staleAt: '2026-10-19T00:00:00.000Z', createdAt: '2026-10-15T00:00:00.000Z',
+    updatedAt: '2026-10-16T00:00:00.000Z', decisions: ['keep this decision'],
+    failedApproaches: [], changedFiles: [], validation: [], nextSteps: ['continue'],
+    openQuestions: [], notes: [], claimedBy: 'codex:session', claimSessionKey: 'a'.repeat(64),
+    claimExpiresAt: '2026-10-16T02:00:00.000Z', plannedFiles: ['src/shared.mjs'], history: [],
+  };
+}
+
+test('web work edits preserve session ownership, planned files, and unedited progress', async () => {
+  const repoId = '11111111-1111-4111-8111-111111111111';
+  const id = '22222222-2222-4222-8222-222222222222';
+  const record = ownedHandoffRecord(repoId, id);
+  const workPath = `repositories/${repoId}/handoffs/${id}.json`;
+  const remote = immediateRemote({ schemaVersion: 1, files: [
+    textFile('repositories.json', JSON.stringify({ schemaVersion: 1, repositories: { [repoId]: { id: repoId, name: 'project' } } })),
+    textFile(workPath, JSON.stringify(record)),
+  ] });
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  await store.updateWork(id, { name: 'renamed' });
+  const edited = JSON.parse(Buffer.from(remote.inspect().snapshot.files.find((file) => file.path === workPath).content, 'base64'));
+  assert.equal(edited.claimSessionKey, record.claimSessionKey);
+  assert.equal(edited.claimExpiresAt, record.claimExpiresAt);
+  assert.deepEqual(edited.plannedFiles, record.plannedFiles);
+  assert.deepEqual(edited.decisions, record.decisions);
+  assert.deepEqual(edited.nextSteps, record.nextSteps);
+  assert.equal(edited.currentState, record.currentState);
+  for (const key of ['name', 'current', 'ready', 'stale', '_path', '_rawStatus']) assert.equal(Object.hasOwn(edited, key), false);
+  await store.updateWork(id, { claimedBy: 'manual reviewer' });
+  assert.equal((await store.work())[0].claimSessionKey, null);
+  await store.updateWork(id, { claimedBy: null });
+  assert.equal((await store.work())[0].claimedBy, null);
+  await store.finishWork(id);
+  const closed = (await store.work({ status: 'all' }))[0];
+  assert.equal(closed.claimedBy, null);
+  assert.equal(closed.claimSessionKey, null);
+  assert.equal(closed.claimExpiresAt, null);
+});
+
+test('browser and connector agree on same-owner lease merges and preserve true conflicts', async () => {
+  const { mergeSyncSnapshots } = await import('../src/sync/merge.mjs');
+  const repoId = '11111111-1111-4111-8111-111111111111';
+  const id = '22222222-2222-4222-8222-222222222222';
+  const record = ownedHandoffRecord(repoId, id);
+  const workPath = `repositories/${repoId}/handoffs/${id}.json`;
+  const snapshot = (value) => ({ schemaVersion: 1, files: [textFile(workPath, JSON.stringify(value))] });
+  const base = snapshot(record);
+  const progress = snapshot({ ...record, currentState: 'updated progress',
+    history: [{ at: '2026-10-16T00:05:00.000Z', action: 'updated' }] });
+  for (const key of [record.claimSessionKey, 'b'.repeat(64)]) {
+    const remote = snapshot({ ...record, claimSessionKey: key, claimExpiresAt: '2026-10-16T03:00:00.000Z',
+      history: [{ at: '2026-10-16T01:00:00.000Z', action: 'claim_renewed', sessionKey: key }] });
+    const browser = await mergeBrowserSnapshots(base, progress, remote);
+    const connector = mergeSyncSnapshots(base, progress, remote);
+    assert.equal(browser.conflicts.length, connector.conflicts.length);
+    assert.equal(browser.conflicts.length, key === record.claimSessionKey ? 0 : 1);
+    if (!browser.conflicts.length) assert.deepEqual(browser.snapshot, connector.snapshot);
+  }
+});
+
+test('web knowledge edits retain multiple sources and protect experiment adoption', async () => {
+  const { experimentSource, isKnowledgeExperiment } = await import('../src/core/knowledge-branches.mjs');
+  const repoId = '11111111-1111-4111-8111-111111111111';
+  const id = '22222222-2222-4222-8222-222222222222';
+  const ordinarySource = { kind: 'file', ref: 'src/original.mjs', label: 'Original', hash: 'a'.repeat(64), commit: null };
+  const marker = experimentSource({ workId: '33333333-3333-4333-8333-333333333333', name: 'candidate', baseId: null, baseDigest: null });
+  const note = { schemaVersion: 1, id, title: 'candidate', body: 'content', tags: ['keep'],
+    scope: 'repo', repoId, environment: null, type: 'note', state: 'review_needed',
+    approval: 'pending', pinned: false, sources: [ordinarySource, marker], relationships: [],
+    feedback: { helpful: 0, wrong: 0, irrelevant: 0 }, history: [],
+    createdAt: '2026-10-15T00:00:00.000Z', updatedAt: '2026-10-16T00:00:00.000Z' };
+  const remote = immediateRemote({ schemaVersion: 1, files: [
+    textFile('repositories.json', JSON.stringify({ schemaVersion: 1, repositories: { [repoId]: { id: repoId, name: 'project' } } })),
+    textFile(`knowledge/${id}.json`, JSON.stringify(note)),
+  ] });
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  await store.updateKnowledge(id, { title: 'renamed', sourceRef: ordinarySource.ref, sourceCommit: '' });
+  let edited = (await store.knowledge())[0];
+  assert.deepEqual(edited.sources, note.sources);
+  assert.deepEqual(edited.tags, note.tags);
+  assert.equal(isKnowledgeExperiment(edited), true);
+  await store.updateKnowledge(id, { sourceRef: 'src/new.mjs' });
+  edited = (await store.knowledge())[0];
+  assert.equal(edited.sources[0].hash, null);
+  assert.deepEqual(edited.sources[1], marker);
+  await assert.rejects(store.reviewKnowledge(id, 'approve'), /실험 지식/u);
+  await assert.rejects(store.reviewKnowledge(id, 'reject'), /실험 지식/u);
+  await assert.rejects(store.updateKnowledge(id, { approval: 'approved' }), /실험 지식/u);
+  await assert.rejects(store.updateKnowledge(id, { scope: 'global' }), /프로젝트나 환경/u);
+  await store.updateKnowledge(id, { sourceRef: '' });
+  assert.deepEqual((await store.knowledge())[0].sources, [marker]);
+  await assert.rejects(store.updateKnowledge(id, { sourceRef: 'src/remove-marker.mjs' }), /실험 지식/u);
+  await store.updateKnowledge(id, { title: 'marker remains first' });
+  await assert.rejects(store.updateKnowledge(id, { state: 'superseded' }), /diff\/adopt/u);
+  assert.equal((await store.knowledge())[0].state, 'review_needed');
+  await store.updateKnowledge(id, { title: 'still editable after rejected state change' });
+});
+
+test('web immutable experiment checks use an actual successfully adopted snapshot', async (t) => {
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { createCore } = await import('../src/core/index.mjs');
+  const { createKnowledgeExperiment, diffKnowledgeExperiment, adoptKnowledgeExperiment } = await import('../src/core/knowledge.mjs');
+  const { captureSyncSnapshot } = await import('../src/sync/capture.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-web-adopted-knowledge-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const cwd = path.join(root, 'project');
+  await fs.mkdir(cwd);
+  const env = { ...process.env, HND_HOME: path.join(root, 'state'), HND_USER_HOME: root };
+  const core = createCore({ env, cwd, sessionKey: null });
+  const work = await core.handoff.start({ task: 'Evaluate', objective: 'Review a candidate' });
+  const experiment = (await createKnowledgeExperiment({ env, cwd, workId: work.id, name: 'candidate', body: 'Reviewed fact' })).entry;
+  const diff = await diffKnowledgeExperiment({ env, id: experiment.id });
+  const adopted = await adoptKnowledgeExperiment({ env, id: experiment.id, expectedRevision: diff.revision });
+  assert.equal(adopted.adopted, true);
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), immediateRemote(await captureSyncSnapshot(env.HND_HOME))));
+  const entries = await store.knowledge();
+  assert.equal(entries.find((entry) => entry.id === experiment.id).state, 'superseded');
+  assert.equal(entries.find((entry) => entry.id === adopted.target.id).approval, 'approved');
+  await assert.rejects(store.updateKnowledge(experiment.id, { title: 'cannot rewrite adopted experiment' }), /이미 채택/u);
+  await assert.rejects(store.feedbackKnowledge(experiment.id, 'helpful'), /이미 채택/u);
+  await assert.rejects(store.reviewKnowledge(experiment.id, 'approve'), /이미 채택/u);
+  await store.updateKnowledge(adopted.target.id, { title: 'Shared knowledge remains editable' });
+});
+
+test('browser and connector choose the same newest checkpoint and reject path mismatches', async () => {
+  const { mergeSyncSnapshots } = await import('../src/sync/merge.mjs');
+  const repoId = '11111111-1111-4111-8111-111111111111';
+  const key = 'a'.repeat(64);
+  const path = `repositories/${repoId}/checkpoints/${key}.json`;
+  const record = { schemaVersion: 1, repoId, key, branch: 'main', head: null,
+    lastCommit: '', dirty: false, totalChanges: 0, truncated: false, changes: [],
+    agent: 'codex', fingerprint: 'b'.repeat(64), capturedAt: '2026-10-16T00:00:00.000Z' };
+  const snapshot = (value) => ({ schemaVersion: 1, files: [textFile(path, JSON.stringify(value))] });
+  const base = snapshot(record);
+  const local = snapshot({ ...record, capturedAt: '2026-10-16T02:00:00.000Z', fingerprint: 'c'.repeat(64) });
+  for (const remote of [
+    snapshot({ ...record, capturedAt: '2026-10-16T01:00:00.000Z', fingerprint: 'd'.repeat(64) }),
+    snapshot({ ...record, key: 'e'.repeat(64), capturedAt: '2026-10-16T01:00:00.000Z' }),
+  ]) {
+    const browser = await mergeBrowserSnapshots(base, local, remote);
+    const connector = mergeSyncSnapshots(base, local, remote);
+    assert.deepEqual(browser.snapshot, connector.snapshot);
+    assert.equal(browser.conflicts.length, connector.conflicts.length);
+  }
+});
+
+test('oversized knowledge audit growth rejects only the new edit and keeps the workspace syncable', async () => {
+  const { validateSyncSnapshot } = await import('../src/sync/capture.mjs');
+  const remote = immediateRemote();
+  const store = new SnapshotDataStore('tenant', storeOptions(memoryCache(), remote));
+  const body = 'Long term knowledge details. '.repeat(4000).slice(0, 90 * 1024);
+  const created = await store.createKnowledge({ title: 'Large knowledge', content: body });
+  const path = `knowledge/${created.id}.json`;
+  let rejected = false;
+  for (let index = 0; index < 25; index += 1) {
+    const before = remote.inspect();
+    try {
+      await store.updateKnowledge(created.id, { title: `Large knowledge revision ${index}` });
+    } catch (error) {
+      assert.match(error.message, /허용 크기/u);
+      assert.ok(index >= 8, 'the candidate failed because of accumulated audit snapshots');
+      assert.deepEqual(remote.inspect(), before, 'neither the note nor its retained audit history was overwritten');
+      assert.deepEqual(store.snapshot, before.snapshot, 'the rejected candidate never reached the local cache');
+      rejected = true;
+      break;
+    }
+  }
+  assert.equal(rejected, true);
+  const retained = JSON.parse(Buffer.from(remote.inspect().snapshot.files.find((file) => file.path === path).content, 'base64'));
+  assert.equal(retained.body, body);
+  assert.ok(retained.history.length > 1);
+  assert.ok(retained.history.slice(1).every((entry) => entry.before.body === body));
+  assert.equal(store.syncStatus().pending, false);
+  await store.updateAppSettings({ autoSave: false });
+  assert.equal(store.syncStatus().pending, false);
+  const published = remote.inspect().snapshot;
+  assert.doesNotThrow(() => validateSyncSnapshot(published));
+  assert.equal(JSON.parse(Buffer.from(published.files.find((file) => file.path === path).content, 'base64')).body, body);
+});

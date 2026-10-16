@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { mergeHandoffRecords, mergeCheckpointRecords } from '../shared/record-merge.mjs';
 import {
   SYNC_SNAPSHOT_SCHEMA_VERSION,
   validateSyncSnapshot,
@@ -8,6 +9,8 @@ const REPOSITORY_INDEX_PATH = 'repositories.json';
 const REPOSITORY_METADATA_PATTERN = /^repositories\/[^/]+\/repository\.json$/;
 const KNOWLEDGE_ENTRY_PATTERN = /^knowledge\/[0-9a-f-]{36}\.json$/i;
 const RULE_ENTRY_PATTERN = /^(?:rules|repositories\/[^/]+\/rules)\/[0-9a-f-]{36}\.json$/i;
+const HANDOFF_PATTERN = /^repositories\/([0-9a-f-]{36})\/handoffs\/([0-9a-f-]{36})\.json$/i;
+const CHECKPOINT_PATTERN = /^repositories\/([0-9a-f-]{36})\/checkpoints\/([a-f0-9]{64})\.json$/i;
 const MISSING = Symbol('missing JSON member');
 const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
@@ -107,7 +110,23 @@ function isMergeableJsonPath(relativePath) {
     || RULE_ENTRY_PATTERN.test(relativePath);
 }
 
+function tryMergeRecords(relativePath, base, local, remote) {
+  const handoff = relativePath.match(HANDOFF_PATTERN);
+  const checkpoint = relativePath.match(CHECKPOINT_PATTERN);
+  if (!handoff && !checkpoint) return null;
+  const parsed = [base, local, remote].map((contents) => contents === null ? null : parseJsonObject(contents));
+  const match = handoff ?? checkpoint;
+  if (parsed.some((value, index) => [base, local, remote][index] !== null && (value === null
+    || value.repoId !== match[1] || (handoff ? value.id : value.key) !== match[2]))) return null;
+  const result = handoff ? mergeHandoffRecords(...parsed) : mergeCheckpointRecords(...parsed);
+  if (!result) return null;
+  return { contents: result.value === null ? null : Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`), conflicted: result.conflicted };
+}
+
 function tryMergeJson(relativePath, base, local, remote) {
+  if (HANDOFF_PATTERN.test(relativePath) || CHECKPOINT_PATTERN.test(relativePath)) {
+    return tryMergeRecords(relativePath, base, local, remote);
+  }
   if (!isMergeableJsonPath(relativePath) || local === null || remote === null) return null;
   const parsedBase = parseJsonObject(base);
   const parsedLocal = parseJsonObject(local);

@@ -1176,6 +1176,8 @@ export class SnapshotStore extends SqliteStoreBase {
     this.maxRevisionsPerTenant = options.maxRevisionsPerTenant
       ?? DEFAULT_MAX_REVISIONS_PER_TENANT;
     this.clock = options.clock ?? (() => Date.now());
+    this.healthKeyCursor = '';
+    this.unhealthyKeyTenant = null;
     if (!Number.isSafeInteger(this.maxBlobBytes) || this.maxBlobBytes < 1) {
       throw new Error('maxBlobBytes must be a positive safe integer');
     }
@@ -1244,15 +1246,36 @@ export class SnapshotStore extends SqliteStoreBase {
       this.getDatabase(),
     );
     try {
-      for (const row of this.getDatabase().prepare(`
-        SELECT tenant_id, key_envelope FROM managed_vault_keys ORDER BY tenant_id
-      `).all()) {
+      const database = this.getDatabase();
+      // The master key is checked on every probe. Bound unauthenticated work
+      // to one indexed envelope lookup instead of decrypting every workspace.
+      let row = this.unhealthyKeyTenant
+        ? database.prepare(`
+          SELECT tenant_id, key_envelope FROM managed_vault_keys WHERE tenant_id = ?
+        `).get(this.unhealthyKeyTenant)
+        : null;
+      if (!row) {
+        this.unhealthyKeyTenant = null;
+        row = database.prepare(`
+          SELECT tenant_id, key_envelope FROM managed_vault_keys
+          WHERE tenant_id > ? ORDER BY tenant_id LIMIT 1
+        `).get(this.healthKeyCursor);
+        if (!row && this.healthKeyCursor) {
+          row = database.prepare(`
+            SELECT tenant_id, key_envelope FROM managed_vault_keys ORDER BY tenant_id LIMIT 1
+          `).get();
+        }
+      }
+      if (row) {
+        this.unhealthyKeyTenant = row.tenant_id;
         const vaultKey = unwrapManagedVaultKey(
           row.key_envelope,
           masterKey,
           row.tenant_id,
         );
         vaultKey.fill(0);
+        this.healthKeyCursor = row.tenant_id;
+        this.unhealthyKeyTenant = null;
       }
       return true;
     } finally {

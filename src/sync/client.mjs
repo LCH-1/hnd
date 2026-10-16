@@ -163,6 +163,7 @@ export class SyncClient {
       throw new Error('maxBlobBytes must be a positive safe integer');
     }
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.deadlineAt = options.deadlineAt;
   }
 
   #headers(extra = {}) {
@@ -170,11 +171,13 @@ export class SyncClient {
   }
 
   async #fetch(pathname, options = {}) {
+    const remaining = Number.isFinite(this.deadlineAt) ? this.deadlineAt - Date.now() : this.timeoutMs;
+    if (remaining <= 0) throw new DOMException('Sync operation deadline exceeded', 'TimeoutError');
     return this.fetchImpl(`${this.baseUrl}${pathname}`, {
       ...options,
       headers: this.#headers(options.headers),
       redirect: 'error',
-      signal: options.signal ?? AbortSignal.timeout(this.timeoutMs),
+      signal: options.signal ?? AbortSignal.timeout(Math.max(1, Math.min(this.timeoutMs, Math.floor(remaining)))),
     });
   }
 

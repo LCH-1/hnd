@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AGENTS } from '../constants.mjs';
 import { agentPaths, statePaths } from '../paths.mjs';
+import { applyOperations } from '../fs-operations.mjs';
+import { withAdapterMutationLock } from './mutation-lock.mjs';
 import {
   AdapterConfigError,
   AdapterConflictError,
@@ -165,6 +167,33 @@ function resolveRuntime(agent, options) {
     configPath: configPathFor(agent, paths),
     skillPath: paths[agent].skill,
   };
+}
+
+// Runtime releases can migrate existing Claude settings without replacing hook
+// commands, installing integrations, or invalidating Codex's approval hashes.
+export async function refreshManagedPromptTimeout(options = {}) {
+  const runtime = resolveRuntime('claude', options);
+  const plan = async () => {
+    const current = await readIfPresent(runtime.configPath, { agent: 'claude' });
+    if (current === undefined) return [];
+    const document = parseJsonDocument(current, { agent: 'claude', filePath: runtime.configPath });
+    let changed = false;
+    for (const group of document.value.hooks?.UserPromptSubmit ?? []) {
+      for (const handler of group.hooks ?? []) {
+        if (handler.timeout === 2 && isManagedClaudeHook(handler, runtime.commands, 'prompt')) {
+          handler.timeout = CLAUDE_HOOK_TIMEOUT_SECONDS.prompt;
+          changed = true;
+        }
+      }
+    }
+    return changed ? [makeWriteOperation({
+      path: runtime.configPath, previous: current,
+      content: serializeJsonDocument(document.value, document.format),
+      agent: 'claude', component: 'hook', reason: 'Upgrade the legacy HND prompt timeout.',
+    })] : [];
+  };
+  if (!(await plan()).length) return [];
+  return withAdapterMutationLock(options.env, async () => applyOperations(await plan()), { timeoutMs: 200 });
 }
 
 async function loadSkillContent(options) {
@@ -465,6 +494,13 @@ const HOOK_TIMEOUT_SECONDS = Object.freeze({
 const HOOK_LOCK_BUDGET_RATIO = 0.5;
 const MIN_HOOK_LOCK_BUDGET_MS = 250;
 const MAX_HOOK_LOCK_BUDGET_MS = 5_000;
+// A longer prompt timeout is headroom for startup, sync, and composition;
+// keep contention short, including on PCs that still have older 2s settings.
+const MAX_PROMPT_LOCK_BUDGET_MS = 1_000;
+
+export function hookTimeoutMs(agent, phase = 'start') {
+  return (HOOK_TIMEOUT_SECONDS[agent]?.[phase] ?? 5) * 1_000;
+}
 
 /**
  * How long a hook may wait for the shared state lock before giving up.
@@ -478,7 +514,7 @@ export function hookLockBudgetMs(agent, phase = 'start') {
   const seconds = HOOK_TIMEOUT_SECONDS[agent]?.[phase];
   if (!Number.isFinite(seconds)) return MIN_HOOK_LOCK_BUDGET_MS;
   return Math.min(
-    MAX_HOOK_LOCK_BUDGET_MS,
+    phase === 'prompt' ? MAX_PROMPT_LOCK_BUDGET_MS : MAX_HOOK_LOCK_BUDGET_MS,
     Math.max(MIN_HOOK_LOCK_BUDGET_MS, Math.round(seconds * 1_000 * HOOK_LOCK_BUDGET_RATIO)),
   );
 }

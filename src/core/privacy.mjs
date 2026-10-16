@@ -8,6 +8,7 @@ import { listFiles, pathExists, readJson, removeFile, withFileLock, writeJsonAto
 import { resolveRepositoryBinding } from './repositories.mjs';
 import { assertRepositoryId, isoNow, isUuid } from './state.mjs';
 import { workSessionKey } from './work-session.mjs';
+import { knowledgeMergeJournalPath } from './knowledge.mjs';
 
 const SECRET_PATTERNS = [
   ['private_key', /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|$)/gu],
@@ -292,7 +293,7 @@ export async function previewRetention(options = {}) {
   const now = isoNow(options.clock ?? Date);
   const items = [];
   if (policy.retentionDays !== null) {
-    if (await pathExists(path.join(paths.cache, 'knowledge-merge-journal.json'))) {
+    if (await pathExists(knowledgeMergeJournalPath(paths))) {
       throw new CoreError('STATE_RECOVERY_REQUIRED', 'Recover the interrupted knowledge merge before previewing retention');
     }
     const cutoff = Date.parse(now) - policy.retentionDays * 86_400_000;

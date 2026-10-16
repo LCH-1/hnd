@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 
 import { DEFAULT_MAX_CONTEXT_BYTES, STATE_SCHEMA_VERSION } from '../constants.mjs';
 import { statePaths } from '../paths.mjs';
@@ -12,6 +13,7 @@ import {
   removeFile,
   withFileLock,
   writeJsonAtomic,
+  operationDeadline,
 } from './fs.mjs';
 import {
   getRepository,
@@ -52,6 +54,7 @@ export const KNOWLEDGE_RELATIONS = Object.freeze([
 const MAX_SOURCES = 20;
 const MAX_RELATIONSHIPS = 20;
 const MAX_HISTORY = 20;
+const MAX_SERIALIZED_ENTRY_BYTES = 1024 * 1024;
 const KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION = 1;
 const KNOWLEDGE_MERGE_JOURNAL_FILENAME = 'knowledge-merge-journal.json';
 
@@ -351,7 +354,14 @@ function publicEntry(entry) {
   return structuredClone(entry);
 }
 
-function knowledgeMergeJournalPath(state) {
+function assertKnowledgeRecordSize(entry) {
+  const bytes = Buffer.byteLength(`${JSON.stringify(entry, null, 2)}\n`);
+  if (bytes > MAX_SERIALIZED_ENTRY_BYTES) throw new CoreError('KNOWLEDGE_TOO_LARGE',
+    'Knowledge including its audit history exceeds the 1 MiB sync limit. Export/back up the entry and create a smaller note; the existing entry was not changed.',
+    { id: entry.id, bytes, maxBytes: MAX_SERIALIZED_ENTRY_BYTES });
+}
+
+export function knowledgeMergeJournalPath(state) {
   return path.join(state.locks, KNOWLEDGE_MERGE_JOURNAL_FILENAME);
 }
 
@@ -480,6 +490,7 @@ export async function addKnowledge({
     createdAt: now,
     updatedAt: now,
   };
+  assertKnowledgeRecordSize(entry);
   await withKnowledgeLock(state, async () => {
     await writeJsonAtomic(notePath(state.knowledge, entry.id), entry, { overwrite: false });
   });
@@ -734,24 +745,72 @@ export async function relevantKnowledge(options = {}) {
 }
 
 export async function assessKnowledgeFreshness(entry, { root } = {}) {
+  const deadline = Math.min(operationDeadline() ?? Infinity, Date.now() + 100);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return { ...publicEntry(entry), freshness: 'unknown' };
+  let timer;
+  try {
+    // Filesystem operations cannot all be cancelled portably. The inspection
+    // is read-only and closes any handle when I/O finishes, while its caller
+    // must be free to release a hook/state budget immediately.
+    return await Promise.race([
+      inspectKnowledgeFreshness(entry, root, deadline),
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ ...publicEntry(entry), freshness: 'unknown' }), remaining); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function inspectKnowledgeFreshness(entry, root, deadline) {
   const result = publicEntry(entry);
   const fileSources = result.sources.filter((source) => source.kind === 'file' && source.hash);
   if (!root || fileSources.length === 0) return { ...result, freshness: 'unknown' };
   const repositoryRoot = path.resolve(root);
+  const maximumBytes = 1024 * 1024;
   for (const source of fileSources) {
     const absolute = path.resolve(repositoryRoot, source.ref);
     const relative = path.relative(repositoryRoot, absolute);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       return { ...result, freshness: 'review_needed', staleSource: source.ref };
     }
+    let handle;
     try {
-      const contents = await readFile(absolute);
-      const actual = createHash('sha256').update(contents).digest('hex');
+      if (Date.now() >= deadline) return { ...result, freshness: 'unknown' };
+      const resolved = await fs.realpath(absolute);
+      const realRoot = await fs.realpath(repositoryRoot);
+      const realRelative = path.relative(realRoot, resolved);
+      if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) {
+        return { ...result, freshness: 'review_needed', staleSource: source.ref };
+      }
+      const metadata = await fs.lstat(absolute);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximumBytes) {
+        return { ...result, freshness: 'unknown' };
+      }
+      handle = await fs.open(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0));
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.size > maximumBytes) {
+        return { ...result, freshness: 'unknown' };
+      }
+      const hash = createHash('sha256');
+      const buffer = Buffer.alloc(64 * 1024);
+      let bytes = 0;
+      while (true) {
+        if (Date.now() >= deadline) return { ...result, freshness: 'unknown' };
+        const read = await handle.read(buffer, 0, buffer.length, null);
+        if (!read.bytesRead) break;
+        bytes += read.bytesRead;
+        if (bytes > maximumBytes) return { ...result, freshness: 'unknown' };
+        hash.update(buffer.subarray(0, read.bytesRead));
+      }
+      const actual = hash.digest('hex');
       if (actual !== source.hash) {
         return { ...result, freshness: 'review_needed', staleSource: source.ref };
       }
     } catch {
       return { ...result, freshness: 'review_needed', staleSource: source.ref };
+    } finally {
+      await handle?.close();
     }
   }
   return { ...result, freshness: 'current' };
@@ -836,6 +895,9 @@ async function normalizeKnowledgeUpdate(current, patch, { env, clock }) {
     if (current.state === 'superseded') {
       throw new CoreError('EXPERIMENT_ALREADY_ADOPTED', 'Adopted experimental knowledge is immutable; create a new experiment');
     }
+    if (entry.state === 'superseded') {
+      throw new CoreError('EXPERIMENT_ADOPTION_REQUIRED', 'Only reviewed experiment adoption can supersede its proposal');
+    }
     if (entry.approval !== 'pending' || JSON.stringify(knowledgeExperimentMetadata(entry)) !== JSON.stringify(knowledgeExperimentMetadata(current))) {
       throw new CoreError('EXPERIMENT_ADOPTION_REQUIRED', 'Use know branch diff/adopt to approve experimental knowledge');
     }
@@ -912,6 +974,7 @@ export async function updateKnowledge({
       agent,
     }, { env, clock });
     assertNoSensitive({ title: entry.title, body: entry.body, tags: entry.tags, sources: entry.sources }, { allowSensitive });
+    assertKnowledgeRecordSize(entry);
     await writeJsonAtomic(notePath(state.knowledge, id), entry);
     return publicEntry(entry);
   });
@@ -1008,6 +1071,8 @@ export async function mergeKnowledge({
       actor,
     }, { env, clock });
     assertNoSensitive({ title: updatedTarget.title, body: updatedTarget.body, tags: updatedTarget.tags, sources: updatedTarget.sources });
+    assertKnowledgeRecordSize(updatedTarget);
+    assertKnowledgeRecordSize(updatedSource);
     const journalFile = knowledgeMergeJournalPath(state);
     const journal = {
       schemaVersion: KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION,
@@ -1082,6 +1147,7 @@ export async function createKnowledgeExperiment({
       history: [historyRecord({ at: now, action: 'experiment-created', actor, agent })],
     };
     assertNoSensitive({ title: entry.title, body: entry.body, tags: entry.tags, sources: entry.sources });
+    assertKnowledgeRecordSize(entry);
     await writeJsonAtomic(notePath(state.knowledge, entry.id), entry, { overwrite: false });
     return { created: true, entry: publicEntry(entry), experiment };
   });
@@ -1129,6 +1195,20 @@ export async function diffKnowledgeExperiment({ id, env = process.env, clock = D
   return withKnowledgeLock(state, () => experimentDiffUnlocked(state, id));
 }
 
+function legacyUnadoptedProposal(proposed, experiment) {
+  if (proposed.approval !== 'pending'
+    || proposed.history.some((entry) => entry.action === 'experiment-adopted')) return false;
+  const last = proposed.history.at(-1);
+  if (last?.action !== 'updated' || !last.before || last.before.state === 'superseded'
+    || last.before.approval !== 'pending') return false;
+  try {
+    const before = knowledgeExperimentMetadata(last.before);
+    return before && ['workId', 'name', 'baseId', 'baseDigest'].every((key) => before[key] === experiment[key]);
+  } catch {
+    return false;
+  }
+}
+
 export async function adoptKnowledgeExperiment({ id, expectedRevision, actor, agent, env = process.env, clock = Date } = {}) {
   if (typeof expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(expectedRevision)) {
     throw new CoreError('EXPERIMENT_REVIEW_REQUIRED', 'Review know branch diff and pass its revision before adoption');
@@ -1138,12 +1218,23 @@ export async function adoptKnowledgeExperiment({ id, expectedRevision, actor, ag
     const diff = await experimentDiffUnlocked(state, id);
     const { proposed, experiment, currentShared } = diff;
     const targetId = experiment.baseId ?? adoptedKnowledgeId(id);
+    let recoveredProposal = false;
     if (proposed.state === 'superseded') {
-      const target = await getKnowledgeUnlocked(state, targetId);
-      if (!target.relationships.some((item) => item.type === 'supersedes' && item.targetId === id)) {
-        throw new CoreError('EXPERIMENT_ADOPTION_CONFLICT', 'Previously adopted knowledge no longer matches its source');
+      let target;
+      try { target = await getKnowledgeUnlocked(state, targetId); }
+      catch (error) { if (error.code !== 'KNOWLEDGE_NOT_FOUND') throw error; }
+      if (target?.relationships.some((item) => item.type === 'supersedes' && item.targetId === id)) {
+        return { adopted: false, target, sourceId: id };
       }
-      return { adopted: false, target, sourceId: id };
+      // Older generic updates could mark a proposal superseded without ever
+      // adopting it. Recover only a proven generic transition, and only after
+      // the same reviewed revision/base checks used for an ordinary adoption.
+      if (!legacyUnadoptedProposal(proposed, experiment)) {
+        throw new CoreError('EXPERIMENT_ADOPTION_CONFLICT',
+          'Superseded knowledge has no matching adoption target. Preserve the source and review a new experiment; automatic restoration is unsafe.',
+          { id, targetId });
+      }
+      recoveredProposal = true;
     }
     if (diff.revision !== expectedRevision || diff.baseChanged) {
       throw new CoreError('EXPERIMENT_REVISION_CONFLICT', 'Experimental or shared knowledge changed; review again and create a fresh experiment if the shared base changed');
@@ -1172,6 +1263,8 @@ export async function adoptKnowledgeExperiment({ id, expectedRevision, actor, ag
       relationships: relationshipsWithRequiredLink(proposed.relationships, { type: 'related', targetId }),
       history: [...proposed.history, historyRecord({ at: now, action: 'experiment-adopted', actor, agent,
         before: historySnapshot(proposed) })].slice(-MAX_HISTORY) };
+    assertKnowledgeRecordSize(target);
+    assertKnowledgeRecordSize(archived);
     const journal = { schemaVersion: KNOWLEDGE_MERGE_JOURNAL_SCHEMA_VERSION, kind: 'knowledge-merge', target, source: archived };
     if (!validKnowledgeMergeJournal(journal)) throw new CoreError('STATE_CORRUPT', 'Experimental adoption journal is inconsistent');
     const journalFile = knowledgeMergeJournalPath(state);
@@ -1181,6 +1274,7 @@ export async function adoptKnowledgeExperiment({ id, expectedRevision, actor, ag
     await writeJsonAtomic(notePath(state.knowledge, target.id), target);
     await writeJsonAtomic(notePath(state.knowledge, archived.id), archived);
     await removeFile(journalFile);
-    return { adopted: true, target: publicEntry(target), sourceId: id };
+    return { adopted: true, target: publicEntry(target), sourceId: id,
+      ...(recoveredProposal ? { recoveredProposal: true } : {}) };
   });
 }

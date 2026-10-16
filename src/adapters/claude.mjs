@@ -15,7 +15,9 @@ import {
 // reused both when writing settings.json and when sizing internal waits.
 export const CLAUDE_HOOK_TIMEOUT_SECONDS = Object.freeze({
   start: 5,
-  prompt: 2,
+  // Prompt hooks also synchronize and compose context. Leave room for Node
+  // startup and slower disks instead of discarding their output after 2s.
+  prompt: 5,
   stop: 5,
   precompact: 5,
   end: 5,

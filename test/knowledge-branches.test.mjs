@@ -62,10 +62,13 @@ test('generic approve, marker removal, or merge cannot bypass experiment adoptio
   const base = await core.knowledge.add({ scope: 'repo', title: 'Shared', body: 'known fact' });
   const experiment = (await createKnowledgeExperiment({ env, cwd, workId: work.id, name: 'trial', sourceId: base.id })).entry;
   await assert.rejects(updateKnowledge({ env, id: experiment.id, approval: 'approved' }), { code: 'EXPERIMENT_ADOPTION_REQUIRED' });
+  await assert.rejects(updateKnowledge({ env, id: experiment.id, state: 'superseded' }), { code: 'EXPERIMENT_ADOPTION_REQUIRED' });
   await assert.rejects(updateKnowledge({ env, id: experiment.id, sources: [] }), { code: 'EXPERIMENT_ADOPTION_REQUIRED' });
   await assert.rejects(mergeKnowledge({ env, targetId: base.id, sourceId: experiment.id }), { code: 'EXPERIMENT_ADOPTION_REQUIRED' });
   await assert.rejects(mergeKnowledge({ env, targetId: experiment.id, sourceId: base.id }), { code: 'EXPERIMENT_ADOPTION_REQUIRED' });
   assert.equal((await getKnowledge({ env, id: base.id })).body, 'known fact');
+  const diff = await diffKnowledgeExperiment({ env, id: experiment.id });
+  assert.equal((await adoptKnowledgeExperiment({ env, id: experiment.id, expectedRevision: diff.revision })).adopted, true);
 });
 
 test('adoption detects concurrent proposal changes, changed shared bases, and deleted bases', async (t) => {
@@ -97,4 +100,38 @@ test('new experimental notes adopt once under concurrent calls without Git manip
   assert.equal((await core.knowledge.list()).length, 1);
   assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }), head);
   await assert.rejects(updateKnowledge({ env, id: created.entry.id, body: 'reuse old proposal' }), { code: 'EXPERIMENT_ALREADY_ADOPTED' });
+});
+
+test('reviewed adoption repairs only proven legacy generic supersession without bypassing the shared base', async (t) => {
+  for (const baseKind of ['new', 'existing', 'changed']) await t.test(baseKind, async (t) => {
+    const { env, cwd, core, work } = await fixture(t);
+    const base = baseKind === 'new' ? null : await core.knowledge.add({ scope: 'repo', title: 'Shared base', body: 'known facts' });
+    const { entry } = await createKnowledgeExperiment({ env, cwd, workId: work.id, name: 'legacy',
+      ...(base ? { sourceId: base.id } : { title: 'Unadopted proposal', body: 'review this proposal' }) });
+    const poisoned = { ...entry, state: 'superseded', history: [...entry.history, {
+      at: new Date().toISOString(), action: 'updated', actor: 'legacy', deviceId: null, agent: null, before: entry,
+    }] };
+    await fs.writeFile(path.join(env.HND_HOME, 'knowledge', entry.id + '.json'), JSON.stringify(poisoned));
+    if (baseKind === 'changed') await core.knowledge.update({ id: base.id, body: 'new shared facts' });
+    const diff = await diffKnowledgeExperiment({ env, id: entry.id });
+    if (baseKind === 'changed') {
+      await assert.rejects(adoptKnowledgeExperiment({ env, id: entry.id, expectedRevision: diff.revision }), { code: 'EXPERIMENT_REVISION_CONFLICT' });
+      assert.equal((await getKnowledge({ env, id: base.id })).body, 'new shared facts');
+    } else {
+      const adopted = await adoptKnowledgeExperiment({ env, id: entry.id, expectedRevision: diff.revision });
+      assert.equal(adopted.adopted, true);
+      assert.equal(adopted.recoveredProposal, true);
+      await assert.rejects(updateKnowledge({ env, id: entry.id, body: 'cannot change adopted source' }), { code: 'EXPERIMENT_ALREADY_ADOPTED' });
+      await removeKnowledge({ env, id: adopted.target.id });
+      await assert.rejects(adoptKnowledgeExperiment({ env, id: entry.id, expectedRevision: diff.revision }), { code: 'EXPERIMENT_ADOPTION_CONFLICT' });
+    }
+  });
+});
+
+test('ambiguous legacy supersession never restores or adopts missing target knowledge automatically', async (t) => {
+  const { env, cwd, work } = await fixture(t);
+  const { entry } = await createKnowledgeExperiment({ env, cwd, workId: work.id, name: 'ambiguous', title: 'Preserve proposal', body: 'unknown history' });
+  await fs.writeFile(path.join(env.HND_HOME, 'knowledge', entry.id + '.json'), JSON.stringify({ ...entry, state: 'superseded' }));
+  const diff = await diffKnowledgeExperiment({ env, id: entry.id });
+  await assert.rejects(adoptKnowledgeExperiment({ env, id: entry.id, expectedRevision: diff.revision }), { code: 'EXPERIMENT_ADOPTION_CONFLICT' });
 });

@@ -27,6 +27,7 @@ const DATABASE_APPLICATION_ID = 0x484e4401;
 const CORE_DATABASE_SCHEMA_VERSION = 1;
 const ACCOUNT_SCHEMA_METADATA_KEY = 'account_schema_version';
 const SERVER_OWNER_METADATA_KEY = 'web_server_owner_user_id';
+const SIGNUP_POLICY_GENERATION_KEY = 'web_signup_policy_generation';
 const TOKEN_BYTES = 32;
 const WEBAUTHN_USER_ID_BYTES = 32;
 const MAX_CREDENTIAL_ID_LENGTH = 1024;
@@ -744,7 +745,12 @@ export class AccountStore {
   }
 
   signupStatus(mode = 'open') {
-    const configuredMode = normalizeSignupMode(mode);
+    // Persisted policy is authoritative across long-lived services and other
+    // database connections. The configured value is only a first-start default.
+    const storedMode = this.getDatabase().prepare(`
+      SELECT value FROM schema_metadata WHERE key = 'web_signup_mode'
+    `).get()?.value;
+    const configuredMode = normalizeSignupMode(storedMode ?? mode);
     const users = this.userCount();
     const effectiveMode = configuredMode === 'first-user' && users > 0 ? 'invite' : configuredMode;
     return Object.freeze({
@@ -754,6 +760,26 @@ export class AccountStore {
       requiresCode: effectiveMode === 'invite',
       codeKind: effectiveMode === 'invite' ? 'invite' : null,
     });
+  }
+
+  signupPolicyGeneration() {
+    const stored = this.getDatabase().prepare('SELECT value FROM schema_metadata WHERE key = ?')
+      .get(SIGNUP_POLICY_GENERATION_KEY)?.value ?? '0';
+    const generation = Number(stored);
+    if (!/^\d+$/.test(stored) || !Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error('Stored signup policy generation is invalid');
+    }
+    return generation;
+  }
+
+  #invalidateSignupFlows() {
+    const generation = this.signupPolicyGeneration() + 1;
+    if (!Number.isSafeInteger(generation)) throw new Error('Signup policy generation exhausted');
+    this.getDatabase().prepare(`
+      INSERT INTO schema_metadata (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(SIGNUP_POLICY_GENERATION_KEY, String(generation));
+    this.getDatabase().prepare("DELETE FROM webauthn_flows WHERE type = 'signup'").run();
   }
 
   createBootstrapCode(options = {}) {
@@ -972,6 +998,9 @@ export class AccountStore {
       expiresAt: isoTimestamp(now + ttlMs),
     };
     if (type === 'signup') {
+      if (options.signupPolicyGeneration !== this.signupPolicyGeneration()) {
+        throw accountError('invalid_auth_flow', 'Registration policy changed. Start registration again.', 401);
+      }
       normalizeUsername(row.pendingUsername);
       normalizeDisplayName(row.pendingDisplayName, row.pendingUsername);
       normalizeSignupMode(row.signupPolicy);
@@ -981,30 +1010,37 @@ export class AccountStore {
     if (type === 'reauthenticate' && (!row.userId || !row.sessionId)) {
       throw new Error('Reauthentication flow requires a user and session');
     }
-    this.getDatabase().prepare(`
-      INSERT INTO webauthn_flows
-        (id, token_hash, type, challenge, user_id, session_id, invite_id, signup_policy,
-         pending_username, pending_display_name, pending_webauthn_user_id,
-         pending_tenant_id, pending_role, created_at, expires_at, used_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-    `).run(
-      row.id,
-      row.tokenHash,
-      row.type,
-      row.challenge,
-      row.userId,
-      row.sessionId,
-      row.inviteId,
-      row.signupPolicy,
-      row.pendingUsername,
-      row.pendingDisplayName,
-      row.pendingWebauthnUserId,
-      row.pendingTenantId,
-      row.pendingRole,
-      row.createdAt,
-      row.expiresAt,
-    );
-    return Object.freeze({ flowId: flowToken, type, expiresAt: row.expiresAt });
+    return withImmediateTransaction(this.getDatabase(), () => {
+      // Keep the generation check and flow publication atomic with policy
+      // changes from another connection/process.
+      if (type === 'signup' && options.signupPolicyGeneration !== this.signupPolicyGeneration()) {
+        throw accountError('invalid_auth_flow', 'Registration policy changed. Start registration again.', 401);
+      }
+      this.getDatabase().prepare(`
+        INSERT INTO webauthn_flows
+          (id, token_hash, type, challenge, user_id, session_id, invite_id, signup_policy,
+           pending_username, pending_display_name, pending_webauthn_user_id,
+           pending_tenant_id, pending_role, created_at, expires_at, used_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      `).run(
+        row.id,
+        row.tokenHash,
+        row.type,
+        row.challenge,
+        row.userId,
+        row.sessionId,
+        row.inviteId,
+        row.signupPolicy,
+        row.pendingUsername,
+        row.pendingDisplayName,
+        row.pendingWebauthnUserId,
+        row.pendingTenantId,
+        row.pendingRole,
+        row.createdAt,
+        row.expiresAt,
+      );
+      return Object.freeze({ flowId: flowToken, type, expiresAt: row.expiresAt });
+    });
   }
 
   consumeWebAuthnFlow(flowId, expectedType) {
@@ -1044,6 +1080,7 @@ export class AccountStore {
         pendingTenantId: row.pending_tenant_id,
         pendingRole: row.pending_role,
         expiresAt: row.expires_at,
+        ...(row.type === 'signup' ? { signupPolicyGeneration: this.signupPolicyGeneration() } : {}),
       });
     });
   }
@@ -1134,6 +1171,19 @@ export class AccountStore {
       return withImmediateTransaction(database, () => {
         const now = this.clock();
         const createdAt = isoTimestamp(now);
+        if (flow.signupPolicyGeneration !== this.signupPolicyGeneration()) {
+          throw accountError('invalid_auth_flow', 'Registration policy changed. Start registration again.', 401);
+        }
+        const status = this.signupStatus(flow.signupPolicy);
+        if (!status.allowed) {
+          throw accountError('signup_disabled', 'Account registration is disabled.', 403);
+        }
+        // Also recheck the policy itself for writers predating the generation
+        // metadata. First-owner races retain their dedicated atomic check below.
+        if (status.effectiveMode !== flow.signupPolicy
+          && !(flow.signupPolicy === 'first-user' && status.configuredMode === 'first-user')) {
+          throw accountError('invalid_auth_flow', 'Registration policy changed. Start registration again.', 401);
+        }
         let tenantId = flow.pendingTenantId;
         if (flow.inviteId) {
           const invitation = database.prepare('SELECT * FROM account_invites WHERE id = ?').get(flow.inviteId);
@@ -1558,9 +1608,7 @@ export class AccountStore {
       set.run('web_signup_mode', signupMode);
       set.run('web_revision_retention', String(revisionRetention));
       if (signupMode !== current.signupMode) {
-        database.prepare(`
-          DELETE FROM webauthn_flows WHERE type = 'signup'
-        `).run();
+        this.#invalidateSignupFlows();
       }
     });
     return Object.freeze({ signupMode, revisionRetention });
@@ -1628,9 +1676,7 @@ export class AccountStore {
         set.run('web_signup_mode', signupMode);
         set.run('web_revision_retention', String(revisionRetention));
         if (signupMode !== current.signupMode) {
-          database.prepare(`
-            DELETE FROM webauthn_flows WHERE type = 'signup'
-          `).run();
+          this.#invalidateSignupFlows();
         }
       }
 

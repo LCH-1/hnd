@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { CoreError } from './errors.mjs';
 
@@ -10,6 +11,46 @@ const DEFAULT_DIRECTORY_MODE = 0o700;
 const LOCK_INITIALIZATION_GRACE_MS = 1_000;
 const MAX_LOCK_PID = 0x7fffffff;
 const activeLockOwners = new Set();
+let processFileLockDeadline = null;
+const lockDeadlineScope = new AsyncLocalStorage();
+const operationDeadlineScope = new AsyncLocalStorage();
+
+export function setFileLockDeadline(deadlineAt) {
+  const value = Number.isFinite(deadlineAt) ? deadlineAt : null;
+  const scope = lockDeadlineScope.getStore();
+  if (scope) scope.deadlineAt = value;
+  else processFileLockDeadline = value;
+}
+
+export function fileLockDeadline() {
+  const scope = lockDeadlineScope.getStore();
+  return scope ? scope.deadlineAt : processFileLockDeadline;
+}
+
+export function withFileLockDeadline(deadlineAt, callback) {
+  return lockDeadlineScope.run({ deadlineAt: Number.isFinite(deadlineAt) ? deadlineAt : null }, callback);
+}
+
+// Lock contention consumes a short wait allowance; Git and file inspection can
+// still use the rest of a vendor hook's total execution budget after syncing.
+// Existing dedicated callers that only set a lock deadline retain that ceiling.
+export function operationDeadline() {
+  const scope = operationDeadlineScope.getStore();
+  return scope ? scope.deadlineAt : fileLockDeadline();
+}
+
+export function withOperationDeadline(deadlineAt, callback) {
+  const parent = operationDeadlineScope.getStore()?.deadlineAt;
+  const value = Number.isFinite(deadlineAt)
+    ? Math.min(deadlineAt, parent ?? Infinity) : null;
+  return operationDeadlineScope.run({ deadlineAt: value }, callback);
+}
+
+function boundedLockWait(timeoutMs) {
+  const deadlineAt = fileLockDeadline();
+  return deadlineAt === null ? timeoutMs
+    : Math.max(50, Math.min(timeoutMs, deadlineAt - Date.now()));
+}
 
 async function assertManagedDirectoryChain(trustedRoot, target) {
   const root = path.resolve(trustedRoot);
@@ -462,7 +503,9 @@ function lockSnapshotIsStale(snapshot, staleMs) {
   // finish. Give incomplete records a minimum initialization window so a very
   // small staleMs cannot steal a lock that is still being created.
   const effectiveStaleMs = hasCompleteOwnerRecord
-    ? staleMs
+    // A complete lease owned by a dead process need not poison other sessions
+    // for its full heartbeat interval. Live/unknown PIDs remain protected.
+    ? Math.min(staleMs, LOCK_INITIALIZATION_GRACE_MS)
     : Math.max(staleMs, LOCK_INITIALIZATION_GRACE_MS);
   return Boolean(
     snapshot
@@ -619,6 +662,7 @@ async function reclaimDeletionGuard(guardFile, staleMs) {
 }
 
 async function withLockDeletionGuard(lockFile, callback, timeoutMs, staleMs) {
+  timeoutMs = boundedLockWait(timeoutMs);
   const guardFile = `${lockFile}.delete`;
   const started = Date.now();
   const owner = randomUUID();
@@ -663,6 +707,9 @@ export async function withFileLock(
   callback,
   { timeoutMs = 5_000, staleMs = 30_000 } = {},
 ) {
+  // Hooks also acquire repository, knowledge, checkpoint, and delivery locks.
+  // Bound them all, including nested waits made while holding the state lock.
+  timeoutMs = boundedLockWait(timeoutMs);
   await ensureDirectory(path.dirname(lockFile));
   const started = Date.now();
   const owner = randomUUID();

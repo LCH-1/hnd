@@ -11,14 +11,14 @@ Node.js 24.12 이상, npm, Git이 필요합니다.
 Windows PowerShell:
 
 ```powershell
-npm.cmd install --global '@lch-1/hnd@0.2.2'
+npm.cmd install --global '@lch-1/hnd@latest'
 hnd.cmd --version
 ```
 
 macOS·Linux:
 
 ```sh
-npm install --global '@lch-1/hnd@0.2.2'
+npm install --global '@lch-1/hnd@latest'
 hnd --version
 ```
 

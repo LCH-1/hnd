@@ -7,14 +7,19 @@ import {
   writeJsonAtomic,
 } from '../core/fs.mjs';
 import { statePaths } from '../paths.mjs';
+import { withStateLock } from '../core/mutation-lock.mjs';
+import { captureSyncSnapshot } from './capture.mjs';
+import { validateSyncedState } from './validate-state.mjs';
 import {
   reconcileRemoteAutomatically,
   remoteSyncConfigured,
   remoteSyncConflictResolved,
+  recoverInterruptedRemoteRestore,
 } from '../remote-cli.mjs';
 
 export const AUTO_SYNC_PENDING_SCHEMA_VERSION = 1;
 export const AUTO_SYNC_PENDING_FILENAME = 'auto-sync-pending.json';
+const AUTO_SYNC_FAILURE_FILENAME = 'auto-sync-failure.json';
 
 const RETRY_REASONS = new Set([
   'offline',
@@ -31,6 +36,30 @@ const ATTENTION_REASONS = new Set([
   'local_state',
   'remote_error',
 ]);
+const LOCAL_RECOVERY_INTERVAL_MS = 60_000;
+
+function failureCode(error) {
+  if (error?.name === 'SyntaxError') return 'INVALID_JSON';
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code ?? '') ? error.code : 'UNCLASSIFIED';
+}
+
+export async function readAutoSyncFailure({ env = process.env } = {}) {
+  return readJson(path.join(statePaths(env).cache, AUTO_SYNC_FAILURE_FILENAME), {
+    optional: true,
+    validate: (value) => value?.schemaVersion === 1
+      && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.errorCode ?? '')
+      && typeof value.occurredAt === 'string'
+      && (ATTENTION_REASONS.has(value.reason) || RETRY_REASONS.has(value.reason)),
+  });
+}
+
+async function rememberFailure(error, { env, clock }, reason) {
+  // Keep diagnostics separate: older runtimes validate pending marker keys
+  // strictly, and rollback must still preserve conflict/authentication barriers.
+  await writeJsonAtomic(path.join(statePaths(env).cache, AUTO_SYNC_FAILURE_FILENAME), {
+    schemaVersion: 1, errorCode: failureCode(error), reason, occurredAt: isoNow(clock),
+  }).catch(() => {});
+}
 const NETWORK_ERROR_CODES = new Set([
   'ECONNABORTED',
   'ECONNREFUSED',
@@ -137,6 +166,11 @@ export async function clearAutoSyncPending({ env = process.env } = {}) {
   return Object.freeze({ cleared: true });
 }
 
+/** Caller owns auto-sync.lock, including explicit manual merge operations. */
+export function recordAutoSyncConflict({ env = process.env, clock = Date, conflicts } = {}) {
+  return replacePending({ env, clock, kind: 'attention', reason: 'conflict', conflicts });
+}
+
 function errorChain(error) {
   const values = [];
   let current = error;
@@ -152,6 +186,7 @@ function classifyFailure(error) {
   const names = new Set(chain.map((item) => item?.name).filter(Boolean));
   const codes = new Set(chain.map((item) => item?.code).filter(Boolean));
   const status = chain.find((item) => Number.isInteger(item?.status))?.status;
+  if (codes.has('CONTEXT_TOO_LARGE')) return Object.freeze({ kind: 'attention', reason: 'schema' });
 
   if (
     names.has('TimeoutError')
@@ -208,6 +243,7 @@ function pendingResult(record, { blocked = false } = {}) {
 
 async function persistFailure(error, options) {
   const classification = classifyFailure(error);
+  await rememberFailure(error, options, classification.reason);
   try {
     const pending = await replacePending({ ...options, ...classification });
     return pendingResult(pending);
@@ -243,7 +279,7 @@ async function reportUnlockedFailure(error, { env }) {
   });
 }
 
-async function handleAttention(pending, { env, retryAttention, lockTimeoutMs }) {
+async function handleAttention(pending, { env, retryAttention, lockTimeoutMs, clock, recoveredRestore = false }) {
   if (!pending || pending.kind !== 'attention') return { blocked: false, retried: Boolean(pending) };
   if (retryAttention) {
     await clearAutoSyncPending({ env });
@@ -256,6 +292,29 @@ async function handleAttention(pending, { env, retryAttention, lockTimeoutMs }) 
       return { blocked: false, retried: true };
     }
   }
+  if (pending.reason === 'local_state') {
+    const timestamp = isoNow(clock);
+    if (!recoveredRestore && Date.parse(timestamp) - Date.parse(pending.lastAttemptAt) < LOCAL_RECOVERY_INTERVAL_MS) {
+      return { blocked: true, result: pendingResult(pending, { blocked: true }) };
+    }
+    // Legacy catch-all failures must not disable sync forever. Validate local
+    // state first; never apply this recovery to conflict/auth/integrity barriers.
+    const attempted = { ...pending, lastAttemptAt: timestamp, attempts: pending.attempts + 1 };
+    try {
+      await withStateLock(async () => {
+        const snapshot = await captureSyncSnapshot(statePaths(env).home);
+        validateSyncedState(snapshot);
+      }, { env, timeoutMs: lockTimeoutMs });
+    } catch (error) {
+      await rememberFailure(error, { env, clock }, 'local_state');
+      await writeJsonAtomic(pendingPath(env), attempted);
+      return { blocked: true, result: pendingResult(attempted, { blocked: true }) };
+    }
+    // Only the validated local-state barrier is cleared. The normal reconciler
+    // verifies remote integrity and performs conflict-aware three-way merging.
+    await clearAutoSyncPending({ env });
+    return { blocked: false, retried: true };
+  }
   return { blocked: true, result: pendingResult(pending, { blocked: true }) };
 }
 
@@ -265,9 +324,8 @@ async function handleAttention(pending, { env, retryAttention, lockTimeoutMs }) 
  * The function never throws: a lock owner records transient failures in an
  * atomic retry marker, while competing callers defer without writing status.
  * Conflicts and trust/integrity failures become a blocking attention
- * marker. A conflict marker cannot publish on a later automatic invocation;
- * it clears only after a reviewed manual sync makes local state clean, or an
- * explicit caller passes retryAttention.
+ * marker. Content/ownership conflicts require review; lease-only conflicts
+ * retained by older runtimes may recover after report/checkpoint validation.
  */
 export async function autoSync({
   env = process.env,
@@ -277,6 +335,7 @@ export async function autoSync({
   retryAttention = false,
   fetchImpl,
   clock = Date,
+  deadlineAt,
   reconcile = reconcileRemoteAutomatically,
 } = {}) {
   const failureOptions = { env, clock };
@@ -293,11 +352,14 @@ export async function autoSync({
               pending: false,
             });
           }
+          const recoveredRestore = await recoverInterruptedRemoteRestore(env, { lockTimeoutMs });
           const pending = await readAutoSyncPending({ env });
           const attention = await handleAttention(pending, {
             env,
             retryAttention,
+            clock,
             lockTimeoutMs: Math.min(lockTimeoutMs, 2_000),
+            recoveredRestore,
           });
           if (attention.blocked) return attention.result;
 
@@ -307,6 +369,7 @@ export async function autoSync({
             lockTimeoutMs,
             maxConflictRetries,
             fetchImpl,
+            ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}),
           });
           if (result?.status === 'not_configured') {
             await clearAutoSyncPending({ env });

@@ -19,6 +19,9 @@ import {
   applyConnectorUpdate,
   checkConnectorUpdate,
   rollbackConnectorUpdate,
+  recordUpdateError,
+  connectorUpdateStatus,
+  updateDue,
 } from '../src/update/client.mjs';
 import {
   installConnectorBundle,
@@ -42,6 +45,7 @@ import {
   runtimeDirectory,
   runtimePaths,
   runtimeReady,
+  writeUpdateState,
 } from '../src/update/state.mjs';
 
 function releaseKeyPair() {
@@ -1022,6 +1026,54 @@ test('launcher falls back to the packaged CLI when no cached runtime is usable',
   });
   assert.match(stdout.text(), /^\d+\.\d+\.\d+\n$/);
   assert.equal(stderr.text(), '');
+});
+
+test('failure reporting never rewrites trusted update state and still throttles retries', async (t) => {
+  const { env } = await temporaryEnvironment(t);
+  const remote = await configureRemote(env);
+  const trusted = {
+    schemaVersion: 1,
+    origins: { [remote.baseUrl.replace(/\/$/u, '')]: { highestSequence: 34, installed: null, quarantine: [33] } },
+    lastAttemptAt: '2020-01-01T00:00:00.000Z', lastError: null,
+  };
+  await writeUpdateState(trusted, env);
+  await Promise.all(Array.from({ length: 4 }, (_, index) => recordUpdateError(new Error(`concurrent worker ${index}`), env)));
+  assert.deepEqual(await readUpdateState(env), trusted);
+  assert.match((await connectorUpdateStatus(env)).lastError.message, /concurrent worker/u);
+  assert.equal(await updateDue({ env }), false);
+  await writeUpdateState({ ...trusted, lastAttemptAt: new Date(Date.now() + 1_000).toISOString() }, env);
+  assert.equal((await connectorUpdateStatus(env)).lastError, null);
+});
+
+test('launcher selects custom state-home before runtime selection and update routing', async (t) => {
+  const { root, env } = await temporaryEnvironment(t);
+  const custom = path.join(root, 'custom-state');
+  const release = releaseFixture(releaseKeyPair(), {
+    sequence: 10, version: '9.9.9',
+    source: 'export async function main(argv, options) { options.stdout.write(JSON.stringify({ source: "custom", home: options.env.HND_HOME, argv })); }\n',
+  });
+  await installConnectorBundle(release.manifest, release.bundle.bytes, { env: { ...env, HND_HOME: custom }, smoke: async () => {} });
+  const stdout = outputStream();
+  const argv = ['--state-home', custom, 'hook', 'claude', 'prompt'];
+  await launcherMain(argv, { env, cwd: root, stdout, stderr: outputStream() });
+  assert.deepEqual(JSON.parse(stdout.text()), { source: 'custom', home: custom, argv });
+
+  const status = outputStream();
+  await launcherMain([`--state-home=${custom}`, 'update', '--json'], {
+    env, cwd: root, stdout: status, stderr: outputStream(),
+    fetchImpl: async () => byteResponse(JSON.stringify({ name: '@lch-1/hnd', version: LAUNCHER_VERSION })),
+  });
+  assert.equal(JSON.parse(status.text()).clientRelease.version, '9.9.9');
+  assert.equal(await readRuntimePointer('current', env), null);
+});
+
+test('invalid state-home retains the hook fail-open validation boundary', async (t) => {
+  const { env, root } = await temporaryEnvironment(t);
+  const stdout = outputStream();
+  const stderr = outputStream();
+  await launcherMain(['--state-home', 'relative', 'hook', 'claude', 'prompt'], { env, cwd: root, stdout, stderr });
+  assert.equal(stdout.text(), '');
+  assert.match(stderr.text(), /state-home must be an absolute path/u);
 });
 
 test('the update check interval is tunable per device within a safe range', async () => {

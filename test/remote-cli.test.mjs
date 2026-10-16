@@ -13,6 +13,7 @@ import { main } from '../src/cli.mjs';
 import { agentPaths } from '../src/paths.mjs';
 import { formatDeviceInvite, snapshotDigest } from '../src/remote-cli.mjs';
 import { captureSyncSnapshot } from '../src/sync/capture.mjs';
+import { autoSync, readAutoSyncPending } from '../src/sync/auto.mjs';
 import {
   encryptBytes,
   generateVaultKey,
@@ -345,7 +346,7 @@ test('remote CLI syncs two devices with encrypted snapshots, conflicts, deletion
     ...retryArguments, '--url', address.url, '--json',
   ])).stdout);
   assert.equal(retried.enrolled, true);
-  assert.equal(retried.vaultKeySource, 'existing');
+  assert.equal(retried.vaultKeySource, 'imported');
 
   // Simulate the account-authenticated web UI issuing the hndj code. The CLI
   // only consumes this format through `hnd connect` now.
@@ -465,7 +466,8 @@ test('remote CLI syncs two devices with encrypted snapshots, conflicts, deletion
   const statusText = (await runA(['remote', 'status', '--json'])).stdout;
   assert.equal(statusText.includes(enrollAKey.enrollmentKey), false);
   assert.equal(statusText.includes('hnd-vault-v1:'), false);
-  await runA(['remote', 'revoke', enrolledB.device.id]);
+  await assert.rejects(runA(['remote', 'revoke', enrolledB.device.id]), (error) => error.status === 403);
+  await runB(['remote', 'revoke', enrolledB.device.id]);
   await assert.rejects(
     () => runB(['remote', 'pull']),
     (error) => error.status === 401,
@@ -578,7 +580,14 @@ test('remote merge applies independent edits and records local-wins conflicts', 
   const status = JSON.parse((await runA(['remote', 'status', '--json'])).stdout);
   assert.equal(status.mergeBasePresent, true);
   assert.equal(status.localChanges, true);
+  assert.equal((await readAutoSyncPending({ env: envA })).reason, 'conflict');
+  const automatic = await autoSync({ env: envA });
+  assert.equal(automatic.status, 'needs_attention');
+  assert.equal(automatic.blocked, true);
+  await runB(['remote', 'pull']);
+  assert.match((await runB(['policy', 'show', 'global'])).stdout, /GLOBAL-B-CONFLICT/);
   await runA(['remote', 'push']);
+  assert.equal(await readAutoSyncPending({ env: envA }), null);
   await runB(['remote', 'pull']);
   assert.match((await runB(['policy', 'show', 'global'])).stdout, /GLOBAL-A-CONFLICT/);
 });

@@ -933,3 +933,76 @@ test('mutations preflight the context budget and composition never truncates a b
     (error) => error instanceof CoreError && error.code === 'INVALID_HANDOFF_ID',
   );
 });
+
+test('repository identity survives folder and remote rename and init refreshes known aliases', async (t) => {
+  const { root, repository, env, clock } = await fixture(t);
+  const core = createCore({ env, cwd: repository, clock });
+  const first = await core.repo.init({ environment: 'production' });
+  const repoId = (await core.repo.resolve()).repository.id;
+  await git(repository, 'remote', 'set-url', 'origin', 'git@github.com:Acme/Renamed.git');
+  await core.repo.init();
+  assert.ok((await core.repo.resolve()).repository.remoteAliases.includes('github.com/Acme/Renamed'));
+  const moved = path.join(root, 'moved');
+  await fs.rename(repository, moved);
+  await git(moved, 'remote', 'set-url', 'origin', 'git@github.com:Acme/RenamedAgain.git');
+  const movedCore = createCore({ env, cwd: moved, clock });
+  const resolved = await movedCore.repo.resolve();
+  assert.equal(resolved.match, 'git-directory');
+  assert.equal(resolved.repository.id, repoId);
+  assert.equal(resolved.environment, 'production');
+  await movedCore.repo.init();
+  assert.equal(await movedCore.env.get(), 'production');
+  assert.equal((await movedCore.repo.bindings()).length, 1);
+  const fork = path.join(root, 'fork');
+  await execFileAsync('git', ['clone', '--quiet', moved, fork]);
+  await git(fork, 'remote', 'set-url', 'origin', 'git@github.com:Other/Fork.git');
+  await fs.rm(moved, { recursive: true });
+  await assert.rejects(createCore({ env, cwd: fork, clock }).repo.resolve(), { code: 'REPOSITORY_LINK_REQUIRED' });
+});
+
+test('legacy renamed checkout recovers only one missing binding and retains its environment', async (t) => {
+  const { root, repository, env, clock } = await fixture(t);
+  const core = createCore({ env, cwd: repository, clock });
+  await core.repo.init({ environment: 'staging' });
+  const repoId = (await core.repo.resolve()).repository.id;
+  const file = path.join(env.HND_HOME, 'bindings.json');
+  const bindings = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete bindings.bindings[repository].gitDirectoryIdentity;
+  await fs.writeFile(file, JSON.stringify(bindings));
+  const moved = path.join(root, 'new-name');
+  await fs.rename(repository, moved);
+  await git(moved, 'remote', 'set-url', 'origin', 'https://example.invalid/renamed/project.git');
+  const movedCore = createCore({ env, cwd: moved, clock });
+  await movedCore.repo.init();
+  assert.equal((await movedCore.repo.resolve()).repository.id, repoId);
+  assert.equal(await movedCore.env.get(), 'staging');
+});
+
+test('hook binding verifies and backfills a legacy Git identity once', async (t) => {
+  const { repository, env, clock } = await fixture(t);
+  const core = createCore({ env, cwd: repository, clock });
+  await core.repo.init();
+  const file = path.join(env.HND_HOME, 'bindings.json');
+  const bindings = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete bindings.bindings[repository].gitDirectoryIdentity;
+  await fs.writeFile(file, JSON.stringify(bindings));
+  await core.repo.binding();
+  assert.match(JSON.parse(await fs.readFile(file, 'utf8')).bindings[repository].gitDirectoryIdentity, /^\d+:\d+$/);
+  await core.repo.binding({ rememberGitIdentity: true });
+  const after = await fs.readFile(file, 'utf8');
+  assert.match(JSON.parse(after).bindings[repository].gitDirectoryIdentity, /^\d+:\d+$/);
+  await core.repo.binding({ rememberGitIdentity: true });
+  assert.equal(await fs.readFile(file, 'utf8'), after);
+});
+
+test('shared Git common directory never transfers another worktree environment', async (t) => {
+  const { root, repository, env, clock } = await fixture(t);
+  await createCore({ env, cwd: repository, clock }).repo.init({ environment: 'production' });
+  const second = path.join(root, 'second-worktree');
+  await git(repository, 'worktree', 'add', '-b', 'other', second);
+  const core = createCore({ env, cwd: second, clock });
+  await core.repo.init();
+  assert.equal(await core.env.get(), 'default');
+  const bindings = await core.repo.bindings();
+  assert.equal(new Set(bindings.map((binding) => binding.gitDirectoryIdentity)).size, 2);
+});

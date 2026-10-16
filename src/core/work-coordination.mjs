@@ -208,7 +208,8 @@ export async function inspectWorkCoordination({
       // next heartbeat can report its loss. Heartbeat consumes lost IDs below.
       session.ownedIds = [...new Set([
         ...session.ownedIds,
-        ...records.filter((record) => record.status === 'active' && record.claimSessionKey === sessionKey).map((record) => record.id),
+        ...records.filter((record) => record.status === 'active' && record.claimActive
+          && record.claimSessionKey === sessionKey).map((record) => record.id),
       ])].slice(-MAX_RECORDS);
     }
     state.sessions = pruneSessions(state.sessions, sessionKey, now);

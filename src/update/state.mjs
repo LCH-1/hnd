@@ -16,6 +16,7 @@ export function runtimePaths(env = process.env) {
     current: state.runtimeCurrent,
     previous: state.runtimePrevious,
     updateState: state.runtimeUpdateState,
+    failure: path.join(state.runtime, 'update-failure.json'),
     lock: state.runtimeUpdateLock,
   });
 }
@@ -120,6 +121,17 @@ export async function readUpdateState(env = process.env) {
 
 export async function writeUpdateState(value, env = process.env) {
   await writeJsonAtomic(runtimePaths(env).updateState, value, { mode: 0o600 });
+}
+
+export async function readUpdateFailure(env = process.env) {
+  return readJson(runtimePaths(env).failure, {
+    optional: true,
+    validate: (value) => value?.schemaVersion === 1
+      && typeof value.lastAttemptAt === 'string'
+      && Number.isFinite(Date.parse(value.lastAttemptAt))
+      && typeof value.lastError?.at === 'string'
+      && typeof value.lastError?.message === 'string',
+  });
 }
 
 export function originUpdateState(state, origin) {

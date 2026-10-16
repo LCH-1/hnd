@@ -108,6 +108,7 @@ test('session hooks prefer the server, fall back offline, and recover without ma
   ]);
   await runA(['init']);
   await runA(['rule', 'set', 'all', '--text', 'SERVER-RULE-A']);
+  await runA(['rule', 'set', 'repo', '--text', 'SERVER-PROJECT-RULE']);
   await runA(['sync', 'push']);
 
   const connectionCode = await issueAccountConnection(server, 'hook-tenant', envA.HND_HOME);
@@ -138,6 +139,8 @@ test('session hooks prefer the server, fall back offline, and recover without ma
   const refreshedWire = JSON.parse(refreshedSameSession.stdout);
   assert.equal(refreshedWire.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
   assert.match(refreshedWire.hookSpecificOutput.additionalContext, /SERVER-RULE-C/);
+  assert.match(refreshedWire.hookSpecificOutput.additionalContext, /SERVER-PROJECT-RULE/);
+  assert.doesNotMatch(refreshedSameSession.stderr, /repository context unavailable/);
   assert.doesNotMatch(refreshedWire.hookSpecificOutput.additionalContext, /SERVER-RULE-A|SERVER-RULE-B/);
   const unchangedSameSession = await runB(
     ['hook', 'codex', 'prompt'],

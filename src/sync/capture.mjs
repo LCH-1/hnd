@@ -9,6 +9,7 @@ import {
 import path from 'node:path';
 import { APP_SETTINGS_PATH } from '../shared/app-settings.mjs';
 import { withKnowledgeSnapshotLock } from '../core/knowledge.mjs';
+import { recoverPendingHandoffClosures } from '../core/handoffs.mjs';
 import {
   atomicWriteFile,
   ensurePrivateDirectory,
@@ -203,6 +204,7 @@ export async function captureSyncSnapshot(homeDirectory, options = {}) {
   if (homeMetadata && (!homeMetadata.isDirectory() || homeMetadata.isSymbolicLink())) {
     throw new Error('Sync home must be a real directory, not a symlink');
   }
+  if (homeMetadata) await recoverPendingHandoffClosures(home);
 
   const files = [];
   await assertNoSymlinkComponents(home, GLOBAL_POLICY_PATH);

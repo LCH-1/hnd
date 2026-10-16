@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { readJson, withFileLock } from '../core/fs.mjs';
+import { readJson, withFileLock, writeJsonAtomic } from '../core/fs.mjs';
 import { statePaths } from '../paths.mjs';
 import { installConnectorBundle } from './install.mjs';
 import { fetchVersionMetadata, isVersion } from './registry.mjs';
@@ -14,6 +14,7 @@ import {
   originUpdateState,
   readRuntimePointer,
   readUpdateState,
+  readUpdateFailure,
   rollbackRuntime,
   runtimeReady,
   runtimePaths,
@@ -260,7 +261,7 @@ export async function applyConnectorUpdate(options = {}) {
         ),
         installed: checked.current ?? originUpdateState(state, checked.remote.baseUrl).installed,
       });
-      await writeUpdateState({ ...state, lastAttemptAt: now, lastError: null }, env);
+      await writeUpdateState({ ...state, lastAttemptAt: new Date().toISOString(), lastError: null }, env);
       return { ...checked, installed: false };
     }
     const response = await authenticatedFetch(checked.remote, checked.manifest.bundle.path, {
@@ -284,7 +285,7 @@ export async function applyConnectorUpdate(options = {}) {
       ),
       installed: installed.pointer,
     });
-    await writeUpdateState({ ...state, lastAttemptAt: now, lastError: null }, env);
+    await writeUpdateState({ ...state, lastAttemptAt: new Date().toISOString(), lastError: null }, env);
     return { ...checked, ...installed };
   }, { timeoutMs: options.lockTimeoutMs ?? 5_000, staleMs: 10 * 60_000 });
 }
@@ -297,35 +298,37 @@ export async function updateDue({
   if (intervalMs === undefined) intervalMs = configuredUpdateIntervalMs(env);
   const remote = await readEnrolledRemote(env);
   if (!remote) return false;
-  const state = await readUpdateState(env);
-  const lastAttempt = Date.parse(state.lastAttemptAt || '');
+  const [state, failure] = await Promise.all([
+    readUpdateState(env), readUpdateFailure(env).catch(() => null),
+  ]);
+  const lastAttempt = Math.max(Date.parse(state.lastAttemptAt || '') || 0, Date.parse(failure?.lastAttemptAt || '') || 0);
   if (Number.isFinite(lastAttempt) && now - lastAttempt < intervalMs) return false;
   const last = Date.parse(originUpdateState(state, remote.baseUrl).lastCheckedAt || '');
   return !Number.isFinite(last) || now - last >= intervalMs;
 }
 
 export async function recordUpdateError(error, env = process.env) {
-  const state = await readUpdateState(env).catch(() => ({
+  const now = new Date().toISOString();
+  // Failure reporting can run after losing the update lock. Keep it separate
+  // from trust, quarantine and installed-release state instead of overwriting
+  // a concurrent successful writer with an old read-modify-write snapshot.
+  await writeJsonAtomic(runtimePaths(env).failure, {
     schemaVersion: 1,
-    origins: {},
-    lastError: null,
-  }));
-  await writeUpdateState({
-    ...state,
-    lastAttemptAt: new Date().toISOString(),
+    lastAttemptAt: now,
     lastError: {
-      at: new Date().toISOString(),
+      at: now,
       message: error?.message || String(error),
     },
-  }, env);
+  }, { mode: 0o600 });
 }
 
 export async function connectorUpdateStatus(env = process.env) {
-  const [current, previous, state, remote] = await Promise.all([
+  const [current, previous, state, remote, failure] = await Promise.all([
     readRuntimePointer('current', env),
     readRuntimePointer('previous', env),
     readUpdateState(env),
     readEnrolledRemote(env).catch(() => null),
+    readUpdateFailure(env).catch(() => null),
   ]);
   return {
     configured: Boolean(remote),
@@ -333,7 +336,8 @@ export async function connectorUpdateStatus(env = process.env) {
     current,
     previous,
     update: remote ? originUpdateState(state, remote.baseUrl) : null,
-    lastError: state.lastError ?? null,
+    lastError: failure && Date.parse(failure.lastAttemptAt) > (Date.parse(state.lastAttemptAt || '') || 0)
+      ? failure.lastError : state.lastError ?? null,
   };
 }
 

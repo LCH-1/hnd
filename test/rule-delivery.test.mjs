@@ -10,6 +10,8 @@ import {
   listLiveContextDeliveries,
   liveContextSessionKey,
   recordLiveContextDelivery,
+  prepareLiveContextDelivery,
+  commitLiveContextDelivery,
   renderLiveContextSnapshot,
 } from '../src/core/live-context.mjs';
 
@@ -135,4 +137,21 @@ test('delivery cache retains the current session when all 512 existing entries h
   assert.equal(entries.length, 512);
   assert.ok(entries.some((entry) => entry.sessionKey === first.sessionKey));
   assert.equal((await recordLiveContextDelivery(options)).changed, false);
+});
+
+test('prepared but failed deliveries retry and older in-flight completions cannot overwrite newer delivery', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-live-context-prepare-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const options = { agent: 'claude', payload: { session_id: 'same-session' }, env: { HND_HOME: root } };
+  const failed = await prepareLiveContextDelivery({ ...options, composition: composition('FIRST') });
+  assert.equal(failed.changed, true);
+  assert.deepEqual(await listLiveContextDeliveries({ env: options.env }), []);
+  const retry = await prepareLiveContextDelivery({ ...options, composition: composition('FIRST') });
+  assert.equal(retry.changed, true);
+  assert.equal(await commitLiveContextDelivery(retry, { deadlineAt: Date.now() - 1 }), false);
+  const newer = await prepareLiveContextDelivery({ ...options, composition: composition('SECOND') });
+  assert.equal(await commitLiveContextDelivery(newer), true);
+  assert.equal(await commitLiveContextDelivery(failed), false);
+  assert.equal((await prepareLiveContextDelivery({ ...options, composition: composition('SECOND') })).changed, false);
+  assert.equal((await prepareLiveContextDelivery({ ...options, composition: composition('FIRST') })).changed, true);
 });

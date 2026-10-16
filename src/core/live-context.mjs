@@ -10,6 +10,7 @@ const KERNEL_VERSION = 1;
 const MAX_SESSIONS = 512;
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_ID_FIELDS = ['session_id', 'sessionId', 'conversation_id', 'conversationId', 'thread_id', 'threadId'];
+const PREPARED_DELIVERY = Symbol('preparedDelivery');
 export const CURSOR_LIVE_CONTEXT_SESSION_ENV = 'HND_CURSOR_RULE_SESSION';
 
 function deliveryPath(env) {
@@ -156,12 +157,10 @@ function prunedSessions(sessions, now, currentSessionKey) {
 }
 
 /**
- * Atomically compares and records the complete effective HND context revision
- * for one agent session. A missing vendor session id deliberately returns
- * changed=true so a live update is never skipped merely because a hook payload
- * was incomplete.
+ * Compare without acknowledging delivery. A failed output or materialization
+ * must leave the same revision eligible for the next hook.
  */
-export async function recordLiveContextDelivery({
+export async function prepareLiveContextDelivery({
   agent,
   payload = {},
   composition,
@@ -179,36 +178,58 @@ export async function recordLiveContextDelivery({
   const now = source instanceof Date ? source : new Date(source);
   if (Number.isNaN(now.getTime())) throw new TypeError('clock returned an invalid date');
 
+  const current = await readState(env);
+  const sessions = prunedSessions(current?.sessions || {}, now);
+  const changed = force || sessions[sessionKey]?.contextRevision !== revision;
+  return Object.freeze({
+    changed, revision, content, sessionKey,
+    [PREPARED_DELIVERY]: { env, now, composition, agent, previous: sessions[sessionKey] ?? null },
+  });
+}
+
+/** Commit only after output has flushed and all required materializations succeeded. */
+export async function commitLiveContextDelivery(delivery, { deadlineAt = Infinity } = {}) {
+  const prepared = delivery?.[PREPARED_DELIVERY];
+  if (!prepared || !delivery.changed || !delivery.sessionKey) return false;
+  const { env, now, composition, agent, previous } = prepared;
+  const { sessionKey, revision } = delivery;
   return withFileLock(deliveryLockPath(env), async () => {
+    if (Date.now() >= deadlineAt) return false;
     const current = await readState(env);
     const sessions = prunedSessions(current?.sessions || {}, now);
-    const changed = force || sessions[sessionKey]?.contextRevision !== revision;
-    if (changed) {
-      const previousWork = sessions[sessionKey]?.repositoryId === composition.repository?.id
-        ? sessions[sessionKey] : null;
-      sessions[sessionKey] = {
-        contextRevision: revision,
-        recordedAt: now.toISOString(),
-        agent,
-        repositoryId: composition.repository?.id ?? null,
-        environment: composition.environment ?? null,
-        workRevision: composition.work?.omitted
-          ? previousWork?.workRevision ?? null : composition.work?.revision ?? null,
-        workRecordedAt: composition.work?.omitted
-          ? previousWork?.workRecordedAt ?? null : composition.work ? now.toISOString() : null,
-        selectedHandoffId: composition.work?.selectedHandoffId ?? null,
-        ruleIds: composition.layers
-          .filter((layer) => layer.kind === 'policy')
-          .map((layer) => layer.ruleId || layer.id)
-          .filter((id) => typeof id === 'string' && id.length > 0),
-      };
-      await writeJsonAtomic(deliveryPath(env), {
-        schemaVersion: SCHEMA_VERSION,
-        sessions: prunedSessions(sessions, now, sessionKey),
-      });
-    }
-    return Object.freeze({ changed, revision, content, sessionKey });
+    // An older in-flight hook cannot roll back a newer delivery record.
+    if (JSON.stringify(sessions[sessionKey] ?? null) !== JSON.stringify(previous)) return false;
+    const previousWork = sessions[sessionKey]?.repositoryId === composition.repository?.id
+      ? sessions[sessionKey] : null;
+    sessions[sessionKey] = {
+      contextRevision: revision,
+      recordedAt: now.toISOString(),
+      agent,
+      repositoryId: composition.repository?.id ?? null,
+      environment: composition.environment ?? null,
+      workRevision: composition.work?.omitted
+        ? previousWork?.workRevision ?? null : composition.work?.revision ?? null,
+      workRecordedAt: composition.work?.omitted
+        ? previousWork?.workRecordedAt ?? null : composition.work ? now.toISOString() : null,
+      selectedHandoffId: composition.work?.selectedHandoffId ?? null,
+      ruleIds: composition.layers
+        .filter((layer) => layer.kind === 'policy')
+        .map((layer) => layer.ruleId || layer.id)
+        .filter((id) => typeof id === 'string' && id.length > 0),
+    };
+    await writeJsonAtomic(deliveryPath(env), {
+      schemaVersion: SCHEMA_VERSION,
+      sessions: prunedSessions(sessions, now, sessionKey),
+    });
+    return true;
   }, { timeoutMs: 500, staleMs: 30_000 });
+}
+
+// Explicit recording remains available for callers that have already delivered.
+export async function recordLiveContextDelivery(options = {}) {
+  const delivery = await prepareLiveContextDelivery(options);
+  await commitLiveContextDelivery(delivery);
+  return delivery;
 }
 
 export async function listLiveContextDeliveries({ env = process.env } = {}) {

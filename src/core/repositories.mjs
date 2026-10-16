@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 import { DEFAULT_ENVIRONMENT, STATE_SCHEMA_VERSION } from '../constants.mjs';
@@ -113,12 +114,30 @@ async function persistMetadata(metadata, index, env) {
   await writeJsonAtomic(statePaths(env).repoIndex, index);
 }
 
-function bindingFor(git, repoId, now, existing) {
+async function gitDirectoryIdentity(git) {
+  try {
+    // Each worktree has its own .git marker; a shared common directory would
+    // incorrectly copy another worktree's environment when paths move.
+    const stat = await fs.stat(path.join(git.root, '.git'), { bigint: true });
+    return (stat.isDirectory() || stat.isFile()) && stat.ino !== 0n ? `${stat.dev}:${stat.ino}` : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function pathMissing(root) {
+  try { await fs.stat(root); return false; }
+  catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+}
+
+function bindingFor(git, repoId, now, existing, gitIdentity) {
   const binding = {
     repoId,
     root: git.root,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
+    ...(gitIdentity ? { gitDirectoryIdentity: gitIdentity } : {}),
   };
   if (existing && Object.hasOwn(existing, 'environment')) {
     binding.environment = existing.environment;
@@ -129,8 +148,10 @@ function bindingFor(git, repoId, now, existing) {
 async function persistBinding(git, repoId, bindings, env, now) {
   const key = normalizeFsPath(git.root);
   const current = bindings.bindings[key];
-  if (current?.repoId === repoId && current.root === git.root) return false;
-  bindings.bindings[key] = bindingFor(git, repoId, now, bindings.bindings[key]);
+  const identity = await gitDirectoryIdentity(git);
+  if (current?.repoId === repoId && current.root === git.root
+    && (!identity || current.gitDirectoryIdentity === identity)) return false;
+  bindings.bindings[key] = bindingFor(git, repoId, now, current, identity);
   await writeJsonAtomic(statePaths(env).bindings, bindings);
   return true;
 }
@@ -147,11 +168,13 @@ function hasSharedRootEvidence(metadata, git) {
   return metadata.rootCommits.some((commit) => observedRoots.has(commit));
 }
 
-/** Resolve only an existing path binding; never scans history/remotes or writes state. */
+/** Resolve an existing binding without history/remotes. Hooks may opt into a
+ * one-time local Git identity backfill for bindings from older runtimes. */
 export async function resolveRepositoryBinding({
   cwd = process.cwd(),
   env = process.env,
   clock = Date,
+  rememberGitIdentity = false,
 } = {}) {
   await initializeState({ env, clock });
   const git = await detectWorkspace(cwd, { env, fast: true });
@@ -171,6 +194,24 @@ export async function resolveRepositoryBinding({
       `Repository binding points to missing repository: ${binding.repoId}`,
       { binding, path: statePaths(env).bindings },
     );
+  }
+  const identity = await gitDirectoryIdentity(git);
+  if (binding.gitDirectoryIdentity && identity !== binding.gitDirectoryIdentity) {
+    throw new CoreError('REPOSITORY_NOT_REGISTERED', 'The checkout at this path changed; verify its repository identity again',
+      { root: git.root, reason: 'git-directory-changed' });
+  }
+  // A legacy path alone cannot prove that the checkout was not replaced before
+  // this upgrade. Verify its history before attaching a durable identity.
+  if (!binding.gitDirectoryIdentity && identity && git.available) {
+    return resolveRepository({ cwd, env, clock, create: false });
+  }
+  if (rememberGitIdentity && git.available && !binding.gitDirectoryIdentity) {
+    await withFileLock(path.join(statePaths(env).locks, 'repositories.lock'), async () => {
+      const latest = await readStores(env);
+      if (latest.bindings.bindings[normalizeFsPath(git.root)]?.repoId === binding.repoId) {
+        await persistBinding(git, binding.repoId, latest.bindings, env, isoNow(clock));
+      }
+    });
   }
   return {
     repository: clone(metadata),
@@ -197,6 +238,7 @@ export async function resolveRepository({
   env = process.env,
   clock = Date,
   name,
+  recoverMovedLegacy = false,
 } = {}) {
   await initializeState({ env, clock });
   const git = await detectWorkspace(cwd, { env });
@@ -217,6 +259,15 @@ export async function resolveRepository({
           { binding: bound, path: state.bindings },
         );
       }
+      const identity = await gitDirectoryIdentity(git);
+      const changed = bound.gitDirectoryIdentity && identity !== bound.gitDirectoryIdentity;
+      const historyMismatch = git.available && !git.shallow
+        && metadata.rootCommits.length > 0 && !hasSharedRootEvidence(metadata, git);
+      const matchingAlias = observedRemoteAliases(git).some((alias) => metadata.remoteAliases.includes(alias));
+      if (historyMismatch || (changed && !(git.available && matchingAlias && hasSharedRootEvidence(metadata, git)))) {
+        throw new CoreError('REPOSITORY_LINK_REQUIRED', 'The checkout at this path no longer proves the existing repository identity; link it explicitly after verification',
+          { root: git.root, reason: 'git-directory-changed', candidates: [summarizeCandidate(metadata)] });
+      }
       const updated = updateMetadata(metadata, git, now, name);
       if (updated !== metadata) await persistMetadata(updated, index, env);
       await persistBinding(git, updated.id, bindings, env, now);
@@ -228,6 +279,32 @@ export async function resolveRepository({
           ? bound.environment
           : undefined,
       };
+    }
+
+    const identity = await gitDirectoryIdentity(git);
+    const continuityBindings = Object.values(bindings.bindings).filter((entry) =>
+      identity && entry.gitDirectoryIdentity === identity && index.repositories[entry.repoId]);
+    const continuityIds = [...new Set(continuityBindings.map((entry) => entry.repoId))];
+    if (continuityIds.length === 1) {
+      const previous = continuityBindings[0];
+      const metadata = index.repositories[previous.repoId];
+      if (metadata.rootCommits.length && !git.shallow && !hasSharedRootEvidence(metadata, git)) {
+        throw new CoreError('REPOSITORY_LINK_REQUIRED', 'Git directory identity was reused with unrelated history',
+          { candidates: [summarizeCandidate(metadata)], git: publicGit(git) });
+      }
+      const updated = updateMetadata(metadata, git, now, name);
+      if (updated !== metadata) await persistMetadata(updated, index, env);
+      bindings.bindings[bindingKey] = bindingFor(git, updated.id, now, previous, identity);
+      for (const entry of continuityBindings) {
+        if (await pathMissing(entry.root)) delete bindings.bindings[normalizeFsPath(entry.root)];
+      }
+      await writeJsonAtomic(state.bindings, bindings);
+      return { repository: clone(updated), git: publicGit(git), match: 'git-directory',
+        environment: previous.environment };
+    }
+    if (continuityIds.length > 1) {
+      throw new CoreError('REPOSITORY_AMBIGUOUS', 'Git directory matches multiple repository bindings',
+        { candidates: continuityIds.map((id) => summarizeCandidate(index.repositories[id])) });
     }
 
     const observedAliases = new Set(observedRemoteAliases(git));
@@ -265,12 +342,30 @@ export async function resolveRepository({
       };
     }
 
-    // A root commit is useful evidence, but forks share it. Never auto-link on it.
+    // Shared roots alone cannot distinguish forks from renamed checkouts.
     const observedRoots = new Set(git.shallow ? [] : git.rootCommits);
     const fingerprintMatches = matchingRepositories(index, (metadata) =>
       metadata.rootCommits.some((commit) => observedRoots.has(commit)),
     );
     if (fingerprintMatches.length > 0) {
+      // Legacy bindings lack a durable Git-directory identity. Recover a unique
+      // moved checkout only when every previous local path has disappeared.
+      // An extant checkout or an identity mismatch still requires explicit linking.
+      if (recoverMovedLegacy && fingerprintMatches.length === 1) {
+        const matched = fingerprintMatches[0];
+        const previous = Object.values(bindings.bindings).filter((entry) => entry.repoId === matched.id);
+        if (previous.length && previous.every((entry) => !entry.gitDirectoryIdentity)
+          && (await Promise.all(previous.map((entry) => pathMissing(entry.root)))).every(Boolean)
+          && new Set(previous.map((entry) => entry.environment)).size === 1) {
+          const updated = updateMetadata(matched, git, now, name);
+          if (updated !== matched) await persistMetadata(updated, index, env);
+          for (const entry of previous) delete bindings.bindings[normalizeFsPath(entry.root)];
+          bindings.bindings[bindingKey] = bindingFor(git, updated.id, now, previous[0], identity);
+          await writeJsonAtomic(state.bindings, bindings);
+          return { repository: clone(updated), git: publicGit(git), match: 'moved-legacy-binding',
+            environment: previous[0].environment };
+        }
+      }
       throw new CoreError(
         'REPOSITORY_LINK_REQUIRED',
         'Repository history matches existing entries; choose one explicitly to avoid linking a fork',
@@ -309,9 +404,9 @@ export async function initializeRepository({
     if (error.code !== 'REPOSITORY_NOT_REGISTERED') throw error;
   }
   if (existing) {
+    const refreshed = await resolveRepository({ cwd, env, clock, create: false });
     return {
-      ...existing,
-      git: publicGit(await detectWorkspace(cwd, { env })),
+      ...refreshed,
       match: 'binding',
       registrationStatus: 'existing',
       environment: existing.environment === undefined
@@ -322,12 +417,13 @@ export async function initializeRepository({
   // must not leave behind a half-initialized checkout.
   const selected = validateEnvironmentLabel(environment
     ?? (await getActiveEnvironment({ env, clock })) ?? DEFAULT_ENVIRONMENT);
-  const resolved = await resolveRepository({ cwd, env, clock, create: true });
-  await setRepositoryEnvironment(selected, { cwd, env, clock });
+  const resolved = await resolveRepository({ cwd, env, clock, create: true, recoverMovedLegacy: true });
+  const resolvedEnvironment = resolved.environment === undefined ? selected : resolved.environment;
+  await setRepositoryEnvironment(resolvedEnvironment, { cwd, env, clock });
   return {
     ...resolved,
     registrationStatus: resolved.match === 'created' ? 'created' : 'linked',
-    environment: selected,
+    environment: resolvedEnvironment,
   };
 }
 

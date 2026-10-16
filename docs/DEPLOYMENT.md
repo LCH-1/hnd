@@ -92,7 +92,7 @@ sudo systemctl reload nginx
 ```sh
 curl --fail --output /dev/null https://hnd.example.com/
 curl --fail https://hnd.example.com/healthz
-npm view '@lch-1/hnd@0.2.2' version
+npm view '@lch-1/hnd@latest' version
 ```
 
 TLS proxy에는 인증서 자동 갱신, HTTPS redirect, request body 제한, connection/rate
@@ -142,7 +142,7 @@ Windows 10/11은 관리자 권한, WSL이나 Git Bash 없이 PowerShell에서 �
 웹에서 만드는 명령은 사용자가 익숙한 `npm`, `hnd` 이름을 그대로 사용합니다.
 
 ```powershell
-npm install --global '@lch-1/hnd@0.2.2'
+npm install --global '@lch-1/hnd@latest'
 hnd --version
 ```
 
@@ -151,7 +151,7 @@ macOS와 Linux는 터미널에서 같은 패키지를 설치합니다. 배포판
 제공합니다. nvm·Volta처럼 사용자 소유 Node에서는 일반 `npm`을 사용합니다.
 
 ```sh
-sudo -H npm install --global '@lch-1/hnd@0.2.2'
+sudo -H npm install --global '@lch-1/hnd@latest'
 hnd --version
 ```
 
@@ -334,3 +334,29 @@ canonical encoding과 모든 파일 digest를 다시 확인합니다. 등록된 
 재배포합니다. 서명키를 잃거나 교체하면 기존 launcher가 새 키를 신뢰하지 않으므로
 고정 공개키를 넣은 bootstrap npm package를 다시 배포해야 합니다. 개인키 backup과
 sequence 원장은 server DB backup과 분리해 보호합니다.
+
+## 9. 서버 1.6.0 / 런타임 1.14.0 배포
+
+최종 전체 테스트 607개가 통과했으며 실패·취소·skip은 없습니다. 독립 재검토와
+문법·패키지 검증도 통과했고 production dependency audit 취약점은 0개입니다.
+
+서명 순번은 36이며 최소 런처는 0.2.2로 명시합니다. npm 런처 0.2.7은 별도 게시
+대상이므로 이번 서버·런타임 배포에 npm publish를 포함하지 않습니다. 설치 화면의
+`@latest`는 실제로 게시된 npm 버전을 설치하며 새 런타임은 서버에서 받습니다.
+
+이번 버전은 저장소 이동·경로 재사용의 식별 검증, 훅 실행 예산, 규칙 전달 완료 처리,
+Cursor private 파일 보호, 동시 체크포인트·작업 병합, 중단된 복원·PC 연결 복구를
+보강합니다. 동기화 경계에서 도메인 JSON과 환경별 정책 조합을 검사하고, 웹 편집은
+작업 소유권·파일 계획·지식 출처·실험 상태를 보존합니다. 다른 기기 폐기는 웹의
+소유자·관리자 권한과 최근 인증이 필요하며 기기 토큰으로는 자기 기기만 폐기합니다.
+가입 정책 변경은 진행 중인 가입 검증과 다른 서버 프로세스에도 적용됩니다.
+
+기존 PC는 `hnd update apply` 후 에이전트를 재시작하고 웹은 새로고침합니다.
+런처의 `--state-home` 처리와 업데이트 실패 기록 경합 수정은 npm 0.2.7 설치 후
+적용되므로 런타임 업데이트와 구분합니다. 게시 전 준비된 npm tarball을 검증할 때는
+격리된 prefix와 state home을 사용합니다.
+
+파일당 1MiB·전체 snapshot 2MiB 한도는 유지합니다. 새 감사 이력이 파일 한도를
+초과하면 해당 쓰기만 원자적으로 거부하며 기존 기록을 자동 삭제하지 않습니다.
+과거에 이미 한도를 초과했거나 소유권·이력이 모호한 자료는 백업 후 사용자가
+내용을 줄이거나 명시적으로 병합해야 합니다.

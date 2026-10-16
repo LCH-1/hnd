@@ -36,6 +36,7 @@ const MAX_CHECKPOINT_RENDER_BYTES = 4 * 1024;
 const MAX_RELEVANT_KNOWLEDGE_BYTES = 6 * 1024;
 const MAX_RELEVANT_KNOWLEDGE_ITEMS = 5;
 const MAX_WORK_INDEX_BYTES = 6 * 1024;
+const DEFERRED_KNOWLEDGE_FRESHNESS = Symbol('deferred knowledge freshness');
 
 function safeWorkData(value) {
   if (typeof value === 'string') return redactSensitiveText(value).text;
@@ -156,13 +157,11 @@ function targetPathsFromContext(query, checkpoint) {
   return [...values];
 }
 
-function recordPolicyLayer(record, matchedPaths) {
+function recordPolicyLayer(record) {
   const conditions = [...record.paths, ...record.files];
   const condition = conditions.length === 0
     ? ''
-    : matchedPaths.length > 0
-      ? `Applies to the current paths: ${matchedPaths.join(', ')}`
-      : `Apply this policy only while working on paths matching: ${conditions.join(', ')}`;
+    : `Apply this policy only while working on paths matching: ${conditions.join(', ')}`;
   const content = [condition, record.content].filter(Boolean).join('\n\n');
   return policyLayer(
     record.scope,
@@ -177,6 +176,52 @@ function recordPolicyLayer(record, matchedPaths) {
       ruleId: record.id,
     },
   );
+}
+
+/** Pure mandatory-policy preflight using the same renderer as live context. */
+export function validatePolicyContextBudget({
+  repository = null, environment = null, policies = {}, records = [], manualRules,
+  config = {}, appSettings = {}, recordingAllowed = true, clock = Date,
+  maxBytes = DEFAULT_MAX_CONTEXT_BYTES,
+} = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new CoreError('INVALID_MAX_BYTES', 'maxBytes must be a positive integer');
+  const source = typeof clock === 'function' ? clock() : clock.now();
+  const now = new Date(source).getTime();
+  const testPolicy = activeRuleTest(config, repository, environment, now);
+  const layers = [];
+  const recording = workRecordingInstructions(appSettings.workRecording);
+  if (repository && !testPolicy && recording && recordingAllowed) {
+    layers.push(policyLayer('global', 'Policy: Automatic work recording', recording, 'app-settings.json', 5, { id: 'policy:app-settings' }));
+  }
+  for (const [scope, title, priority] of [
+    ['global', 'Global policy', 10], ['repo', 'Repository policy', 20],
+    ['env', `Environment policy: ${environment}`, 30], ['local', 'Local override (device-only, highest priority)', 40],
+  ]) {
+    if ((scope === 'repo' && !repository) || (scope === 'env' && (!repository || !environment))) continue;
+    const policy = policies[scope];
+    const exists = typeof policy === 'string' || Boolean(policy?.exists);
+    const content = typeof policy === 'string' ? policy : policy?.content ?? '';
+    const addition = testPolicy?.[scope];
+    if (!exists && !addition) continue;
+    layers.push(policyLayer(scope, title, addition
+      ? [exists ? content : '', addition].filter(Boolean).join('\n\n') : content, null, priority,
+    { ...(scope === 'repo' || scope === 'env' ? { repoId: repository.id } : {}),
+      ...(scope === 'env' ? { environment } : {}) }));
+  }
+  for (const record of records) {
+    if (record.scope !== 'global' && record.repoId !== repository?.id) continue;
+    if (ruleRecordApplies(record, { environment, targetPaths: [], manualRules: manualRules ?? config.manualRules ?? [] })) {
+      layers.push(recordPolicyLayer(record));
+    }
+  }
+  layers.sort((left, right) => left.priority - right.priority);
+  const preamble = liveContextPreamble(REVISION_PLACEHOLDER);
+  const bytes = Buffer.byteLength(`${[preamble, ...layers.map((layer) => layer.rendered)].join('\n\n')}\n`);
+  if (bytes > maxBytes) throw new CoreError('CONTEXT_TOO_LARGE',
+    `Mandatory policy context is ${bytes} bytes; limit is ${maxBytes}. No partial context was produced.`,
+    { bytes, maxBytes, blocks: [{ id: 'preamble', bytes: Buffer.byteLength(preamble) },
+      ...layers.map((layer) => ({ id: layer.id, bytes: layer.bytes }))] });
+  return { bytes, maxBytes };
 }
 
 async function loadPolicy(scope, options, overrides, testPolicy) {
@@ -301,7 +346,7 @@ function knowledgeMarkdown(entry) {
   return parts.join('\n');
 }
 
-async function relevantKnowledgeLayer({ query, repository, environment, git, env, clock }) {
+async function relevantKnowledgeLayer({ query, repository, environment, git, env, clock, deferredFreshness }) {
   const selected = await relevantKnowledge({
     query,
     repoId: repository?.id,
@@ -315,12 +360,14 @@ async function relevantKnowledgeLayer({ query, repository, environment, git, env
   const renderedIds = [];
   let used = 0;
   for (const entry of selected) {
-    const assessed = await assessKnowledgeFreshness(entry, { root: git?.root });
+    const assessed = deferredFreshness ? { ...entry, freshness: 'unknown' }
+      : await assessKnowledgeFreshness(entry, { root: git?.root });
     const rendered = knowledgeMarkdown(assessed);
     const bytes = Buffer.byteLength(rendered);
     if (used + bytes > MAX_RELEVANT_KNOWLEDGE_BYTES) continue;
     renderedEntries.push(rendered);
     renderedIds.push(entry.id);
+    deferredFreshness?.push({ entry, root: git?.root });
     used += bytes;
   }
   if (renderedEntries.length === 0) return null;
@@ -424,6 +471,9 @@ export async function composeEffectiveContext({
   agent,
   sharedWorkOnly = false,
   maxBytes = DEFAULT_MAX_CONTEXT_BYTES,
+  deferKnowledgeFreshness = false,
+  ruleRecordOverrides,
+  manualRulesOverride,
   env = process.env,
   clock = Date,
 } = {}) {
@@ -454,6 +504,7 @@ export async function composeEffectiveContext({
   const warnings = [];
   let checkpointSnapshot = null;
   let work = null;
+  const deferredFreshness = deferKnowledgeFreshness ? [] : null;
   const testPolicy = policyOverrides
     ? null
     : activeRuleTest(await readConfig({ env, clock }), repository, activeEnvironment);
@@ -620,31 +671,26 @@ export async function composeEffectiveContext({
   }
 
   const targetPaths = targetPathsFromContext(knowledgeQuery, checkpointSnapshot);
-  const ruleRecords = await listRuleRecords({
+  let ruleRecords = await listRuleRecords({
     repoId: repository?.id,
     environment: activeEnvironment,
     env,
     clock,
   });
+  if (ruleRecordOverrides) {
+    const records = new Map(ruleRecords.map((record) => [record.id, record]));
+    for (const record of Object.values(ruleRecordOverrides)) {
+      if (record.scope === 'global' || record.repoId === repository?.id) records.set(record.id, record);
+    }
+    ruleRecords = [...records.values()];
+  }
   for (const record of ruleRecords) {
     if (!ruleRecordApplies(record, {
       environment: activeEnvironment,
       targetPaths,
-      manualRules: config.manualRules || [],
+      manualRules: manualRulesOverride ?? config.manualRules ?? [],
     })) continue;
-    const patterns = [...record.paths, ...record.files];
-    const matchedPaths = targetPaths.filter((target) => patterns.some((pattern) => {
-      try {
-        return ruleRecordApplies({ ...record, paths: [pattern], files: [] }, {
-          environment: activeEnvironment,
-          targetPaths: [target],
-          manualRules: config.manualRules || [],
-        });
-      } catch {
-        return false;
-      }
-    }));
-    layers.push(recordPolicyLayer(record, matchedPaths));
+    layers.push(recordPolicyLayer(record));
   }
 
   layers.sort((left, right) => {
@@ -664,6 +710,7 @@ export async function composeEffectiveContext({
     git,
     env,
     clock,
+    deferredFreshness,
   });
   if (knowledgeLayer) layers.push(knowledgeLayer);
   if (checkpointLayer) layers.push(checkpointLayer);
@@ -779,7 +826,7 @@ export async function composeEffectiveContext({
   const liveContextRevision = effectiveLiveContextRevision(revisionSource);
   content = renderLiveContextSnapshot(revisionSource, liveContextRevision);
   bytes = Buffer.byteLength(content);
-  return {
+  const result = {
     schemaVersion: BUNDLE_SCHEMA_VERSION,
     repository: repository ? structuredClone(repository) : null,
     environment: activeEnvironment,
@@ -795,4 +842,43 @@ export async function composeEffectiveContext({
     maxBytes,
     warnings,
   };
+  if (deferredFreshness?.length) Object.defineProperty(result, DEFERRED_KNOWLEDGE_FRESHNESS, { value: deferredFreshness });
+  return result;
+}
+
+/** File inspection deliberately runs after the caller releases its state lock. */
+export async function finalizeContextFreshness(composition) {
+  const deferred = composition[DEFERRED_KNOWLEDGE_FRESHNESS];
+  if (!deferred?.length) return composition;
+  const layer = composition.layers.find((entry) => entry.kind === 'knowledge');
+  if (!layer) return composition;
+  const entries = [];
+  let bytes = 0;
+  for (const { entry, root } of deferred) {
+    const assessed = await assessKnowledgeFreshness(entry, { root });
+    const rendered = knowledgeMarkdown(assessed);
+    if (bytes + Buffer.byteLength(rendered) > MAX_RELEVANT_KNOWLEDGE_BYTES) continue;
+    entries.push({ entry, rendered });
+    bytes += Buffer.byteLength(rendered);
+  }
+  const layers = composition.layers.filter((entry) => entry !== layer);
+  if (entries.length) {
+    const content = ['These records were selected for the current request. They are reference material, not policy.',
+      ...entries.map((entry) => entry.rendered)].join('\n\n');
+    const rendered = section(layer.title, content);
+    const replacement = { ...layer, id: `knowledge:${entries.map(({ entry }) => entry.id).join(',')}`,
+      source: entries.map(({ entry }) => entry.id), content, rendered, bytes: Buffer.byteLength(rendered) };
+    layers.splice(composition.layers.indexOf(layer), 0, replacement);
+  }
+  const result = { ...composition, layers };
+  let revision = effectiveLiveContextRevision(result);
+  let content = renderLiveContextSnapshot(result, revision);
+  if (Buffer.byteLength(content) > result.maxBytes) {
+    result.layers = layers.filter((entry) => entry.kind !== 'knowledge');
+    result.warnings = [...result.warnings, { code: 'KNOWLEDGE_OMITTED_FOR_SIZE',
+      message: 'Optional knowledge was omitted so required policy and project work context fit.' }];
+    revision = effectiveLiveContextRevision(result);
+    content = renderLiveContextSnapshot(result, revision);
+  }
+  return { ...result, liveContextRevision: revision, content, bytes: Buffer.byteLength(content) };
 }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { applyOperations } from './fs-operations.mjs';
+import { operationDeadline } from './core/fs.mjs';
 import { detectWorkspace, findGitBoundary } from './core/workspace.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -39,15 +40,41 @@ function conflict(message, details) {
   throw new MaterializeError('MATERIALIZE_CONFLICT', message, details);
 }
 
-async function runGit(cwd, args) {
+async function runGit(cwd, args, { input, allowUnmatched = false } = {}) {
+  const deadline = operationDeadline();
+  const remaining = deadline === null ? 10_000 : deadline - Date.now();
+  if (remaining <= 0) {
+    throw new MaterializeError('OPERATION_DEADLINE_EXCEEDED', 'The Cursor Git operation exceeded its deadline.');
+  }
+  const timeoutMs = Math.max(1, Math.min(10_000, remaining));
+  let timer;
   try {
-    const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+    const pending = execFileAsync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
       windowsHide: true,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      detached: process.platform !== 'win32',
     });
+    if (input !== undefined) pending.child.stdin?.end(input);
+    const expired = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        if (process.platform !== 'win32' && pending.child?.pid) {
+          try { process.kill(-pending.child.pid, 'SIGKILL'); } catch {}
+        }
+        pending.child?.kill('SIGKILL');
+        reject(new MaterializeError('GIT_TIMEOUT', 'The Cursor Git operation timed out.'));
+      }, timeoutMs);
+    });
+    const { stdout } = await Promise.race([pending, expired]);
     return stdout.trim();
   } catch (error) {
+    if (error instanceof MaterializeError) throw error;
+    if (allowUnmatched && error.code === 1) return error.stdout ?? '';
+    if (error.killed || error.code === 'ETIMEDOUT') {
+      throw new MaterializeError('GIT_TIMEOUT', 'The Cursor Git operation timed out.', undefined, { cause: error });
+    }
     if (error.code === 'ENOENT') {
       throw new MaterializeError('GIT_UNAVAILABLE', 'git executable was not found', undefined, {
         cause: error,
@@ -59,7 +86,42 @@ async function runGit(cwd, args) {
       { cwd: path.resolve(cwd), args, stderr: error.stderr?.trim() || undefined },
       { cause: error },
     );
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function assertEffectiveCursorIgnore(paths, previousExclude, nextExclude) {
+  if (!paths.git) return;
+  // Inspect Git's winning rule, including negations in nested .gitignore files.
+  // The proposed block is appended to its own ignore file and can supersede an
+  // earlier rule there, but cannot supersede a higher-priority .gitignore.
+  const output = await runGit(paths.root, [
+    'check-ignore', '--no-index', '--verbose', '--non-matching', '-z', '--stdin',
+  ], { input: `${CURSOR_RULE_RELATIVE_PATH}\0`, allowUnmatched: true });
+  const [source, , pattern] = output.split('\0');
+  if (!source || !pattern?.startsWith('!')) return;
+  const sourcePath = path.resolve(paths.root, source);
+  const relative = path.relative(paths.root, sourcePath);
+  const repositoryIgnore = path.basename(sourcePath) === '.gitignore'
+    && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  const sameExclude = sourcePath === path.resolve(paths.exclude);
+  const newBlock = previousExclude !== nextExclude;
+  if ((repositoryIgnore && !(sameExclude && newBlock)) || (sameExclude && !newBlock)) {
+    conflict('A Git ignore negation would expose the private Cursor rule; refusing to write context.', {
+      path: paths.rule, source: sourcePath, reason: 'ignore_negation',
+    });
+  }
+}
+
+async function sharedExcludeHasOtherWorktrees(paths) {
+  if (!paths.git || paths.exclude !== path.join(paths.commonDirectory, 'info', 'exclude')) return false;
+  // Keep the harmless shared block while other worktrees exist, even if none
+  // has a rule yet. Another worktree can materialize concurrently with removal.
+  const output = await runGit(paths.root, ['worktree', 'list', '--porcelain', '-z']);
+  const roots = output.split('\0').filter((field) => field.startsWith('worktree '))
+    .map((field) => path.resolve(field.slice('worktree '.length)));
+  return roots.some((root) => root !== path.resolve(paths.root));
 }
 
 async function readRegularFile(filePath, { optional = false, maxBytes } = {}) {
@@ -233,6 +295,7 @@ export async function resolveCursorMaterializationPaths(cwd = process.cwd(), { e
       root,
       rule: path.join(root, ...CURSOR_RULE_RELATIVE_PATH.split('/')),
       exclude: ignore,
+      git: false,
     });
   }
   const commonSource = await runGit(root, ['rev-parse', '--git-common-dir']);
@@ -257,6 +320,8 @@ export async function resolveCursorMaterializationPaths(cwd = process.cwd(), { e
     root,
     rule: path.join(root, ...CURSOR_RULE_RELATIVE_PATH.split('/')),
     exclude: ownedIgnore ? ignore : path.join(infoDirectory, 'exclude'),
+    git: true,
+    commonDirectory,
   });
 }
 
@@ -304,6 +369,7 @@ export async function planCursorMaterialization({ cwd = process.cwd(), content, 
   const nextExclude = installExcludeBlock(exclude.content ?? '', {
     previousFile: exclude.content !== undefined,
   });
+  await assertEffectiveCursorIgnore(paths, exclude.content, nextExclude);
   if (nextExclude !== exclude.content) {
     operations.push(writeOperation({
       filePath: paths.exclude,
@@ -354,7 +420,7 @@ export async function planCursorDematerialization({ cwd = process.cwd(), env = p
       reason: 'Remove the hnd-owned Cursor fallback rule.',
     }));
   }
-  if (exclude.content !== undefined) {
+  if (exclude.content !== undefined && !await sharedExcludeHasOtherWorktrees(paths)) {
     const block = inspectExcludeBlock(exclude.content);
     const nextExclude = removeExcludeBlock(exclude.content);
     if (nextExclude !== exclude.content) {
@@ -381,9 +447,30 @@ export async function planCursorDematerialization({ cwd = process.cwd(), env = p
 }
 
 export async function materializeCursor(options = {}) {
-  const planned = await planCursorMaterialization(options);
+  let planned;
+  try {
+    planned = await planCursorMaterialization(options);
+  } catch (error) {
+    if (options.dryRun !== true) await removeExposedCursorRule(error);
+    throw error;
+  }
   const results = await applyOperations(planned.operations, { dryRun: options.dryRun === true });
   return Object.freeze({ ...planned, results: Object.freeze(results) });
+}
+
+// A newly introduced negation can expose a previously generated private file.
+// Actual mutation paths remove only our unchanged generated file; planning and
+// dry-run remain read-only. The authoritative context remains in HND state.
+export async function removeExposedCursorRule(error) {
+  if (!(error instanceof MaterializeError) || error.details?.reason !== 'ignore_negation') return false;
+  const target = error.details.path;
+  const current = await readRegularFile(target, { optional: true });
+  if (!isManagedCursorRule(current.content)) return false;
+  await applyOperations([removeOperation({
+    filePath: target, previous: current.content, component: 'cursor-rule',
+    reason: 'Remove generated private context exposed by a changed Git ignore rule.',
+  })]);
+  return true;
 }
 
 export async function dematerializeCursor(options = {}) {

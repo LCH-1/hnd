@@ -223,3 +223,22 @@ test('handoff sensitive content requires an explicit override while old contents
   await assert.rejects(core('A').handoff.close({ notes: [secret] }), { code: 'SENSITIVE_CONTENT' });
   assert.equal((await core('A').handoff.close()).id, task.id);
 });
+
+test('same session resumes its selected expired claim but a new session cannot acquire it by heartbeat', async (t) => {
+  const { core, heartbeat, advance } = await fixture(t);
+  const first = await core('A').handoff.start({ task: 'resume', objective: 'Resume after idle' });
+  advance(3);
+  assert.equal((await heartbeat('new-session')).renewed.length, 0);
+  assert.equal((await core('A').handoff.show({ id: first.id })).claimActive, false);
+  const resumed = await heartbeat('A');
+  assert.equal(resumed.renewed[0].id, first.id);
+  assert.deepEqual(resumed.lost, []);
+  const after = await core('A').handoff.show({ id: first.id });
+  assert.equal(after.claimActive, true);
+  assert.equal(after.updatedAt, first.updatedAt);
+  assert.equal(after.staleAt, first.staleAt);
+  await core('B').handoff.update({ id: first.id, claimedBy: 'B', forceClaim: true });
+  advance(3);
+  assert.equal((await heartbeat('A')).renewed.length, 0);
+  assert.equal((await core('A').handoff.show({ id: first.id })).claimActive, false);
+});

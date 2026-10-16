@@ -182,9 +182,10 @@ test('automatic sync converges safely, defers offline, and blocks conflicts or a
 
   // A reviewed manual push acknowledges the local resolution and unblocks auto sync.
   await runA(['sync', 'push']);
+  assert.equal(await readAutoSyncPending({ env: envA }), null);
   const resumed = await autoSync({ env: envA });
   assert.equal(resumed.status, 'synced');
-  assert.equal(resumed.retried, true);
+  assert.equal(resumed.retried, false);
   assert.equal(await readAutoSyncPending({ env: envA }), null);
   await autoSync({ env: envB });
   assert.match((await runB(['rule', 'show', 'all'])).stdout, /GLOBAL-A-CONFLICT/);

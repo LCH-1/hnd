@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { Writable } from 'node:stream';
 
 import { UsageError, optionBoolean, optionList, optionString, parseArgs } from './args.mjs';
 import { HELP, HELP_TOPIC_NAMES, helpFor } from './cli-help.mjs';
@@ -41,8 +42,10 @@ import {
 import {
   buildAdapterOperations,
   hookLockBudgetMs,
+  hookTimeoutMs,
   hookOutputObject,
   inspectAdapters,
+  refreshManagedPromptTimeout,
   renderHookOutput,
 } from './adapters/index.mjs';
 import { withAdapterMutationLock } from './adapters/mutation-lock.mjs';
@@ -50,11 +53,13 @@ import {
   CURSOR_LIVE_CONTEXT_SESSION_ENV,
   listLiveContextDeliveries,
   liveContextSessionKey,
-  recordLiveContextDelivery,
+  prepareLiveContextDelivery,
+  commitLiveContextDelivery,
   renderLiveContextSnapshot,
 } from './core/live-context.mjs';
 import { WORK_SESSION_ENV, resolveWorkSession, workSessionKey } from './core/work-session.mjs';
-import { setProcessLockDeadline } from './core/mutation-lock.mjs';
+import { setProcessLockDeadline, withProcessLockDeadline } from './core/mutation-lock.mjs';
+import { operationDeadline, withOperationDeadline } from './core/fs.mjs';
 import { connectClaudeSessionEnvironment } from './adapters/session-environment.mjs';
 import { applyOperations, summarizeOperations } from './fs-operations.mjs';
 import { editText, interactive, promptLine, readStdin, readTextInput } from './input.mjs';
@@ -64,6 +69,7 @@ import {
   planCursorDematerialization,
   planCursorMaterialization,
   renderCursorRule,
+  removeExposedCursorRule,
 } from './materialize.mjs';
 import { writeJson } from './presentation.mjs';
 import { runNpmCommand } from './update/npm-cli.mjs';
@@ -214,12 +220,14 @@ async function planCurrentCursorMaterialization({
   env,
   content,
   optional = false,
+  protectExposed = false,
 } = {}) {
   try {
     if (action === 'uninstall') return await planCursorDematerialization({ cwd, env });
     const effectiveContent = content ?? (await core.compose({ createRepository: false, sharedWorkOnly: true })).content;
     return await planCursorMaterialization({ cwd, env, content: effectiveContent });
   } catch (error) {
+    if (protectExposed) await removeExposedCursorRule(error);
     if (optional && isOptionalMaterializationError(error)) {
       return { paths: null, operations: [], skipped: error.code };
     }
@@ -252,7 +260,7 @@ async function refreshCursorAfterMutation({ core, cwd, env, execPath, binPath, f
       if (!force && !(await cursorFallbackEnabled({ cwd, env, execPath, binPath }))) {
         return { paths: null, operations: [], skipped: 'CURSOR_FALLBACK_DISABLED' };
       }
-      const planned = await planCurrentCursorMaterialization({ core, cwd, env, optional: true });
+      const planned = await planCurrentCursorMaterialization({ core, cwd, env, optional: true, protectExposed: true });
       if (planned.operations.length > 0) await applyOperations(planned.operations);
       return planned;
     });
@@ -1149,6 +1157,7 @@ async function handleAdapters({
           cwd,
           env,
           optional: true,
+          protectExposed: !dryRun,
         })
       : { operations: [] };
     const applied = await applyOperations([...materialized.operations, ...adapterOperations], { dryRun });
@@ -1617,7 +1626,13 @@ async function runMutationAutomaticSync({ core, env }) {
 
 async function ensureHookRepository({ cwd, env, lockDeadlineAt }) {
   const hookCore = createCore({ env, cwd, lockDeadlineAt });
-  const resolved = await hookCore.repo.resolve({ create: true });
+  let resolved;
+  try {
+    resolved = await hookCore.repo.binding({ rememberGitIdentity: true });
+  } catch (error) {
+    if (error.code !== 'REPOSITORY_NOT_REGISTERED') throw error;
+    resolved = await hookCore.repo.resolve({ create: true });
+  }
   if (resolved.environment === undefined) {
     // Migrate a legacy device-wide selection once, otherwise give each newly
     // encountered checkout its own neutral default.
@@ -1628,6 +1643,7 @@ async function ensureHookRepository({ cwd, env, lockDeadlineAt }) {
 }
 
 async function refreshCursorHookRoots({ hookCwds, env, stderr, lockDeadlineAt }) {
+  let complete = true;
   for (const hookCwd of hookCwds) {
     try {
       // This file belongs to the checkout, not to the hook's calling session.
@@ -1638,10 +1654,63 @@ async function refreshCursorHookRoots({ hookCwds, env, stderr, lockDeadlineAt })
       })).content;
       await materializeCursor({ cwd: hookCwd, env, content });
     } catch (error) {
+      complete = false;
       if (!isOptionalMaterializationError(error)) {
         writeText(stderr, `hnd: Cursor fallback update failed (${error.code || error.name || 'ERROR'}).`);
       }
     }
+  }
+  return complete;
+}
+
+// Writable callbacks acknowledge flushing to the pipe. Merely calling write()
+// can report success before an asynchronous EPIPE/close is delivered.
+export async function writeHookOutput(stream, content, { deadlineAt = Date.now() + 1_000 } = {}) {
+  if (stream.destroyed || Date.now() >= deadlineAt) throw new Error('Hook output deadline exceeded or stream closed');
+  if (!(stream instanceof Writable)) {
+    if (stream.write(content) === false) throw new Error('Hook output did not flush');
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      stream.off('error', failed);
+      stream.off('close', closed);
+    };
+    const settle = (error) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    const failed = (error) => { settle(error); cleanup(); };
+    const closed = () => failed(new Error('Hook output stream closed'));
+    // A timeout does not cancel an already pending write. Keep its error
+    // listener until the write callback/error/close actually completes.
+    const timer = setTimeout(() => settle(new Error('Hook output did not flush before its deadline')), Math.max(1, deadlineAt - Date.now()));
+    stream.once('error', failed);
+    stream.once('close', closed);
+    try {
+      stream.write(content, (error) => {
+        if (error) {
+          // Writable emits its error after invoking this callback. Keep the
+          // one-shot error listener until that event has been consumed.
+          settle(error);
+        }
+        else { settle(); cleanup(); }
+      });
+    } catch (error) { failed(error); }
+  });
+}
+
+async function commitHookDelivery({ delivery, complete, deadlineAt, stderr }) {
+  if (!complete || Date.now() >= deadlineAt) return;
+  try {
+    await commitLiveContextDelivery(delivery, { deadlineAt });
+  } catch (error) {
+    writeText(stderr, `hnd hook: delivery acknowledgement deferred (${error.code || error.name || 'ERROR'}).`);
   }
 }
 
@@ -1655,6 +1724,7 @@ async function mainImpl(argv = process.argv.slice(2), {
   binPath = defaultBinPath,
   signal,
 } = {}) {
+  const invocationStartedAt = Date.now();
   const { positionals, options } = parseArgs(argv);
   const command = resolveAlias(positionals.shift(), commandAliases);
 
@@ -2061,10 +2131,23 @@ async function mainImpl(argv = process.argv.slice(2), {
     // One deadline for the whole hook, not per acquisition: a hook takes the
     // state lock several times in sequence, and separate budgets would sum past
     // the vendor timeout even though each wait looked short enough.
-    const hookLockDeadline = Date.now() + hookLockBudgetMs(agent, phase === 'precompact' ? 'stop' : phase);
+    const outputDeadline = operationDeadline()
+      ?? invocationStartedAt + hookTimeoutMs(agent, phase === 'precompact' ? 'stop' : phase) - 250;
+    if (Date.now() >= outputDeadline) {
+      throw Object.assign(new Error('The hook execution deadline expired before state access'), { code: 'OPERATION_DEADLINE_EXCEEDED' });
+    }
+    const hookLockDeadline = Math.min(outputDeadline,
+      Date.now() + hookLockBudgetMs(agent, phase === 'precompact' ? 'stop' : phase));
     // Also enforced process-wide: the sync and restore paths take the state
     // lock from many places that never receive this deadline as an argument.
     setProcessLockDeadline(hookLockDeadline);
+    if (agent === 'claude' && ['start', 'prompt'].includes(phase)) {
+      try {
+        await refreshManagedPromptTimeout({ env: runtimeEnv, execPath, binPath });
+      } catch (error) {
+        writeText(stderr, `hnd hook: settings migration deferred (${error.code || error.name || 'ERROR'}); run hnd setup --agents claude.`);
+      }
+    }
     const hookSessionKey = liveContextSessionKey(agent, payload, runtimeEnv);
     // The core built before command dispatch still carries the default 15s lock
     // wait, which alone overruns every hook budget. Rebind it to this hook's
@@ -2226,7 +2309,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     let delivery = null;
     if (contextAvailable) {
       try {
-        delivery = await recordLiveContextDelivery({
+        delivery = await prepareLiveContextDelivery({
           agent,
           payload,
           composition,
@@ -2249,16 +2332,21 @@ async function mainImpl(argv = process.argv.slice(2), {
         );
       }
     }
-    if (agent === 'cursor' && contextAvailable && (phase === 'start' || delivery?.changed)) {
-      await refreshCursorHookRoots({
+    let materializationComplete = true;
+    // Even unchanged context needs a cheap materialization check: the file
+    // may have been deleted or Git ignore precedence may have changed.
+    if (agent === 'cursor' && contextAvailable) {
+      materializationComplete = await refreshCursorHookRoots({
         hookCwds,
         env: runtimeEnv,
         stderr,
+        lockDeadlineAt: hookLockDeadline,
       });
     }
     if (phase === 'prompt') {
       if (agent === 'cursor') {
-        stdout.write('{"continue":true}\n');
+        await writeHookOutput(stdout, '{"continue":true}\n', { deadlineAt: outputDeadline });
+        await commitHookDelivery({ delivery, complete: materializationComplete, deadlineAt: outputDeadline, stderr });
         return;
       }
       // A previous stdout/ack failure may have recorded this revision without
@@ -2269,8 +2357,9 @@ async function mainImpl(argv = process.argv.slice(2), {
       }
       const eventName = 'UserPromptSubmit';
       const rendered = renderHookOutput(agent, delivery?.changed ? delivery.content : content, eventName);
-      stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
+      await writeHookOutput(stdout, typeof rendered === 'string' ? rendered : JSON.stringify(rendered), { deadlineAt: outputDeadline });
       await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
+      await commitHookDelivery({ delivery, complete: true, deadlineAt: outputDeadline, stderr });
       return;
     }
     if (agent === 'cursor' && delivery?.sessionKey) {
@@ -2279,13 +2368,15 @@ async function mainImpl(argv = process.argv.slice(2), {
         [CURSOR_LIVE_CONTEXT_SESSION_ENV]: delivery.sessionKey,
         [WORK_SESSION_ENV]: delivery.sessionKey,
       };
-      stdout.write(`${JSON.stringify(rendered)}\n`);
+      await writeHookOutput(stdout, `${JSON.stringify(rendered)}\n`, { deadlineAt: outputDeadline });
       await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
+      await commitHookDelivery({ delivery, complete: materializationComplete, deadlineAt: outputDeadline, stderr });
       return;
     }
     const rendered = renderHookOutput(agent, content);
-    stdout.write(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
+    await writeHookOutput(stdout, typeof rendered === 'string' ? rendered : JSON.stringify(rendered), { deadlineAt: outputDeadline });
     await acknowledgeHookWork({ composition, sessionKey: hookSessionKey, cwd: hookCwd, env: runtimeEnv, agent, stderr, lockDeadlineAt: hookLockDeadline });
+    await commitHookDelivery({ delivery, complete: agent !== 'cursor' || materializationComplete, deadlineAt: outputDeadline, stderr });
     return;
   }
 
@@ -2318,19 +2409,48 @@ async function mainImpl(argv = process.argv.slice(2), {
     let repository = null;
     let context = null;
     let repositoryError = null;
+    let environment = null;
+    const issues = [];
     try {
       repository = await core.repo.resolve({ create: false });
       context = await core.compose({});
+      environment = await core.env.get();
     } catch (error) {
-      repositoryError = { code: error.code, message: error.message };
+      repositoryError = {
+        code: error.code, message: error.message,
+        ...(error.details?.reason ? { reason: error.details.reason } : {}),
+        ...(error.details?.candidates ? { candidates: error.details.candidates.map(({ id, name }) => ({ id, name })) } : {}),
+      };
+      issues.push({ code: error.code, message: error.message,
+        remedy: error.code === 'REPOSITORY_LINK_REQUIRED'
+          ? 'Verify the matching project, then run hnd project link <REPO_ID>.'
+          : 'Run hnd init in this checkout and check the project binding.' });
+    }
+    let sync = null;
+    try {
+      const [{ readAutoSyncPending, readAutoSyncFailure }, { remoteSyncConfigured }] = await Promise.all([
+        import('./sync/auto.mjs'), import('./remote-cli.mjs'),
+      ]);
+      sync = { enabled: await core.sync.get(), configured: await remoteSyncConfigured(runtimeEnv),
+        pending: await readAutoSyncPending({ env: runtimeEnv }),
+        lastFailure: await readAutoSyncFailure({ env: runtimeEnv }) };
+      if (sync.enabled && sync.pending) issues.push({
+        code: sync.pending.kind === 'attention' ? 'SYNC_NEEDS_ATTENTION' : 'SYNC_PENDING',
+        reason: sync.pending.reason,
+        remedy: 'Run hnd sync status; resolve any reported conflicts before publishing.',
+      });
+    } catch (error) {
+      issues.push({ code: 'SYNC_STATUS_UNAVAILABLE', reason: error.code ?? error.name });
     }
     const result = {
-      ok: !repositoryError && adapters.every((item) => item.ok !== false),
+      ok: issues.length === 0 && adapters.every((item) => item.ok !== false),
       repository,
-      environment: await core.env.get(),
+      environment,
       context: context ? { bytes: context.bytes, warnings: context.warnings } : null,
       adapters,
       repositoryError,
+      sync,
+      issues,
     };
     if (jsonOutput) writeJson(result, stdout);
     else writeJson(result, stdout);
@@ -2422,8 +2542,11 @@ function hookInvocation(argv) {
 // retries local capture/sync from the durable cache.
 export async function main(argv = process.argv.slice(2), options = {}) {
   const hook = hookInvocation(argv);
+  const deadlineAt = hook ? Date.now() + hookTimeoutMs(hook.agent, hook.phase === 'precompact' ? 'stop' : hook.phase) - 250 : null;
   try {
-    return await mainImpl(argv, options);
+    return hook
+      ? await withProcessLockDeadline(null, () => withOperationDeadline(deadlineAt, () => mainImpl(argv, options)))
+      : await mainImpl(argv, options);
   } catch (error) {
     if (!hook) throw error;
     const stderr = options.stderr ?? process.stderr;

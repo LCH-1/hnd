@@ -1,5 +1,7 @@
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { validHandoffRecord } from '../shared/record-merge.mjs';
 
 import {
   DEFAULT_MAX_CONTEXT_BYTES,
@@ -54,43 +56,9 @@ const MAX_HISTORY = 50;
 const MAX_HANDOFF_TEXT_BYTES = DEFAULT_MAX_CONTEXT_BYTES - (8 * 1024);
 const MAX_SESSION_SELECTIONS = 512;
 const SESSION_SELECTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const handoffLockScope = new AsyncLocalStorage();
 
-function validHandoff(value) {
-  return (
-    value &&
-    typeof value === 'object' &&
-    value.schemaVersion === STATE_SCHEMA_VERSION &&
-    isUuid(value.id) &&
-    isUuid(value.repoId) &&
-    ['active', 'closed'].includes(value.status) &&
-    typeof value.task === 'string' &&
-    typeof value.objective === 'string' &&
-    typeof value.currentState === 'string' &&
-    typeof value.worktree === 'string' &&
-    (value.branch === null || typeof value.branch === 'string') &&
-    Number.isFinite(value.staleHours) &&
-    typeof value.staleAt === 'string' &&
-    typeof value.createdAt === 'string' &&
-    typeof value.updatedAt === 'string' &&
-    (value.priority === undefined || HANDOFF_PRIORITIES.includes(value.priority)) &&
-    (value.workflowStatus === undefined || HANDOFF_WORKFLOW_STATUSES.includes(value.workflowStatus)) &&
-    (value.dependencies === undefined || (
-      Array.isArray(value.dependencies) && value.dependencies.every(isUuid)
-    )) &&
-    (value.parentId === undefined || value.parentId === null || isUuid(value.parentId)) &&
-    (value.claimedBy === undefined || value.claimedBy === null || typeof value.claimedBy === 'string') &&
-    (value.claimExpiresAt === undefined || value.claimExpiresAt === null || (typeof value.claimExpiresAt === 'string' && Number.isFinite(Date.parse(value.claimExpiresAt)))) &&
-    (value.claimSessionKey === undefined || value.claimSessionKey === null || /^[a-f0-9]{64}$/.test(value.claimSessionKey)) &&
-    (value.blockedReason === undefined || typeof value.blockedReason === 'string') &&
-    (value.unblockCriteria === undefined || typeof value.unblockCriteria === 'string') &&
-    (value.history === undefined || (Array.isArray(value.history) && value.history.length <= MAX_HISTORY)) &&
-    (value.plannedFiles === undefined || (Array.isArray(value.plannedFiles)
-      && value.plannedFiles.length <= 64 && value.plannedFiles.every(validPlannedPath))) &&
-    ARRAY_FIELDS.every(
-      (field) => Array.isArray(value[field]) && value[field].every((item) => typeof item === 'string'),
-    )
-  );
-}
+export const validHandoff = validHandoffRecord;
 
 function requireText(
   value,
@@ -261,6 +229,10 @@ function assertHandoffSize(handoff) {
       { bytes, maxBytes: MAX_HANDOFF_TEXT_BYTES },
     );
   }
+  const serializedBytes = Buffer.byteLength(`${JSON.stringify(handoff, null, 2)}\n`);
+  if (serializedBytes > 1024 * 1024) throw new CoreError('HANDOFF_TOO_LARGE',
+    'Work including its audit history exceeds the 1 MiB sync limit. Back up the record before creating a smaller replacement; the existing record was not changed.',
+    { id: handoff.id, bytes: serializedBytes, maxBytes: 1024 * 1024 });
 }
 
 function selectionKey(git, sessionKey) {
@@ -370,18 +342,73 @@ async function readHandoffFiles(directory, expectedRepoId, expectedStatus) {
   );
 }
 
-async function listForRepository(repoId, status, env) {
+function closeJournalPath(repoId, env) {
+  return path.join(statePaths(env).locks, `handoff-close-${repoId}.json`);
+}
+
+function recordDigest(record) {
+  return createHash('sha256').update(JSON.stringify(record)).digest('hex');
+}
+
+async function recoverHandoffClose(repoId, env) {
+  const journalFile = closeJournalPath(repoId, env);
+  const journal = await readJson(journalFile, { optional: true, validate: (value) => value
+    && value.schemaVersion === 1 && value.kind === 'handoff-close'
+    && validHandoff(value.handoff) && value.handoff.repoId === repoId && value.handoff.status === 'closed'
+    && /^[a-f0-9]{64}$/.test(value.activeDigest) });
+  if (!journal) return;
   const paths = repositoryPaths(repoId, env);
-  const values = [];
-  if (status === 'active' || status === 'all') {
-    values.push(...(await readHandoffFiles(paths.handoffs, repoId, 'active')));
+  const activeFile = path.join(paths.handoffs, `${journal.handoff.id}.json`);
+  const archiveFile = path.join(paths.archive, `${journal.handoff.id}.json`);
+  const [active, archive] = await Promise.all([
+    readJson(activeFile, { optional: true, validate: validHandoff }),
+    readJson(archiveFile, { optional: true, validate: validHandoff }),
+  ]);
+  if ((active && recordDigest(active) !== journal.activeDigest)
+    || (archive && recordDigest(archive) !== recordDigest(journal.handoff))) {
+    throw new CoreError('STATE_RECOVERY_REQUIRED', 'Interrupted work closure conflicts with newer state; preserve and review both records',
+      { repoId, id: journal.handoff.id, path: journalFile });
   }
-  if (status === 'closed' || status === 'all') {
-    values.push(...(await readHandoffFiles(paths.archive, repoId, 'closed')));
+  await writeJsonAtomic(archiveFile, journal.handoff);
+  await removeFile(activeFile);
+  await removeFile(journalFile);
+}
+
+async function withHandoffLock(repoId, env, callback) {
+  const key = `${statePaths(env).home}:${repoId}`;
+  if (handoffLockScope.getStore()?.has(key)) return callback();
+  return withFileLock(path.join(statePaths(env).locks, `handoffs-${repoId}.lock`), async () => {
+    await recoverHandoffClose(repoId, env);
+    return handoffLockScope.run(new Set([...(handoffLockScope.getStore() ?? []), key]), callback);
+  });
+}
+
+/** Snapshot callers hold their generation boundary before recovering journals. */
+export async function recoverPendingHandoffClosures(homeDirectory) {
+  const env = { HND_HOME: path.resolve(homeDirectory) };
+  const journals = await listFiles(statePaths(env).locks, { suffix: '.json' });
+  for (const file of journals) {
+    const match = path.basename(file).match(/^handoff-close-([a-f0-9-]{36})\.json$/i);
+    if (match && isUuid(match[1])) await withHandoffLock(match[1], env, () => undefined);
   }
-  const unique = new Map();
-  for (const value of values) unique.set(value.id, value);
-  return [...unique.values()].filter((value) => status === 'all' || value.status === status);
+}
+
+async function listForRepository(repoId, status, env) {
+  return withHandoffLock(repoId, env, async () => {
+    const paths = repositoryPaths(repoId, env);
+    const [active, archive] = await Promise.all([
+      readHandoffFiles(paths.handoffs, repoId, 'active'), readHandoffFiles(paths.archive, repoId, 'closed'),
+    ]);
+    const closedIds = new Set(archive.map((record) => record.id));
+    for (const record of active) {
+      if (!closedIds.has(record.id)) continue;
+      // Legacy runtimes could leave two copies without a journal. Never silently
+      // hide a successful update by choosing whichever directory was read last.
+      throw new CoreError('STATE_RECOVERY_REQUIRED', 'Both active and closed copies of this work exist; preserve and review them before continuing',
+        { repoId, id: record.id });
+    }
+    return [...active, ...archive].filter((value) => status === 'all' || value.status === status);
+  });
 }
 
 function validateStatus(status) {
@@ -534,11 +561,7 @@ export async function startHandoff({
     requireGit: true,
   });
   const repoPaths = await initializeRepositoryDirectory(resolved.repository.id, env);
-  const state = statePaths(env);
-
-  return withFileLock(
-    path.join(state.locks, `handoffs-${resolved.repository.id}.lock`),
-    async () => {
+  return withHandoffLock(resolved.repository.id, env, async () => {
       const active = await listForRepository(resolved.repository.id, 'active', env);
       const duplicate = active.find(
         (handoff) =>
@@ -707,10 +730,7 @@ export async function updateHandoff({
   if (typeof forceClaim !== 'boolean') throw new CoreError('INVALID_HANDOFF', 'forceClaim must be a boolean');
   sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
-  const state = statePaths(env);
-  return withFileLock(
-    path.join(state.locks, `handoffs-${resolved.repository.id}.lock`),
-    async () => {
+  return withHandoffLock(resolved.repository.id, env, async () => {
       const handoff = await selectActiveHandoff({
         id,
         task,
@@ -746,12 +766,13 @@ export async function renewHandoffClaims({
     throw new CoreError('INVALID_HANDOFF', 'renewWithinMinutes must be positive and no longer than the lease');
   }
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
-  return withFileLock(path.join(statePaths(env).locks, `handoffs-${resolved.repository.id}.lock`), async () => {
+  return withHandoffLock(resolved.repository.id, env, async () => {
     const records = await listForRepository(resolved.repository.id, 'all', env);
     const selected = await selectedHandoffId(resolved.git, env, sessionKey);
     const ids = new Set([
       ...expectedOwnedIds,
-      ...records.filter((record) => record.claimSessionKey === sessionKey).map((record) => record.id),
+      ...records.filter((record) => record.claimSessionKey === sessionKey
+        && decorateHandoff(record, clock).claimActive).map((record) => record.id),
       ...(selected ? [selected] : []),
     ]);
     const result = { renewed: [], lost: [], unchanged: [] };
@@ -760,7 +781,7 @@ export async function renewHandoffClaims({
       const record = records.find((value) => value.id === id);
       const reason = !record ? 'removed' : record.status !== 'active' ? 'closed'
         : record.claimSessionKey !== sessionKey ? (record.claimSessionKey ? 'taken-over' : 'released')
-          : !decorateHandoff(record, clock).claimActive ? 'expired' : null;
+          : !decorateHandoff(record, clock).claimActive && selected !== id ? 'expired' : null;
       if (reason) {
         result.lost.push({ id, reason, claimSessionKey: record?.claimSessionKey ?? null });
         continue;
@@ -774,6 +795,7 @@ export async function renewHandoffClaims({
         claimExpiresAt: addHours(now, leaseHours),
         history: [...(record.history ?? []), auditRecord('claim_renewed', now, { agent, sessionKey })].slice(-MAX_HISTORY),
       };
+      assertHandoffSize(renewed);
       // A heartbeat is not new progress: do not refresh updatedAt/staleAt.
       await writeJsonAtomic(path.join(repositoryPaths(record.repoId, env).handoffs, `${id}.json`), renewed);
       result.renewed.push({ id, claimExpiresAt: renewed.claimExpiresAt });
@@ -797,15 +819,19 @@ export async function showHandoff({
   validateHandoffId(id);
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
   if (id) {
-    const repoPaths = repositoryPaths(resolved.repository.id, env);
-    for (const directory of [repoPaths.handoffs, repoPaths.archive]) {
-      const value = await readJson(path.join(directory, `${id}.json`), {
-        optional: true,
-        validate: validHandoff,
-      });
-      if (value) return decorateHandoff(value, clock);
-    }
-    throw new CoreError('HANDOFF_NOT_FOUND', `Unknown handoff: ${id}`, { id });
+    return withHandoffLock(resolved.repository.id, env, async () => {
+      const paths = repositoryPaths(resolved.repository.id, env);
+      const [active, archive] = await Promise.all([
+        readJson(path.join(paths.handoffs, `${id}.json`), { optional: true,
+          validate: (value) => validHandoff(value) && value.id === id && value.repoId === resolved.repository.id && value.status === 'active' }),
+        readJson(path.join(paths.archive, `${id}.json`), { optional: true,
+          validate: (value) => validHandoff(value) && value.id === id && value.repoId === resolved.repository.id && value.status === 'closed' }),
+      ]);
+      if (active && archive) throw new CoreError('STATE_RECOVERY_REQUIRED', 'Both active and closed copies of this work exist; preserve and review them before continuing',
+        { repoId: resolved.repository.id, id });
+      if (active || archive) return decorateHandoff(active ?? archive, clock);
+      throw new CoreError('HANDOFF_NOT_FOUND', `Unknown handoff: ${id}`, { id });
+    });
   }
   return selectActiveHandoff({
     task,
@@ -861,10 +887,7 @@ export async function selectHandoff({
     throw new CoreError('HANDOFF_SELECTION_REQUIRED', 'Provide a handoff id or task to select');
   }
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock, requireGit: true });
-  const state = statePaths(env);
-  return withFileLock(
-    path.join(state.locks, `handoffs-${resolved.repository.id}.lock`),
-    async () => {
+  return withHandoffLock(resolved.repository.id, env, async () => {
       const handoff = await selectActiveHandoff({
         id,
         task,
@@ -905,10 +928,17 @@ export async function closeHandoff({
 } = {}) {
   sessionKey = workSessionKey({ sessionKey, sessionId, agent, env });
   const resolved = await resolveRepoAndGit({ repoId, cwd, env, clock });
-  const state = statePaths(env);
-  return withFileLock(
-    path.join(state.locks, `handoffs-${resolved.repository.id}.lock`),
-    async () => {
+  return withHandoffLock(resolved.repository.id, env, async () => {
+      if (id) {
+        validateHandoffId(id);
+        const paths = repositoryPaths(resolved.repository.id, env);
+        const archived = await readJson(path.join(paths.archive, `${id}.json`), { optional: true,
+          validate: (value) => validHandoff(value) && value.repoId === resolved.repository.id && value.id === id && value.status === 'closed' });
+        if (archived) {
+          const active = await readJson(path.join(paths.handoffs, `${id}.json`), { optional: true, validate: validHandoff });
+          if (!active) return { ...decorateHandoff(archived, clock), alreadyClosed: true };
+        }
+      }
       const handoff = await selectActiveHandoff({
         id,
         task,
@@ -935,13 +965,14 @@ export async function closeHandoff({
       }
       const repoPaths = repositoryPaths(next.repoId, env);
       const activeFile = path.join(repoPaths.handoffs, `${next.id}.json`);
-      const archivedFile = path.join(repoPaths.archive, `${next.id}.json`);
-      // Publish the closed copy first. If the process stops between these two
-      // operations, both files remain individually valid and retrying close is
-      // safe. Writing closed state into the active location first would leave
-      // a location/status mismatch after a crash.
-      await writeJsonAtomic(archivedFile, next);
-      await removeFile(activeFile);
+      // Journal before either data file changes. Every later read or mutation
+      // completes this exact closure before observing active/archive state.
+      const original = await readJson(activeFile, { validate: validHandoff });
+      const journalCreated = await writeJsonAtomic(closeJournalPath(next.repoId, env), {
+        schemaVersion: 1, kind: 'handoff-close', handoff: next, activeDigest: recordDigest(original),
+      }, { overwrite: false });
+      if (!journalCreated) throw new CoreError('STATE_RECOVERY_REQUIRED', 'A work closure journal already exists; recover it before retrying');
+      await recoverHandoffClose(next.repoId, env);
 
       if (resolved.git && await selectedHandoffId(resolved.git, env, sessionKey) === next.id) {
         const remaining = (await listForRepository(next.repoId, 'active', env))

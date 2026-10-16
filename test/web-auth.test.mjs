@@ -796,3 +796,124 @@ test('the pinned SimpleWebAuthn implementation produces UV-required discoverable
   assert.equal(authentication.options.userVerification, 'required');
   assert.deepEqual(authentication.options.allowCredentials, []);
 });
+
+test('signup policy changes invalidate ceremonies during options generation and verification', async (t) => {
+  const { store, service, fake } = await fixture(t, { signupMode: 'open' });
+  const owner = (await register(service, {
+    username: 'signup_owner', credentialId: 'signup_owner_credential',
+  })).verified;
+  for (const phase of ['options', 'verification']) {
+    let release;
+    let entered;
+    const waiting = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    const operation = phase === 'options' ? 'generateRegistrationOptions' : 'verifyRegistrationResponse';
+    const pendingService = new WebAuthService({
+      store, origin: 'https://hnd.example.com', rpId: 'hnd.example.com', signupMode: 'open',
+      webauthn: {
+        ...fake.implementation,
+        async [operation](options) {
+          entered();
+          await gate;
+          return fake.implementation[operation](options);
+        },
+      },
+    });
+    const options = phase === 'verification'
+      ? await pendingService.registrationOptions({ username: `pending_${phase}` })
+      : null;
+    const pending = phase === 'options'
+      ? pendingService.registrationOptions({ username: `pending_${phase}` })
+      : pendingService.verifyRegistration({
+        flowId: options.flowId, response: { id: 'pending_credential', response: {} },
+      });
+    const rejected = assert.rejects(pending,
+      (error) => error instanceof AccountStoreError && error.code === 'invalid_auth_flow');
+    await waiting;
+    store.updateSettings(owner.user.id, owner.activeTenantId, { signupMode: 'disabled' });
+    // GC is allowed to delete consumed flows; policy invalidation must remain
+    // detectable independently of whether a flow's audit row still exists.
+    store.runRequestMaintenance();
+    release();
+    await rejected;
+    assert.equal(store.userCount(), 1);
+    store.updateSettings(owner.user.id, owner.activeTenantId, { signupMode: 'open' });
+  }
+});
+
+test('request maintenance does not invalidate an otherwise valid in-flight signup', async (t) => {
+  const { store, service, fake } = await fixture(t, { signupMode: 'open' });
+  let release;
+  let entered;
+  const waiting = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pendingService = new WebAuthService({
+    store, origin: 'https://hnd.example.com', rpId: 'hnd.example.com', signupMode: 'open',
+    webauthn: { ...fake.implementation, async verifyRegistrationResponse(options) {
+      entered(); await gate; return fake.implementation.verifyRegistrationResponse(options);
+    } },
+  });
+  const options = await pendingService.registrationOptions({ username: 'maintenance_signup' });
+  const pending = pendingService.verifyRegistration({ flowId: options.flowId,
+    response: { id: 'maintenance_credential', response: {} } });
+  await waiting;
+  for (let index = 0; index < 64; index += 1) store.runRequestMaintenance();
+  release();
+  assert.equal((await pending).authenticated, true);
+  assert.equal(store.userCount(), 1);
+});
+
+test('a stale WebAuthService honors signup policy changed by another account connection', async (t) => {
+  const { directory, store, service } = await fixture(t, { signupMode: 'open' });
+  const owner = (await register(service, { username: 'policy_owner', credentialId: 'policy_owner_credential' })).verified;
+  const other = await new AccountStore(directory).init();
+  t.after(() => other.close());
+  other.updateSettings(owner.user.id, owner.activeTenantId, { signupMode: 'disabled' });
+  assert.equal(service.signupMode, 'open', 'the service intentionally retains its old in-memory default');
+  assert.equal(service.publicSignupStatus().allowed, false);
+  assert.equal(service.publicSignupStatus().configuredMode, 'disabled');
+  await assert.rejects(service.registrationOptions({ username: 'blocked_newcomer' }),
+    (error) => error instanceof AccountStoreError && error.code === 'signup_disabled');
+  assert.equal(store.userCount(), 1);
+
+  other.updateSettings(owner.user.id, owner.activeTenantId, { signupMode: 'invite' });
+  assert.equal(service.publicSignupStatus().requiresCode, true);
+  await assert.rejects(service.registrationOptions({ username: 'uninvited_newcomer' }),
+    (error) => error instanceof AccountStoreError && error.code === 'invite_required');
+  const invitation = other.createAccountInvite({ actorUserId: owner.user.id,
+    tenantId: owner.activeTenantId, role: 'member' });
+  const newcomer = await register(service, { username: 'invited_newcomer',
+    credentialId: 'invited_newcomer_credential', code: invitation.code });
+  assert.equal(newcomer.verified.memberships[0].tenantId, owner.activeTenantId);
+  assert.equal(newcomer.verified.memberships[0].role, 'member');
+});
+
+test('signup completion rechecks persisted policy even when a legacy writer does not advance its generation', async (t) => {
+  const { directory, store, service, fake } = await fixture(t, { signupMode: 'open' });
+  await register(service, { username: 'legacy_policy_owner', credentialId: 'legacy_policy_owner_credential' });
+  const other = await new AccountStore(directory).init();
+  t.after(() => other.close());
+  let release;
+  let entered;
+  const waiting = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pendingService = new WebAuthService({
+    store, origin: 'https://hnd.example.com', rpId: 'hnd.example.com', signupMode: 'open',
+    webauthn: { ...fake.implementation, async verifyRegistrationResponse(options) {
+      entered(); await gate; return fake.implementation.verifyRegistrationResponse(options);
+    } },
+  });
+  const options = await pendingService.registrationOptions({ username: 'legacy_pending' });
+  const pending = pendingService.verifyRegistration({ flowId: options.flowId,
+    response: { id: 'legacy_pending_credential', response: {} } });
+  const rejected = assert.rejects(pending,
+    (error) => error instanceof AccountStoreError && error.code === 'signup_disabled');
+  await waiting;
+  other.getDatabase().prepare(`
+    INSERT INTO schema_metadata (key, value) VALUES ('web_signup_mode', 'disabled')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run();
+  release();
+  await rejected;
+  assert.equal(store.userCount(), 1);
+});

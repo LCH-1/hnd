@@ -20,6 +20,7 @@ import {
   planUninstall,
   previewAdapters,
   renderHookOutput,
+  refreshManagedPromptTimeout,
 } from '../src/adapters/index.mjs';
 import {
   createCodexCheckpointHook,
@@ -263,6 +264,54 @@ test('setup is idempotent and consolidates duplicate managed entries without tou
     1,
   );
   assert.deepEqual(await planInstall(setupOptions), []);
+});
+
+test('setup upgrades the legacy Claude prompt timeout while preserving other hooks', async (t) => {
+  const fixture = await makeHome(t);
+  const setupOptions = options(fixture.env, { agents: ['claude'] });
+  await applyOperations(await planInstall(setupOptions));
+
+  const config = await readJson(fixture.paths.claude.settings);
+  config.hooks.UserPromptSubmit[0].hooks[0].timeout = 2;
+  const userGroup = { hooks: [{ type: 'command', command: 'user-prompt-hook', timeout: 2 }] };
+  config.hooks.UserPromptSubmit.unshift(userGroup);
+  await write(fixture.paths.claude.settings, `${JSON.stringify(config, null, 2)}\n`);
+
+  const before = await doctorAdapters(setupOptions);
+  assert.equal(before.ok, false);
+  const operations = await planInstall(setupOptions);
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0].component, 'hook');
+  await applyOperations(operations);
+
+  const upgraded = await readJson(fixture.paths.claude.settings);
+  assert.deepEqual(upgraded.hooks.UserPromptSubmit[0], userGroup);
+  const managed = upgraded.hooks.UserPromptSubmit[1].hooks[0];
+  assert.equal(managed.timeout, 5);
+  // The timeout is the only setting that needs migration.
+  const expected = structuredClone(config);
+  expected.hooks.UserPromptSubmit[1].hooks[0].timeout = 5;
+  assert.deepEqual(upgraded, expected);
+  assert.equal((await doctorAdapters(setupOptions)).ok, true);
+  assert.deepEqual(await planInstall(setupOptions), []);
+});
+
+test('runtime timeout migration only touches an existing managed Claude prompt hook', async (t) => {
+  const fixture = await makeHome(t);
+  const setupOptions = options(fixture.env);
+  assert.deepEqual(await refreshManagedPromptTimeout(setupOptions), []);
+  await applyOperations(await planInstall(setupOptions));
+  const codexBefore = await fs.readFile(fixture.paths.codex.hooks, 'utf8');
+  const config = await readJson(fixture.paths.claude.settings);
+  config.hooks.UserPromptSubmit[0].hooks[0].timeout = 2;
+  config.hooks.UserPromptSubmit[0].hooks.push({ type: 'command', command: 'user-hook', timeout: 2 });
+  await write(fixture.paths.claude.settings, JSON.stringify(config));
+  const expected = structuredClone(config);
+  expected.hooks.UserPromptSubmit[0].hooks[0].timeout = 5;
+  assert.equal((await refreshManagedPromptTimeout(setupOptions)).length, 1);
+  assert.deepEqual(await readJson(fixture.paths.claude.settings), expected);
+  assert.equal(await fs.readFile(fixture.paths.codex.hooks, 'utf8'), codexBefore);
+  assert.deepEqual(await refreshManagedPromptTimeout(setupOptions), []);
 });
 
 test('setup preserves healthy hook configuration bytes after an agent reformats the file', async (t) => {

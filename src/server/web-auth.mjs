@@ -172,6 +172,7 @@ export class WebAuthService {
   }
 
   async registrationOptions(input) {
+    const signupPolicyGeneration = this.store.signupPolicyGeneration();
     const pending = this.store.prepareSignup({
       mode: this.signupMode,
       username: input?.username,
@@ -194,6 +195,7 @@ export class WebAuthService {
     });
     const flow = this.store.createWebAuthnFlow({
       type: 'signup',
+      signupPolicyGeneration,
       challenge: options.challenge,
       inviteId: pending.inviteId,
       signupPolicy: pending.signupPolicy,

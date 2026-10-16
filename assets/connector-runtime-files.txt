@@ -44,6 +44,7 @@ src/presentation.mjs
 src/remote-cli.mjs
 src/shared/app-settings.mjs
 src/shared/notify.mjs
+src/shared/record-merge.mjs
 src/sync/auto.mjs
 src/sync/capture.mjs
 src/sync/client.mjs
@@ -53,6 +54,7 @@ src/sync/etag.mjs
 src/sync/hook-sync.mjs
 src/sync/io.mjs
 src/sync/merge.mjs
+src/sync/validate-state.mjs
 src/update/manifest.mjs
 src/update/npm-cli.mjs
 src/update/npm.mjs

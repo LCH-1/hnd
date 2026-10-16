@@ -7,18 +7,43 @@ import { fileURLToPath } from 'node:url';
 
 import { normalizeFsPath } from '../paths.mjs';
 import { CoreError } from './errors.mjs';
+import { operationDeadline } from './fs.mjs';
 
 const execFileAsync = promisify(execFile);
 
 async function runGit(cwd, args, { optional = false, trim = true } = {}) {
+  const deadline = operationDeadline();
+  const remaining = deadline === null ? 10_000 : deadline - Date.now();
+  if (remaining <= 0) throw new CoreError('OPERATION_DEADLINE_EXCEEDED', 'The Git inspection deadline expired');
+  const timeoutMs = Math.max(1, Math.min(10_000, remaining));
+  let timer;
   try {
-    const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+    const command = execFileAsync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      detached: process.platform !== 'win32',
     });
+    const expired = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        // Git can start helpers that inherit its pipes. Killing only Git can
+        // leave execFile waiting for those pipes beyond the hook deadline.
+        if (process.platform !== 'win32' && command.child?.pid) {
+          try { process.kill(-command.child.pid, 'SIGKILL'); } catch {}
+        }
+        command.child?.kill('SIGKILL');
+        reject(new CoreError('GIT_TIMEOUT', 'Git inspection exceeded its execution budget', { cwd, args }));
+      }, timeoutMs);
+    });
+    const { stdout } = await Promise.race([command, expired]);
     return trim ? stdout.trim() : stdout;
   } catch (error) {
+    if (error instanceof CoreError) throw error;
+    if (error.killed) {
+      throw new CoreError('GIT_TIMEOUT', 'Git inspection exceeded its execution budget', { cwd, args }, { cause: error });
+    }
     if (error.code === 'ENOENT') {
       throw new CoreError('GIT_UNAVAILABLE', 'git executable was not found', undefined, {
         cause: error,
@@ -31,6 +56,8 @@ async function runGit(cwd, args, { optional = false, trim = true } = {}) {
       { cwd, args, stderr: error.stderr?.trim() || undefined },
       { cause: error },
     );
+  } finally {
+    clearTimeout(timer);
   }
 }
 

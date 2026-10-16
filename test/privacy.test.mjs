@@ -235,7 +235,7 @@ test('retention preserves completed prerequisites and knowledge still referenced
 test('retention refuses partially recovered knowledge state without deleting anything', async (t) => {
   const options = await retentionFixture(t);
   await setPrivacyPolicy({ ...options, policy: { retentionDays: 7 } });
-  await writeJsonAtomic(path.join(options.paths.cache, 'knowledge-merge-journal.json'), { interrupted: true });
+  await writeJsonAtomic(path.join(options.paths.locks, 'knowledge-merge-journal.json'), { interrupted: true });
   await assert.rejects(previewRetention(options), { code: 'STATE_RECOVERY_REQUIRED' });
   await fs.stat(path.join(options.paths.knowledge, `${options.candidateId}.json`));
   await fs.stat(path.join(options.repository.archive, `${options.archivedId}.json`));

@@ -6,6 +6,7 @@ import { UsageError, optionBoolean, optionString } from './args.mjs';
 import { ct } from './cli-i18n.mjs';
 import {
   readJson,
+  pathExists,
   removeFile,
   withFileLock,
   writeJsonAtomic,
@@ -38,6 +39,7 @@ import {
 } from './sync/crypto.mjs';
 import { atomicWriteFile, assertRegularFile, ensurePrivateDirectory } from './sync/io.mjs';
 import { mergeSyncSnapshots } from './sync/merge.mjs';
+import { validateSyncedState, validatePolicySnapshot } from './sync/validate-state.mjs';
 
 const REMOTE_SCHEMA_VERSION = 1;
 const DEVICE_TOKEN_FILE = 'device.token';
@@ -124,7 +126,61 @@ function secretPaths(env) {
     ...state,
     deviceToken: path.join(state.secrets, DEVICE_TOKEN_FILE),
     vaultKey: path.join(state.secrets, VAULT_KEY_FILE),
+    pendingEnrollment: path.join(state.secrets, 'enrollment.pending.json'),
   };
+}
+
+async function resumeEnrollment(env, baseUrl) {
+  const paths = secretPaths(env);
+  const pending = await readJson(paths.pendingEnrollment, { optional: true });
+  if (!pending) return null;
+  const stat = await assertRegularFile(paths.pendingEnrollment);
+  if (process.platform !== 'win32' && (stat.mode & 0o077)) throw new Error('Pending enrollment must be private');
+  if (pending.schemaVersion !== 1 || pending.baseUrl !== baseUrl
+    || !/^hndd_[A-Za-z0-9_-]{40,64}$/.test(pending.deviceToken ?? '')
+    || typeof pending.device?.id !== 'string') {
+    throw new UsageError('Pending PC enrollment does not match this server or is invalid; preserve it for recovery.');
+  }
+  const key = parseVaultKey(pending.vaultKey);
+  try {
+    const current = await readRemoteConfig(env, { optional: true });
+    if (current && (current.baseUrl !== baseUrl || current.device.id !== pending.device.id)) {
+      throw new UsageError('A different PC connection already exists; pending enrollment was preserved.');
+    }
+    let hasKey = false;
+    try {
+      const existing = await readVaultKey(paths.vaultKey);
+      hasKey = true;
+      const matches = existing.equals(key);
+      existing.fill(0);
+      if (!matches) throw new UsageError('The existing vault key differs from pending enrollment; neither was overwritten.');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    let hasToken = false;
+    try {
+      const token = await readDeviceToken(env);
+      hasToken = true;
+      if (token !== pending.deviceToken) throw new UsageError('The existing device token differs from pending enrollment.');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!hasKey) await writeVaultKey(paths.vaultKey, key);
+    if (!hasToken) await atomicWriteFile(paths.deviceToken, `${pending.deviceToken}\n`, { maxBytes: MAX_DEVICE_TOKEN_BYTES });
+    const config = current ?? await saveRemoteConfig(env, {
+      baseUrl, device: pending.device, etag: null, snapshotDigest: null, lastSyncAt: null,
+    });
+    await removeFile(paths.pendingEnrollment);
+    return { baseUrl, device: pending.device, config, resumed: true };
+  } finally { key.fill(0); }
+}
+
+async function saveEnrollmentCredentials(env, { baseUrl, device, deviceToken, vaultKey }) {
+  if (!/^hndd_[A-Za-z0-9_-]{40,64}$/.test(deviceToken ?? '') || typeof device?.id !== 'string') {
+    throw new Error('Malformed enrollment credentials');
+  }
+  // Persist the server response before the first credential write. The private,
+  // unsynced journal makes retries safe after any subsequent IO failure/crash.
+  await writeJsonAtomic(secretPaths(env).pendingEnrollment, {
+    schemaVersion: 1, baseUrl, device, deviceToken, vaultKey: serializeVaultKey(vaultKey),
+  });
+  return resumeEnrollment(env, baseUrl);
 }
 
 function syncBasePath(env, etag) {
@@ -362,7 +418,17 @@ function stableValue(value) {
 }
 
 export function snapshotDigest(snapshot) {
-  return createHash('sha256').update(JSON.stringify(stableValue(snapshot))).digest('hex');
+  const canonical = Array.isArray(snapshot?.files)
+    ? { ...snapshot, files: [...snapshot.files].sort((left, right) => {
+      const a = [...left.path], b = [...right.path];
+      for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+        const difference = a[index].codePointAt(0) - b[index].codePointAt(0);
+        if (difference) return difference;
+      }
+      return a.length - b.length;
+    }) }
+    : snapshot;
+  return createHash('sha256').update(JSON.stringify(stableValue(canonical))).digest('hex');
 }
 
 export function formatDeviceInvite(invitationToken, secret) {
@@ -475,6 +541,33 @@ function withRemoteOperationLock(env, callback, options = {}) {
   );
 }
 
+function withManualSyncOperation(env, callback) {
+  // Manual verification can resolve an attention barrier. Use the automatic
+  // reconciler's lock order so an older hook cannot restore that barrier after
+  // the explicit operation has authenticated and acknowledged the same state.
+  return withFileLock(path.join(statePaths(env).locks, 'auto-sync.lock'), () => (
+    withRemoteOperationLock(env, async () => {
+      const result = await callback();
+      if (result?.conflicts?.length) return result;
+      if (!await pathExists(path.join(statePaths(env).cache, 'auto-sync-pending.json'))) return result;
+      await withStateLock(async () => {
+        const config = await readRemoteConfig(env);
+        const snapshot = await captureSyncSnapshot(statePaths(env).home);
+        validateSyncedState(snapshot);
+        await validatePolicySnapshot(snapshot, env);
+        if (config.etag && config.snapshotDigest === snapshotDigest(snapshot)) {
+          const { clearAutoSyncPending } = await import('./sync/auto.mjs');
+          await clearAutoSyncPending({ env });
+        }
+      }, { env }).catch(() => {
+        // A concurrent edit or status I/O failure keeps the barrier in place;
+        // it must not turn an already successful manual operation into failure.
+      });
+      return result;
+    })
+  ), { timeoutMs: 45_000, staleMs: 5 * 60_000 });
+}
+
 function validRestoreJournal(value) {
   return Boolean(
     value
@@ -484,7 +577,7 @@ function validRestoreJournal(value) {
     && Array.isArray(value.previous.files)
     && value.target?.schemaVersion === 1
     && Array.isArray(value.target.files)
-    && typeof value.targetDigest === 'string',
+    && /^[a-f0-9]{64}$/.test(value.targetDigest ?? ''),
   );
 }
 
@@ -499,6 +592,11 @@ async function recoverRestoreJournal(env) {
   const filePath = restoreJournalPath(env);
   const journal = await readJson(filePath, { optional: true, validate: validRestoreJournal });
   if (!journal) return null;
+  validateSyncedState(journal.target);
+  if (snapshotDigest(journal.target) !== journal.targetDigest) {
+    throw new Error('Restore journal target digest mismatch; local state was preserved.');
+  }
+  await validatePolicySnapshot(journal.target, env);
   await restoreSyncSnapshot(statePaths(env).home, journal.target, { prune: true });
   await verifyRestoredSnapshot(env, journal.targetDigest);
   await removeFile(filePath);
@@ -506,6 +604,8 @@ async function recoverRestoreJournal(env) {
 }
 
 async function transactionalRestore(env, target, previous) {
+  validateSyncedState(target);
+  await validatePolicySnapshot(target, env);
   await recoverRestoreJournal(env);
   const filePath = restoreJournalPath(env);
   const journal = {
@@ -569,6 +669,12 @@ async function enroll({ options, rest, env, stdin, stdout, jsonOutput }) {
   const remoteUrl = optionString(options, 'url');
   if (!remoteUrl) throw new UsageError(enrollUsage('서버 주소가 없습니다.'));
   const baseUrl = normalizeRemoteUrl(remoteUrl, env);
+  const resumed = await resumeEnrollment(env, baseUrl);
+  if (resumed) {
+    if (jsonOutput) writeJson({ enrolled: true, ...resumed }, stdout);
+    else writeText(stdout, '이 PC의 중단된 연결을 복구했습니다.');
+    return;
+  }
   const inlineKey = optionString(options, 'key');
   const keyStdin = optionBoolean(options, 'key_stdin');
   if (inlineKey && keyStdin) throw new UsageError('Choose only one of --key or --key-stdin.');
@@ -624,7 +730,6 @@ async function enroll({ options, rest, env, stdin, stdout, jsonOutput }) {
       ? await readSuppliedVaultKey(vaultKeyFile)
       : generateVaultKey();
     vaultKeySource = vaultKeyFile ? 'imported' : 'generated-explicitly';
-    await writeVaultKey(paths.vaultKey, vaultKey);
   }
 
   const result = await enrollDevice({
@@ -633,14 +738,8 @@ async function enroll({ options, rest, env, stdin, stdout, jsonOutput }) {
     deviceName: name,
     timeoutMs: 30_000,
   });
-  await atomicWriteFile(paths.deviceToken, `${result.deviceToken}\n`, { maxBytes: MAX_DEVICE_TOKEN_BYTES });
-  const config = await saveRemoteConfig(env, {
-    baseUrl,
-    device: result.device,
-    etag: null,
-    snapshotDigest: null,
-    lastSyncAt: null,
-  });
+  const { config } = await saveEnrollmentCredentials(env, { baseUrl, ...result, vaultKey });
+  vaultKey.fill(0);
   const output = { enrolled: true, baseUrl, device: result.device, vaultKeySource, config };
   if (jsonOutput) writeJson(output, stdout);
   else writeText(stdout, `이전 방식 PC 연결 완료: ${result.device.name} (${result.device.id})\n서버: ${baseUrl}`);
@@ -673,6 +772,12 @@ async function join({ subcommand, options, rest, env, stdin, stdout, jsonOutput 
   const remoteUrl = optionString(options, 'url');
   if (!remoteUrl) throw new UsageError(joinUsage('서버 주소가 없습니다.'));
   const baseUrl = normalizeRemoteUrl(remoteUrl, env);
+  const resumed = await resumeEnrollment(env, baseUrl);
+  if (resumed) {
+    if (jsonOutput) writeJson({ joined: true, ...resumed }, stdout);
+    else writeText(stdout, '이 PC의 중단된 연결을 복구했습니다.');
+    return;
+  }
   const inlineInvite = optionString(options, 'invite');
   const inlineCode = optionString(options, 'code');
   const inviteStdin = optionBoolean(options, 'invite_stdin');
@@ -725,15 +830,9 @@ async function join({ subcommand, options, rest, env, stdin, stdout, jsonOutput 
   }
   const vaultKey = decryptBytes(result.wrappedVaultKey, invitation.secret, { maxBytes: 32 });
   if (vaultKey.byteLength !== 32) throw new Error('The invitation did not contain a valid vault key.');
-  await writeVaultKey(paths.vaultKey, vaultKey);
-  await atomicWriteFile(paths.deviceToken, `${result.deviceToken}\n`, { maxBytes: MAX_DEVICE_TOKEN_BYTES });
-  const config = await saveRemoteConfig(env, {
-    baseUrl,
-    device: result.device,
-    etag: null,
-    snapshotDigest: null,
-    lastSyncAt: null,
-  });
+  const { config } = await saveEnrollmentCredentials(env, { baseUrl, ...result, vaultKey });
+  vaultKey.fill(0);
+  invitation.secret.fill(0);
   const output = { joined: true, baseUrl, device: result.device, config };
   if (jsonOutput) writeJson(output, stdout);
   else writeText(stdout, `PC 연결 완료: ${result.device.name} (${result.device.id})\n서버: ${baseUrl}`);
@@ -752,6 +851,8 @@ async function push({ options, rest, env, stdout, jsonOutput, syncClientOptions 
     () => captureSyncSnapshot(statePaths(env).home),
     { env },
   );
+  validateSyncedState(snapshot);
+  await validatePolicySnapshot(snapshot, env);
   const digest = snapshotDigest(snapshot);
 
   if (config.etag && config.snapshotDigest === digest) {
@@ -819,6 +920,7 @@ async function pull({ options, rest, env, stdout, jsonOutput }) {
     return;
   }
   assertNoKnownRollback(config, result.etag);
+  validateSyncedState(result.snapshot);
   await writeSyncBase(env, result.etag, result.snapshot);
 
   const localResult = await withStateLock(async () => {
@@ -884,6 +986,7 @@ async function mergeRemote({ options, rest, env, stdout, jsonOutput, syncClientO
     throw new UsageError('The remote has no snapshot to merge. Push this device first.');
   }
   assertNoKnownRollback(config, remote.etag);
+  validateSyncedState(remote.snapshot);
 
   let base;
   if (config.etag && config.etag === remote.etag) {
@@ -932,6 +1035,10 @@ async function mergeRemote({ options, rest, env, stdout, jsonOutput, syncClientO
       conflicts: merged.conflicts,
       mergedDigest,
     });
+    if (merged.conflicts.length > 0) {
+      const { recordAutoSyncConflict } = await import('./sync/auto.mjs');
+      await recordAutoSyncConflict({ env, conflicts: merged.conflicts.length });
+    }
     const restored = await transactionalRestore(env, merged.snapshot, local);
     const reconciliation = await reconcileBindings(env);
     await saveRemoteCheckpoint(env, currentConfig, remote.etag, remote.snapshot, {
@@ -1142,6 +1249,7 @@ async function restoreRevision({ options, rest, env, stdout, jsonOutput }) {
 
   const restoredSnapshot = decryptSnapshot(revision.blob, key);
   const latestSnapshot = decryptSnapshot(latest.blob, key);
+  validateSyncedState(latestSnapshot);
   await writeSyncBase(env, latest.etag, latestSnapshot);
   const localResult = await withStateLock(async () => {
     await recoverRestoreJournal(env);
@@ -1243,10 +1351,18 @@ export async function remoteSyncConfigured(env = process.env) {
   return Boolean(await readRemoteConfig(env, { optional: true }));
 }
 
+/** Recover a killed multi-file restore before attention checks read state. */
+export async function recoverInterruptedRemoteRestore(env = process.env, { lockTimeoutMs = 2_000 } = {}) {
+  if (!await pathExists(restoreJournalPath(env))) return false;
+  return withRemoteOperationLock(env, () => withStateLock(async () =>
+    Boolean(await recoverRestoreJournal(env)),
+  { env, timeoutMs: lockTimeoutMs, allowRestoreJournal: true }), { timeoutMs: lockTimeoutMs });
+}
+
 /**
- * A conflict attention marker is resolved only after a manual operation makes
- * the local snapshot the acknowledged remote checkpoint (normally sync push,
- * or a reviewed pull). Merely running another background pass is insufficient.
+ * A conflict marker requires an acknowledged snapshot or a verifiably safe
+ * lease-only merge of its retained report. Content/ownership conflicts remain
+ * blocked. Recovery uses the same state lock, backup and restore journal as sync.
  */
 export async function remoteSyncConflictResolved(
   env = process.env,
@@ -1255,13 +1371,51 @@ export async function remoteSyncConflictResolved(
   return withRemoteOperationLock(env, async () => {
     const config = await readRemoteConfig(env, { optional: true });
     if (!config) return true;
-    const snapshot = await withStateLock(
-      () => captureSyncSnapshot(statePaths(env).home),
-      { env },
-    );
-    const digest = snapshotDigest(snapshot);
-    if (config.snapshotDigest) return digest === config.snapshotDigest;
-    return snapshotIsEmpty(snapshot);
+    return withStateLock(async () => {
+      const state = statePaths(env);
+      const snapshot = await captureSyncSnapshot(state.home);
+      const digest = snapshotDigest(snapshot);
+      if (config.snapshotDigest && digest === config.snapshotDigest) return true;
+      if (!config.snapshotDigest) return snapshotIsEmpty(snapshot);
+      const acknowledged = await readSyncBase(env, config.etag, { optional: true });
+      if (!acknowledged || snapshotDigest(acknowledged) !== config.snapshotDigest) return false;
+      const names = (await fs.readdir(state.cache)).filter((name) =>
+        /^merge-conflicts-[\w.-]+\.json$/.test(name)).sort().reverse();
+      let report;
+      for (const name of names.slice(0, 32)) {
+        const candidate = await readJson(path.join(state.cache, name));
+        if (candidate.remoteEtag === config.etag) { report = candidate; break; }
+      }
+      if (!report || report.schemaVersion !== MERGE_REPORT_SCHEMA_VERSION
+        || !Array.isArray(report.conflicts) || !report.conflicts.length) return false;
+      const files = new Map(snapshot.files.map((file) => [file.path, file]));
+      const remoteFiles = new Map(acknowledged.files.map((file) => [file.path, file]));
+      const seen = new Set();
+      for (const conflict of report.conflicts) {
+        if (!/^repositories\/[0-9a-f-]{36}\/handoffs\/[0-9a-f-]{36}\.json$/i.test(conflict.path)
+          || seen.has(conflict.path)) return false;
+        seen.add(conflict.path);
+        if (![conflict.base, conflict.local, conflict.remote].every((file) => file?.path === conflict.path)
+          || conflict.remote.sha256 !== remoteFiles.get(conflict.path)?.sha256
+          || !files.has(conflict.path)) return false;
+        const envelope = (file) => ({ schemaVersion: 1, files: [file] });
+        // Verify the original report is now semantically resolvable before
+        // considering newer local progress. Never use a later edit to hide a
+        // genuine original content conflict.
+        const original = mergeSyncSnapshots(envelope(conflict.base), envelope(conflict.local), envelope(conflict.remote));
+        if (original.conflicts.length) return false;
+        const current = mergeSyncSnapshots(envelope(conflict.base), envelope(files.get(conflict.path)), envelope(conflict.remote));
+        if (current.conflicts.length) return false;
+        files.set(conflict.path, current.snapshot.files[0]);
+      }
+      const recovered = { schemaVersion: 1, files: [...files.values()].sort((a, b) => a.path.localeCompare(b.path)) };
+      validateSyncSnapshot(recovered);
+      if (snapshotDigest(recovered) !== digest) {
+        await backupSnapshot(env, snapshot, { reason: 'lease-conflict-recovery' });
+        await transactionalRestore(env, recovered, snapshot);
+      }
+      return true;
+    }, { env });
   }, { timeoutMs: lockTimeoutMs });
 }
 
@@ -1279,6 +1433,7 @@ export async function reconcileRemoteAutomatically({
   timeoutMs = 2_000,
   lockTimeoutMs = 1_000,
   maxConflictRetries = 1,
+  deadlineAt,
   fetchImpl,
 } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
@@ -1299,9 +1454,11 @@ export async function reconcileRemoteAutomatically({
   }
 
   const sink = Object.freeze({ write: () => true });
-  const syncClientOptions = fetchImpl === undefined
-    ? { timeoutMs }
-    : { timeoutMs, fetchImpl };
+  const syncClientOptions = {
+    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}),
+  };
   const context = {
     options: {},
     rest: [],
@@ -1316,6 +1473,12 @@ export async function reconcileRemoteAutomatically({
     // enrollment state in a future version.
     if (!await remoteSyncConfigured(env)) {
       return Object.freeze({ status: 'not_configured', changed: false, attempts: 0, conflicts: 0 });
+    }
+
+    // A killed hook may leave a valid restore journal. Recover it before the
+    // normal push path, whose consistent-state guard intentionally rejects it.
+    if (await pathExists(restoreJournalPath(env))) {
+      await withStateLock(() => recoverRestoreJournal(env), { env, timeoutMs: lockTimeoutMs, allowRestoreJournal: true });
     }
 
     let attempts = 1;
@@ -1376,13 +1539,13 @@ export async function remoteMain(context) {
   if (subcommand === 'show') return showRemote(context);
   if (subcommand === 'set-url') return setRemoteUrl(context);
   if (subcommand === 'setup') return setupRemote(context);
-  if (subcommand === 'enroll') return enroll(context);
+  if (subcommand === 'enroll') return withRemoteOperationLock(context.env, () => enroll(context));
   if (subcommand === 'invite') return invite(context);
-  if (subcommand === 'join') return join(context);
-  if (subcommand === 'connect') return join(context);
-  if (subcommand === 'push') return withRemoteOperationLock(context.env, () => push(context));
-  if (subcommand === 'pull') return withRemoteOperationLock(context.env, () => pull(context));
-  if (subcommand === 'merge') return withRemoteOperationLock(context.env, () => mergeRemote(context));
+  if (subcommand === 'join') return withRemoteOperationLock(context.env, () => join(context));
+  if (subcommand === 'connect') return withRemoteOperationLock(context.env, () => join(context));
+  if (subcommand === 'push') return withManualSyncOperation(context.env, () => push(context));
+  if (subcommand === 'pull') return withManualSyncOperation(context.env, () => pull(context));
+  if (subcommand === 'merge') return withManualSyncOperation(context.env, () => mergeRemote(context));
   if (subcommand === 'status') return status(context);
   if (subcommand === 'revisions') return revisions(context);
   if (subcommand === 'restore') {

@@ -228,3 +228,70 @@ test('invalid input snapshots are rejected before merge and inputs remain unchan
   mergeSyncSnapshots(base, local, remote);
   assert.deepEqual([base, local, remote].map((value) => JSON.stringify(value)), before);
 });
+
+function handoffFixture() {
+  const repoId = '11111111-1111-4111-8111-111111111111';
+  const id = '22222222-2222-4222-8222-222222222222';
+  const at = '2026-10-16T00:00:00.000Z';
+  const record = {
+    schemaVersion: 1, id, repoId, status: 'active', task: 'test', objective: 'test',
+    currentState: 'base', worktree: '/repo', branch: 'main', staleHours: 24,
+    createdAt: at, updatedAt: at, staleAt: '2026-10-17T00:00:00.000Z',
+    claimedBy: 'codex', claimSessionKey: 'a'.repeat(64), claimExpiresAt: '2026-10-16T02:00:00.000Z',
+    decisions: [], failedApproaches: [], changedFiles: [], validation: [], nextSteps: [], openQuestions: [], notes: [],
+    history: [{ at, action: 'created' }],
+  };
+  const relative = `repositories/${repoId}/handoffs/${id}.json`;
+  const wrap = (value) => snapshot({ [relative]: JSON.stringify(value) });
+  const heartbeat = (base, at = '2026-10-16T01:00:00.000Z') => ({
+    ...base, claimExpiresAt: '2026-10-16T03:00:00.000Z',
+    history: [...base.history, { at, action: 'claim_renewed', sessionKey: base.claimSessionKey }].slice(-50),
+  });
+  return { record, relative, wrap, heartbeat };
+}
+
+test('agent progress and same-owner heartbeats merge despite retained/truncated history', () => {
+  const { record, relative, wrap, heartbeat } = handoffFixture();
+  record.history = Array.from({ length: 50 }, (_, index) => ({ at: new Date(Date.parse(record.createdAt) + index).toISOString(), action: 'updated', index }));
+  const local = { ...record, currentState: 'new progress', history: [{ at: '2026-10-16T00:30:00.000Z', action: 'updated' }] };
+  const remote = heartbeat(record);
+  for (const [left, right] of [[local, remote], [remote, local]]) {
+    const merged = mergeSyncSnapshots(wrap(record), wrap(left), wrap(right));
+    assert.deepEqual(merged.conflicts, []);
+    const result = JSON.parse(textOf(merged.snapshot, relative));
+    assert.equal(result.currentState, 'new progress');
+    assert.equal(result.claimExpiresAt, remote.claimExpiresAt);
+    assert.equal(result.updatedAt, local.updatedAt);
+    assert.equal(result.history.length, 50);
+    assert.ok(result.history.some((entry) => entry.action === 'claim_renewed'));
+    assert.ok(result.history.some((entry) => entry.at === local.history[0].at));
+  }
+});
+
+test('handoff content conflicts, ownership changes, releases, and modified audit records remain conflicts', () => {
+  const { record, wrap, heartbeat } = handoffFixture();
+  const local = { ...record, currentState: 'local progress' };
+  for (const remote of [
+    { ...record, currentState: 'remote progress' },
+    { ...heartbeat(record), claimSessionKey: 'b'.repeat(64) },
+    { ...heartbeat(record), claimedBy: 'other' },
+    { ...heartbeat(record), claimExpiresAt: null },
+    { ...heartbeat(record), history: [{ ...record.history[0], action: 'tampered' }] },
+  ]) assert.equal(mergeSyncSnapshots(wrap(record), wrap(local), wrap(remote)).conflicts.length, 1);
+});
+
+test('retained historical lease merges only with a verified older audit prefix; fresh shortening conflicts', () => {
+  const { record: old, relative, wrap, heartbeat } = handoffFixture();
+  const base = { ...old, currentState: 'common progress', updatedAt: '2026-10-16T00:30:00.000Z',
+    claimExpiresAt: '2026-10-16T04:00:00.000Z',
+    history: [...old.history, { at: '2026-10-16T00:30:00.000Z', action: 'updated' }] };
+  const remote = { ...heartbeat(base), claimExpiresAt: '2026-10-16T05:00:00.000Z' };
+  const result = mergeSyncSnapshots(wrap(base), wrap(old), wrap(remote));
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(JSON.parse(textOf(result.snapshot, relative)).claimExpiresAt, remote.claimExpiresAt);
+  assert.equal(JSON.parse(textOf(result.snapshot, relative)).currentState, old.currentState);
+  for (const local of [
+    { ...old, updatedAt: '2026-10-16T01:00:00.000Z' },
+    { ...old, history: [{ ...old.history[0], action: 'changed' }] },
+  ]) assert.equal(mergeSyncSnapshots(wrap(base), wrap(local), wrap(remote)).conflicts.length, 1);
+});

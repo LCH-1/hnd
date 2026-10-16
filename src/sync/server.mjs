@@ -433,6 +433,11 @@ export class OpaqueSyncServer {
 
     const revokeMatch = /^\/v1\/devices\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/revoke$/.exec(pathname);
     if (revokeMatch && req.method === 'POST') {
+      // A PC token grants access to workspace data, not the owner's account
+      // management privileges. Other PCs require the web administrator flow.
+      if (revokeMatch[1] !== device.id) {
+        throw new HttpError(403, 'Use an owner or administrator web session to revoke another device');
+      }
       const revoked = await this.control.revokeDevice(device.tenantId, revokeMatch[1]);
       if (!revoked) throw new HttpError(404, 'Device not found');
       send(res, 204);

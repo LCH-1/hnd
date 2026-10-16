@@ -87,7 +87,7 @@ connector는 웹 앱을 설치하는 것이 아니라 로컬 Git 저장소와 �
 Windows 10/11의 PowerShell에서 실행합니다.
 
 ```powershell
-npm install --global '@lch-1/hnd@0.2.2'
+npm install --global '@lch-1/hnd@latest'
 hnd --version
 ```
 
@@ -103,7 +103,7 @@ npm이 사용자 global prefix에 `hnd.cmd`를 만들고 실행 경로를 관리
 일반 `npm install --global`을 사용해도 됩니다.
 
 ```sh
-sudo -H npm install --global '@lch-1/hnd@0.2.2'
+sudo -H npm install --global '@lch-1/hnd@latest'
 hnd --version
 ```
 
@@ -142,7 +142,7 @@ hnd npm help
 갱신하려면 `hnd update apply`를 사용합니다.
 
 `hnd update status`, `check`, `apply`는 서로 독립적인 npm 런처 버전과 중앙
-런타임 버전을 구분해 표시합니다. npm의 `@lch-1/hnd@0.2.2`는 설치와 안전한
+런타임 버전을 구분해 표시합니다. npm의 `@lch-1/hnd@latest`는 설치와 안전한
 업데이트를 담당하는 고정 런처이고, 서버가 배포하는 런타임은 별도 버전 체계
 (`1.0.0`부터 시작)를 사용합니다. 따라서 일반 기능 업데이트에는 npm publish가
 필요하지 않습니다.
@@ -168,7 +168,7 @@ HND 웹에 로그인한 뒤 **기기 → PC 연결**에서 15분짜리 일회용
 예시입니다.
 
 ```sh
-sudo -H npm install --global '@lch-1/hnd@0.2.2' &&
+sudo -H npm install --global '@lch-1/hnd@latest' &&
 printf '%s\n' '웹에서 발급한 일회용 코드' | hnd connect \
   --url https://hnd.example.com \
   --code-stdin \
@@ -193,6 +193,13 @@ global 설치가 root 소유인 상태에서 일반 사용자로 npm을 다시 �
 그 체크아웃에 `default`로 선택됩니다. 보안상 같은 원격 주소인데 Git 이력이
 일치하지 않거나 fork 여부가 모호한 경우에만 자동 연결을 멈추고 `hnd repo link`를
 요청합니다.
+
+1.13.1부터 로컬 체크아웃의 Git 디렉터리 식별자를 저장하므로 폴더와 remote가
+함께 바뀌어도 기존 프로젝트와 환경을 유지합니다. 예전 버전에서 등록한 프로젝트는
+새 경로에서 `hnd init`을 실행하면 기존 경로가 모두 사라졌고 Git 이력이 일치하는
+후보가 하나인 경우 연결을 복구합니다. 기존 경로가 남거나 후보가 여러 개면
+`hnd project link <REPO_ID>`로 명시적으로 연결합니다. `setup`은 에이전트 훅 설치용이며
+프로젝트 연결 복구에는 `init`을 사용합니다.
 
 ## 짧은 명령
 
@@ -520,8 +527,18 @@ hnd sync devices
 정상 사용에서는 `pull`, `merge`, `push`를 매번 실행할 필요가 없습니다. 이
 명령들은 동기화 진단, `attention` 충돌 해결, 과거 revision 복구 같은 수동
 복구용입니다. 두 장치가 서로 다른 파일을 수정한 경우에는 마지막 공통 상태를
-기준으로 안전하게 합치지만, 같은 파일 충돌은 자동으로 어느 한쪽을 덮어쓰지
-않습니다.
+기준으로 안전하게 합칩니다. 1.13.1부터 같은 소유자의 작업 점유 시간·이력 갱신과
+작업 내용 수정이 겹친 경우도 자동 병합합니다. 실제 작업 내용이나 소유자가 충돌하면
+각 버전을 보존하고 확인을 기다립니다. 업데이트 전에 보류된 점유 갱신 충돌도
+저장된 충돌 보고서와 현재 동기화 기준을 검증하고 백업한 뒤 복구합니다.
+1.14.0부터 같은 브랜치의 자동 체크포인트가 두 PC에서 갱신된 경우에는 최신 수집
+시점의 체크포인트 전체를 선택합니다. 서로 다른 시점의 HEAD·파일 목록을 섞지 않습니다.
+수동 `sync merge`에서 발견한 내용 충돌도 자동 전송을 중지하며, 확인 후 `sync push`로
+승인합니다. 인증과 상태 검증을 통과한 수동 동기화가 현재 로컬 상태까지 확인하면
+해결된 attention 표시를 해제합니다.
+
+기기 토큰을 사용하는 `sync revoke`는 현재 기기만 폐기할 수 있습니다. 다른 기기는
+웹의 기기 관리에서 관리자 또는 소유자가 최근 인증 후 폐기합니다.
 
 소스 코드는 hnd 동기화 대상이 아닙니다. 소스 변경은 Git으로 공유하고, hnd는
 룰·체크포인트·작업 인계만 공유합니다.
@@ -540,6 +557,36 @@ hnd doctor
 
 `hnd context`는 현재 Live Context의 revision과 다음 입력 또는 새 세션에 전달될
 최신 합성 snapshot을 보여줍니다.
+
+Claude Code에서 `UserPromptSubmit hook [hnd: checking for updated rules]
+timed out after 2s`가 반복되면 해당 PC에 예전 훅 설정이 남아 있는지 확인하세요.
+규칙 갱신 훅은 서버 동기화와 로컬 합성을 함께 수행하며, 현재 제한 시간은 5초입니다.
+1.13.0부터 업데이트된 Claude 시작·입력 훅이 기존 HND의 2초 설정만 5초로
+자동 갱신합니다. 이미 실행 중인 Claude Code는 설정을 캐시할 수 있으므로 다시
+시작하세요. `hnd setup --agents claude`로도 적용할 수 있으며 사용자 훅과
+더 긴 사용자 지정 timeout은 보존합니다.
+즉시 조치하려면 해당 파일의 `hooks.UserPromptSubmit`에서
+`statusMessage`가 `hnd: checking for updated rules`인 HND 훅의 `timeout`만
+`2`에서 `5`로 바꾼 뒤 Claude Code를 다시 시작하세요.
+
+`hnd doctor`는 설치 상태뿐 아니라 자동 동기화의 pending/attention 상태와
+현재 checkout의 프로젝트 연결 오류도 보고합니다. 훅의 종료 코드가 0이어도
+동기화가 중단되거나 프로젝트 룰 대신 전역 룰만 로드된 상태일 수 있습니다.
+일반 로컬 오류(`local_state`)는 1분 간격으로 로컬 snapshot과 JSON을 검증한 뒤
+자동 동기화를 다시 시도합니다. 점유 갱신만 겹친 안전한 경우를 제외한 실제 충돌과
+인증·무결성·schema 오류는 자동으로 해제하지 않습니다.
+같은 세션이 선택한 작업의 점유가 만료되어도 소유자가 그대로라면 다음 heartbeat에서
+갱신합니다. 새 세션은 `hnd work use --id ID`로 작업을 선택하고
+`hnd work claim --id ID`로 점유해야 하며
+다른 세션이 인계받은 작업은 자동으로 되찾지 않습니다.
+`REPOSITORY_LINK_REQUIRED`는 저장소 후보를 확인한 뒤
+`hnd project link <REPO_ID>`로 연결해야 합니다.
+
+1.14.0은 동기화 전·복원 전에 JSON 도메인 스키마와 실제 정책 조합의 context 용량을
+검증합니다. 복원 중 중단된 상태와 연결 중 일부 파일만 저장된 상태는 저널을 확인해
+재개합니다. 각 동기화 파일의 1MiB, 전체 2MiB 제한은 유지하며, 지식·규칙·작업의
+감사 이력 때문에 파일 한도를 넘는 새 수정은 저장 전에 거부합니다. 기존 본문과
+이력을 자동 삭제하지 않으므로 한도에 도달하면 내용을 줄이거나 별도 항목으로 나눕니다.
 
 ## Cursor 보조 파일
 
@@ -584,7 +631,7 @@ npm run build:npm
 npm test
 npm publish ./dist/npm/package --dry-run
 npm publish ./dist/npm/package
-npm view '@lch-1/hnd@0.2.2' version
+npm view '@lch-1/hnd@latest' version
 ```
 
 npm 비밀번호·OTP·token은 파일이나 채팅에 남기지 않습니다. 같은 version은 다시

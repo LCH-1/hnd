@@ -14,6 +14,7 @@ import {
 import { createSyncServer } from '../src/sync/server.mjs';
 import { parseDeviceInvite } from '../src/remote-cli.mjs';
 import { DEFAULT_SERVER_MASTER_KEY_FILENAME } from '../src/sync/store.mjs';
+import { AccountStore } from '../src/server/account-store.mjs';
 
 async function fixture(t, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hnd-web-api-'));
@@ -1588,4 +1589,61 @@ test('rate limiting separates nginx clients using explicitly trusted private pro
   });
   assert.equal(invalidProxyHeader.response.status, 400);
   assert.equal(invalidProxyHeader.body.error, 'invalid_header');
+});
+
+test('a member PC token cannot bypass administrator device revocation', async (t) => {
+  const { server, url } = await fixture(t);
+  const owner = await registerOwner(server, url);
+  const member = await registerInvitedUser(url, owner, { username: 'member_pc', role: 'member' });
+  const ownerGrant = await server.control.createEnrollmentKey(owner.body.activeTenantId);
+  const enroll = async (key) => jsonRequest(url, '/v1/enroll', {
+    method: 'POST', headers: { Authorization: `Bearer ${key}` },
+  });
+  const ownerPc = await enroll(ownerGrant.enrollmentKey);
+  const memberGrant = await jsonRequest(url, '/api/web/enrollments', {
+    method: 'POST',
+    headers: mutationHeaders({ Cookie: member.cookie, 'X-Hnd-CSRF': member.csrf }),
+    body: {},
+  });
+  assert.equal(memberGrant.response.status, 201);
+  const memberPc = await enroll(memberGrant.body.enrollmentKey);
+  assert.equal(memberPc.response.status, 201);
+  const target = `/v1/devices/${ownerPc.body.device.id}/revoke`;
+  const denied = await jsonRequest(url, target, {
+    method: 'POST', headers: { Authorization: `Bearer ${memberPc.body.deviceToken}` },
+  });
+  assert.equal(denied.response.status, 403);
+  const ownerStillActive = await jsonRequest(url, '/v1/devices', {
+    headers: { Authorization: `Bearer ${ownerPc.body.deviceToken}` },
+  });
+  assert.equal(ownerStillActive.response.status, 200);
+  const selfRevoked = await fetch(`${url}/v1/devices/${memberPc.body.device.id}/revoke`, {
+    method: 'POST', headers: { Authorization: `Bearer ${memberPc.body.deviceToken}` },
+  });
+  assert.equal(selfRevoked.status, 204);
+  const webRevoked = await jsonRequest(url, `/api/web/devices/${ownerPc.body.device.id}/revoke`, {
+    method: 'POST',
+    headers: mutationHeaders({ Cookie: owner.cookie, 'X-Hnd-CSRF': owner.csrf }),
+    body: {},
+  });
+  assert.equal(webRevoked.response.status, 200);
+});
+
+test('web signup endpoints and settings honor policy changed through a second database connection', async (t) => {
+  const { root, server, url } = await fixture(t, { signupMode: 'open' });
+  const owner = await registerOwner(server, url);
+  const other = await new AccountStore(path.join(root, 'data')).init();
+  t.after(() => other.close());
+  other.updateSettings(owner.body.user.id, owner.body.activeTenantId, { signupMode: 'disabled' });
+  assert.equal(server.auth.signupMode, 'open');
+  const bootstrap = await jsonRequest(url, '/api/web/bootstrap');
+  assert.equal(bootstrap.body.signup.allowed, false);
+  const settings = await jsonRequest(url, '/api/web/settings', { headers: { Cookie: owner.cookie } });
+  assert.equal(settings.body.signupMode, 'disabled');
+  const options = await jsonRequest(url, '/api/web/auth/register/options', {
+    method: 'POST', headers: mutationHeaders(), body: { username: 'policy_must_block' },
+  });
+  assert.equal(options.response.status, 403);
+  assert.equal(options.body.error, 'signup_disabled');
+  assert.equal(server.accounts.userCount(), 1);
 });
