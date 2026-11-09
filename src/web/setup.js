@@ -653,10 +653,10 @@ function updateCommands() {
   if (windows) {
     $("#connect-command code").textContent = [
       ...(state.includeConnectorInstall
-        ? [`npm install --global ${powerShellQuote(CONNECTOR_PACKAGE_SPEC)}`]
+        ? [`npm.cmd install --global ${powerShellQuote(CONNECTOR_PACKAGE_SPEC)}`]
         : []),
-      `${powerShellQuote(connectionCode)} | hnd connect --url ${powerShellQuote(origin)} --code-stdin --name ${powerShellQuote(name)}`,
-      "hnd setup",
+      `${powerShellQuote(connectionCode)} | hnd.cmd connect --url ${powerShellQuote(origin)} --code-stdin --name ${powerShellQuote(name)}`,
+      "hnd.cmd setup",
     ].join("\n");
   } else {
     $("#connect-command code").textContent = [
