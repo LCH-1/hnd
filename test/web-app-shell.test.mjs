@@ -22,7 +22,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.doesNotMatch(snapshotData, /rememberedAt|WORKSPACE_HINT_KEY/u);
   assert.match(worker, /request\.mode === "navigate" && isAppNavigation/u);
   assert.match(worker, /async function staticAsset[\s\S]*?await fetch\(request\)/u);
-  assert.match(worker, /hnd-app-shell-v41/u);
+  assert.match(worker, /hnd-app-shell-v45/u);
   assert.match(worker, /\/web\/select-picker\.js/u);
   assert.match(html, /class="app-title sr-only"/u);
   assert.match(html, /class="app-mobile-brand"/u);
@@ -72,7 +72,7 @@ test('app shell supports encrypted offline reopen without caching APIs or accoun
   assert.match(app, /createAccountConnection\(\{ ttlSeconds: 900 \}\)/u);
   assert.doesNotMatch(app, /createDeviceInvitation|pairBrowserVault/u);
   assert.match(app, /npm install --global/u);
-  assert.doesNotMatch(app, /npm\.cmd/u);
+  assert.match(app, /npm\.cmd install --global/u);
   assert.match(app, /deviceInstallPlatform: "linux"/u);
   assert.match(app, /includeDeviceConnectorInstall: true/u);
   assert.match(app, /hnd connect --url/u);

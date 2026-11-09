@@ -111,7 +111,7 @@ test('setup keeps a server retry path and lets users defer the optional PC conne
   assert.match(script, /installPlatform: "linux"/u);
   assert.match(script, /includeConnectorInstall: true/u);
   assert.match(script, /npm install --global/u);
-  assert.doesNotMatch(script, /npm\.cmd/u);
+  assert.match(script, /npm\.cmd install --global/u);
   assert.match(script, /hnd connect --url/u);
   assert.match(script, /"hnd setup"/u);
   assert.match(script, /sudo -H/u);
